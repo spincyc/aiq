@@ -322,7 +322,10 @@ class JournalTest(unittest.TestCase):
             finally:
                 connection.close()
 
-            with self.assertRaises(JournalError):
+            with self.assertRaisesRegex(
+                JournalError,
+                "different message identity",
+            ) as caught:
                 ingest_message(
                     scope,
                     "different",
@@ -330,6 +333,7 @@ class JournalTest(unittest.TestCase):
                     turn_id="turn",
                     cwd=str(root),
                 )
+            self.assertEqual(caught.exception.code, "state_conflict")
 
     def test_replay_returns_original_event_despite_recovery_events(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -405,10 +409,26 @@ class JournalTest(unittest.TestCase):
             try:
                 blocker.execute("BEGIN IMMEDIATE")
                 with patch.object(journal_module, "_connect", impatient_connect):
-                    with self.assertRaisesRegex(JournalError, "locked|busy"):
+                    with self.assertRaisesRegex(
+                        JournalError,
+                        "locked|busy",
+                    ) as caught:
                         ingest_message(scope, "contended", cwd=str(root))
             finally:
                 blocker.close()
+            self.assertEqual(caught.exception.code, "contention")
+
+    def test_missing_journal_errors_carry_not_found_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            scope = self.agent_scope(Path(temporary_directory))
+            for operation in (create_snapshot, check_journal):
+                with self.subTest(operation=operation.__name__):
+                    with self.assertRaisesRegex(
+                        JournalError,
+                        "does not exist",
+                    ) as caught:
+                        operation(scope)
+                    self.assertEqual(caught.exception.code, "not_found")
 
     def test_inbox_hides_content_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

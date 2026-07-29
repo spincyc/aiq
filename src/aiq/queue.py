@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -8,9 +9,10 @@ import json
 import re
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Iterator
 
 from aiq.journal import (
+    MESSAGE_LIFECYCLE_EVENT_SQL,
     JournalError,
     JournalScope,
     _connect,
@@ -21,6 +23,10 @@ from aiq.journal import (
 
 EFFECT_DOCUMENT_MAX_BYTES = 65536
 EFFECT_COUNT_MAX = 64
+# The reportable message states. Deliberately omits 'superseded' even
+# though MESSAGE_LIFECYCLE_EVENTS recognizes 'message.superseded': no
+# writer emits that event today, so status surfaces report only the five
+# reachable states while the lifecycle queries stay forward-compatible.
 MESSAGE_STATES = (
     "received",
     "processing",
@@ -55,6 +61,37 @@ CLAIM_ID_PATTERN = re.compile(r"clm_[0-9a-f]{32}\Z")
 
 def _now_us() -> int:
     return time.time_ns() // 1000
+
+
+def _z_timestamp(value: str) -> str:
+    """Render one UTC ISO-8601 timestamp with a Z suffix."""
+
+    return value.replace("+00:00", "Z")
+
+
+def _us_timestamp(value: int) -> str:
+    """Render one microsecond epoch timestamp as Z-suffixed ISO-8601."""
+
+    return _z_timestamp(
+        datetime.fromtimestamp(value / 1_000_000, tz=timezone.utc)
+        .isoformat(timespec="microseconds")
+    )
+
+
+def _claim_summary(claim: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
+    """Render one claim's public summary with a Z-suffixed expiry."""
+
+    return {
+        "claim_id": claim["claim_id"],
+        "owner_id": claim["owner_id"],
+        "expires_at": _us_timestamp(claim["expires_at_us"]),
+    }
+
+
+def _queue_order_key(task: dict[str, Any]) -> tuple[int, int, int]:
+    """Order queue candidates by priority, then stable creation order."""
+
+    return (-task["priority"], task["created_sequence"], task["task_number"])
 
 
 def _reject_constant(value: str) -> None:
@@ -591,14 +628,7 @@ def claim_message(
                 ) AS rank
               FROM events AS event
               WHERE event.message_id IS NOT NULL
-                AND event.event_type IN (
-                  'message.received',
-                  'message.processing',
-                  'message.applied',
-                  'message.needs_input',
-                  'message.failed',
-                  'message.superseded'
-                )
+                AND event.event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
             )
             SELECT message.*
             FROM messages AS message
@@ -629,7 +659,10 @@ def claim_message(
                 ).fetchone()
                 if not exists:
                     raise JournalError(f"message not found: {message_id}")
-                raise JournalError(f"message is not claimable: {message_id}")
+                raise JournalError(
+                    f"message is not claimable: {message_id}",
+                    code="not_claimable",
+                )
             connection.commit()
             return None
         claim = _claim_resource(
@@ -708,13 +741,7 @@ def claim_next_tasks(
             for task in tasks.values()
             if states[task["task_id"]] == "ready"
         ]
-        candidates.sort(
-            key=lambda task: (
-                -task["priority"],
-                task["created_sequence"],
-                task["task_number"],
-            )
-        )
+        candidates.sort(key=_queue_order_key)
         claimed: list[dict[str, Any]] = []
         for task in candidates[:limit]:
             claim = _claim_resource(
@@ -991,14 +1018,31 @@ def dispose_message(
         connection.close()
 
 
-def _load_current_tasks_snapshot(
-    connection: sqlite3.Connection,
-) -> dict[str, dict[str, Any]]:
-    connection.execute("BEGIN DEFERRED")
+@contextmanager
+def _read_snapshot(
+    scope: JournalScope,
+    now_us: int | None = None,
+) -> Iterator[tuple[sqlite3.Connection, int]]:
+    """Yield (connection, effective_now) inside one closed read snapshot.
+
+    Every read path shares this transaction lifecycle: one BEGIN DEFERRED
+    transaction whose snapshot is pinned before the clock is sampled, a
+    guaranteed rollback, and a guaranteed close of the connection.
+    """
+
+    connection = _connect(scope)
     try:
-        return _load_current_tasks(connection)
+        connection.execute("BEGIN DEFERRED")
+        try:
+            # Pin the WAL read snapshot before sampling the clock so the
+            # claim-expiry comparisons and every later SELECT observe one
+            # consistent instant of the database.
+            connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            yield connection, (_now_us() if now_us is None else now_us)
+        finally:
+            connection.rollback()
     finally:
-        connection.rollback()
+        connection.close()
 
 
 def list_tasks(
@@ -1011,9 +1055,8 @@ def list_tasks(
         raise JournalError("task limit must be between 1 and 1000")
     if states and not states <= set(TASK_STATES):
         raise JournalError("unsupported task state filter")
-    connection = _connect(scope)
-    try:
-        tasks = _load_current_tasks_snapshot(connection)
+    with _read_snapshot(scope) as (connection, effective_now):
+        tasks = _load_current_tasks(connection, now_us=effective_now)
         effective = _effective_states(tasks)
         selected = [
             task
@@ -1024,33 +1067,22 @@ def list_tasks(
                 else effective[task["task_id"]] not in TERMINAL_STATES
             )
         ]
-        selected.sort(
-            key=lambda task: (
-                -task["priority"],
-                task["created_sequence"],
-                task["task_number"],
-            )
-        )
+        selected.sort(key=_queue_order_key)
         return [
             _task_output(task, effective[task["task_id"]], effective)
             for task in selected[:limit]
         ]
-    finally:
-        connection.close()
 
 
 def show_task(scope: JournalScope, task_id: str) -> dict[str, Any]:
     if not TASK_ID_PATTERN.fullmatch(task_id):
         raise JournalError(f"invalid task ID: {task_id}")
-    connection = _connect(scope)
-    try:
-        tasks = _load_current_tasks_snapshot(connection)
+    with _read_snapshot(scope) as (connection, effective_now):
+        tasks = _load_current_tasks(connection, now_us=effective_now)
         if task_id not in tasks:
             raise JournalError(f"task not found: {task_id}")
         effective = _effective_states(tasks)
         return _task_output(tasks[task_id], effective[task_id], effective)
-    finally:
-        connection.close()
 
 
 def next_tasks(
@@ -1069,6 +1101,13 @@ def read_status(
     ready_limit: int = 5,
     now_us: int | None = None,
 ) -> dict[str, Any]:
+    """Summarize message, task, and claim counts plus the top ready tasks.
+
+    Reports bounded counts only -- never message or task content -- from
+    one read snapshot. A missing journal yields empty counts without
+    creating the journal.
+    """
+
     if ready_limit < 1 or ready_limit > 64:
         raise JournalError("queue limit must be between 1 and 64")
     message_counts = dict.fromkeys(MESSAGE_STATES, 0)
@@ -1081,12 +1120,9 @@ def read_status(
     }
     if not scope.journal_path.exists():
         return result
-    effective_now = _now_us() if now_us is None else now_us
-    connection = _connect(scope)
-    try:
-        connection.execute("BEGIN")
+    with _read_snapshot(scope, now_us) as (connection, effective_now):
         rows = connection.execute(
-            """
+            f"""
             WITH lifecycle AS (
               SELECT
                 event.message_id,
@@ -1097,14 +1133,7 @@ def read_status(
                 ) AS rank
               FROM events AS event
               WHERE event.message_id IS NOT NULL
-                AND event.event_type IN (
-                  'message.received',
-                  'message.processing',
-                  'message.applied',
-                  'message.needs_input',
-                  'message.failed',
-                  'message.superseded'
-                )
+                AND event.event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
             )
             SELECT
               CASE WHEN
@@ -1142,13 +1171,7 @@ def read_status(
             for task in tasks.values()
             if states[task["task_id"]] == "ready"
         ]
-        ready.sort(
-            key=lambda task: (
-                -task["priority"],
-                task["created_sequence"],
-                task["task_number"],
-            )
-        )
+        ready.sort(key=_queue_order_key)
         result["ready"] = [
             {
                 "task_id": task["task_id"],
@@ -1169,14 +1192,6 @@ def read_status(
             (effective_now,),
         ).fetchone()["total"]
         return result
-    finally:
-        connection.rollback()
-def _us_timestamp(value: int) -> str:
-    return (
-        datetime.fromtimestamp(value / 1_000_000, tz=timezone.utc)
-        .isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
-    )
 
 
 def _explanation(
@@ -1207,72 +1222,60 @@ def _explanation(
         return (
             f"superseded by {task['superseded_by_task_id']}: {task['reason']}"
         )
-    return "done"
+    if state == "done":
+        return "done"
+    raise JournalError(f"unknown task state: {state}")
 
 
-def explain_task(scope: JournalScope, task_id: str) -> dict[str, Any]:
+def explain_task(
+    scope: JournalScope,
+    task_id: str,
+    *,
+    now_us: int | None = None,
+) -> dict[str, Any]:
     """Explain one task's effective queue state from a single snapshot."""
 
     if not TASK_ID_PATTERN.fullmatch(task_id):
         raise JournalError(f"invalid task ID: {task_id}")
-    connection = _connect(scope)
-    try:
-        connection.execute("BEGIN")
-        tasks = _load_current_tasks(connection)
+    with _read_snapshot(scope, now_us) as (connection, effective_now):
+        tasks = _load_current_tasks(connection, now_us=effective_now)
         if task_id not in tasks:
             raise JournalError(f"task not found: {task_id}")
         states = _effective_states(tasks)
         task = tasks[task_id]
-        state = states[task_id]
+        output = _task_output(task, states[task_id], states)
         prerequisites = [
             {
                 "task_id": dependency,
                 "state": states[dependency],
                 "satisfied": states[dependency] == "done",
             }
-            for dependency in sorted(task["dependencies"])
+            for dependency in sorted(output["dependencies"])
         ]
-        blocked_by = [
-            prerequisite["task_id"]
-            for prerequisite in prerequisites
-            if prerequisite["state"] in FAILURE_STATES
-        ]
-        waiting_on = [
-            prerequisite["task_id"]
-            for prerequisite in prerequisites
-            if prerequisite["state"] not in {"done", *FAILURE_STATES}
-        ]
-        claim = task.get("claim")
         lease = (
-            {
-                "claim_id": claim["claim_id"],
-                "owner_id": claim["owner_id"],
-                "expires_at": _us_timestamp(claim["expires_at_us"]),
-            }
-            if claim is not None
+            _claim_summary(output["claim"])
+            if output["claim"] is not None
             else None
         )
         return {
             "task_id": task_id,
-            "revision": task["revision"],
-            "state": state,
-            "recorded_state": task["state"],
+            "revision": output["revision"],
+            "state": output["state"],
+            "recorded_state": output["recorded_state"],
             "prerequisites": prerequisites,
-            "blocked_by": blocked_by,
-            "waiting_on": waiting_on,
+            "blocked_by": output["blocked_by"],
+            "waiting_on": output["waiting_on"],
             "claim": lease,
-            "reason": task["reason"],
-            "superseded_by_task_id": task["superseded_by_task_id"],
+            "reason": output["reason"],
+            "superseded_by_task_id": output["superseded_by_task_id"],
             "explanation": _explanation(
                 task,
-                state,
+                output["state"],
                 lease,
-                blocked_by,
-                waiting_on,
+                output["blocked_by"],
+                output["waiting_on"],
             ),
         }
-    finally:
-        connection.close()
 
 
 _HISTORY_TASK_EVENTS = {
@@ -1285,7 +1288,6 @@ _HISTORY_TASK_EVENTS = {
 
 
 def _history_detail(
-    connection: sqlite3.Connection,
     task_id: str,
     row: sqlite3.Row,
     payload: dict[str, Any],
@@ -1310,20 +1312,11 @@ def _history_detail(
         }
     if event_type not in _HISTORY_TASK_EVENTS:
         return {}
-    revision = connection.execute(
-        """
-        SELECT revision, state, reason, superseded_by_task_id,
-               dependencies_json
-        FROM task_revisions
-        WHERE task_id = ? AND event_sequence = ?
-        """,
-        (task_id, row["sequence"]),
-    ).fetchone()
-    if revision is None:
+    if row["revision"] is None:
         raise JournalError(f"task event has no revision: {task_id}")
-    detail: dict[str, Any] = {"revision": revision["revision"]}
+    detail: dict[str, Any] = {"revision": row["revision"]}
     if event_type == "task.created":
-        detail["state"] = revision["state"]
+        detail["state"] = row["state"]
     elif event_type == "task.revised":
         effect = payload.get("effect")
         patch = (
@@ -1335,26 +1328,24 @@ def _history_detail(
         )
         detail["fields"] = sorted(patch)
     elif event_type == "task.state_changed":
-        detail["state"] = revision["state"]
-        detail["reason"] = revision["reason"]
-        detail["superseded_by_task_id"] = revision["superseded_by_task_id"]
+        detail["state"] = row["state"]
+        detail["reason"] = row["reason"]
+        detail["superseded_by_task_id"] = row["superseded_by_task_id"]
     else:
-        previous = connection.execute(
-            """
-            SELECT dependencies_json
-            FROM task_revisions
-            WHERE task_id = ? AND revision = ?
-            """,
-            (task_id, revision["revision"] - 1),
-        ).fetchone()
+        # The dependency delta is deliberately derived by diffing stored
+        # revisions rather than by reading the event payload: payload
+        # references may carry unresolved local aliases ("$name"), while
+        # revisions always hold canonical task IDs. The audit guarantees
+        # each dependency event changes exactly one edge.
         before = (
-            set(json.loads(previous["dependencies_json"]))
-            if previous is not None
+            set(json.loads(row["previous_dependencies_json"]))
+            if row["previous_dependencies_json"] is not None
             else set()
         )
-        after = set(json.loads(revision["dependencies_json"]))
+        after = set(json.loads(row["dependencies_json"]))
         changed = sorted(after ^ before)
-        detail["dependency"] = changed[0] if changed else None
+        assert len(changed) == 1, changed
+        detail["dependency"] = changed[0]
     return detail
 
 
@@ -1370,31 +1361,56 @@ def task_history(
         raise JournalError(f"invalid task ID: {task_id}")
     if limit < 1 or limit > 1000:
         raise JournalError("history limit must be between 1 and 1000")
-    connection = _connect(scope)
-    try:
-        connection.execute("BEGIN")
+    with _read_snapshot(scope) as (connection, _effective_now):
         exists = connection.execute(
             "SELECT 1 FROM tasks WHERE task_id = ?",
             (task_id,),
         ).fetchone()
         if not exists:
             raise JournalError(f"task not found: {task_id}")
+        # One query joins events to their task revisions; the LAG window
+        # supplies the previous revision's dependencies for dependency
+        # deltas. The window runs over all of the task's revisions, so a
+        # limited page still sees its predecessors.
         rows = connection.execute(
             """
-            SELECT sequence, occurred_at, event_type, payload_json
-            FROM events
-            WHERE task_id = ?
-            ORDER BY sequence DESC
+            SELECT
+              event.occurred_at,
+              event.event_type,
+              event.payload_json,
+              revision.revision,
+              revision.state,
+              revision.reason,
+              revision.superseded_by_task_id,
+              revision.dependencies_json,
+              revision.previous_dependencies_json
+            FROM events AS event
+            LEFT JOIN (
+              SELECT
+                event_sequence,
+                revision,
+                state,
+                reason,
+                superseded_by_task_id,
+                dependencies_json,
+                LAG(dependencies_json) OVER (
+                  ORDER BY revision
+                ) AS previous_dependencies_json
+              FROM task_revisions
+              WHERE task_id = ?
+            ) AS revision
+              ON revision.event_sequence = event.sequence
+            WHERE event.task_id = ?
+            ORDER BY event.sequence DESC
             LIMIT ?
             """,
-            (task_id, limit),
+            (task_id, task_id, limit),
         ).fetchall()
         return [
             {
-                "occurred_at": row["occurred_at"],
+                "occurred_at": _z_timestamp(row["occurred_at"]),
                 "type": row["event_type"],
                 "detail": _history_detail(
-                    connection,
                     task_id,
                     row,
                     json.loads(row["payload_json"]),
@@ -1402,8 +1418,6 @@ def task_history(
             }
             for row in rows
         ]
-    finally:
-        connection.close()
 
 
 def list_claims(
@@ -1430,23 +1444,21 @@ def list_claims(
         if owner_id is None
         else _text(owner_id, path="owner_id", minimum=1, maximum=200)
     )
-    effective_now = _now_us() if now_us is None else now_us
-    conditions = ["release.claim_id IS NULL"]
-    parameters: list[Any] = []
-    if owner is not None:
-        conditions.append("claim.owner_id = ?")
-        parameters.append(owner)
-    if resource_kind is not None:
-        conditions.append("claim.resource_kind = ?")
-        parameters.append(resource_kind)
-    if status == "active":
-        conditions.append("claim.expires_at_us > ?")
-        parameters.append(effective_now)
-    elif status == "expired":
-        conditions.append("claim.expires_at_us <= ?")
-        parameters.append(effective_now)
-    connection = _connect(scope)
-    try:
+    with _read_snapshot(scope, now_us) as (connection, effective_now):
+        conditions = ["release.claim_id IS NULL"]
+        parameters: list[Any] = []
+        if owner is not None:
+            conditions.append("claim.owner_id = ?")
+            parameters.append(owner)
+        if resource_kind is not None:
+            conditions.append("claim.resource_kind = ?")
+            parameters.append(resource_kind)
+        if status == "active":
+            conditions.append("claim.expires_at_us > ?")
+            parameters.append(effective_now)
+        elif status == "expired":
+            conditions.append("claim.expires_at_us <= ?")
+            parameters.append(effective_now)
         rows = connection.execute(
             f"""
             SELECT
@@ -1467,12 +1479,10 @@ def list_claims(
         ).fetchall()
         return [
             {
-                "claim_id": row["claim_id"],
+                **_claim_summary(row),
                 "resource_kind": row["resource_kind"],
                 "resource_id": row["resource_id"],
-                "owner_id": row["owner_id"],
                 "basis_revision": row["basis_revision"],
-                "expires_at": _us_timestamp(row["expires_at_us"]),
                 "status": (
                     "active"
                     if row["expires_at_us"] > effective_now
@@ -1481,8 +1491,6 @@ def list_claims(
             }
             for row in rows
         ]
-    finally:
-        connection.close()
 
 
 def _resolve(reference: str, aliases: dict[str, str]) -> str:
@@ -1608,21 +1616,14 @@ def apply_effects(
             return result
 
         message = connection.execute(
-            """
+            f"""
             SELECT
               message.message_id,
               (
                 SELECT event_type
                 FROM events
                 WHERE message_id = message.message_id
-                  AND event_type IN (
-                    'message.received',
-                    'message.processing',
-                    'message.applied',
-                    'message.needs_input',
-                    'message.failed',
-                    'message.superseded'
-                  )
+                  AND event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
                 ORDER BY sequence DESC
                 LIMIT 1
               ) AS state_event_type

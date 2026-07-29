@@ -20,6 +20,26 @@ import uuid
 SCHEMA_VERSION = 2
 SQLITE_MINIMUM_VERSION = (3, 37, 0)
 
+# Every event type that can record a message's lifecycle state. The latest
+# of these per message defines its current state. 'message.superseded' is
+# deliberately included even though no current writer emits it and the
+# reportable-state surface (queue.MESSAGE_STATES) omits it: recognizing it
+# here keeps any future supersession event terminal instead of silently
+# falling back to an older lifecycle event and misreporting the message.
+MESSAGE_LIFECYCLE_EVENTS = (
+    "message.received",
+    "message.processing",
+    "message.applied",
+    "message.needs_input",
+    "message.failed",
+    "message.superseded",
+)
+# Static SQL fragment for `event_type IN (...)` filters; the event names
+# are module constants, never user input.
+MESSAGE_LIFECYCLE_EVENT_SQL = ", ".join(
+    f"'{event}'" for event in MESSAGE_LIFECYCLE_EVENTS
+)
+
 
 class JournalError(RuntimeError):
     """Journal operation failed.
@@ -1363,7 +1383,10 @@ def _begin_immediate(connection: sqlite3.Connection) -> None:
     try:
         connection.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError as error:
-        raise JournalError(f"journal write contention: {error}") from error
+        raise JournalError(
+            f"journal write contention: {error}",
+            code="contention",
+        ) from error
 
 
 def ingest_message(
@@ -1417,7 +1440,7 @@ def ingest_message(
         _begin_immediate(connection)
         if effective_key:
             existing = connection.execute(
-                """
+                f"""
                 SELECT
                   m.message_id,
                   m.content_sha256,
@@ -1431,14 +1454,7 @@ def ingest_message(
                     SELECT state.event_type
                     FROM events AS state
                     WHERE state.message_id = m.message_id
-                      AND state.event_type IN (
-                        'message.received',
-                        'message.processing',
-                        'message.applied',
-                        'message.needs_input',
-                        'message.failed',
-                        'message.superseded'
-                      )
+                      AND state.event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
                     ORDER BY state.sequence DESC
                     LIMIT 1
                   ) AS state_event_type
@@ -1470,7 +1486,8 @@ def ingest_message(
                 if existing_identity != requested_identity:
                     raise JournalError(
                         "idempotency key already belongs to a different "
-                        "message identity"
+                        "message identity",
+                        code="state_conflict",
                     )
                 connection.commit()
                 return IngestResult(
@@ -1537,7 +1554,10 @@ def ingest_message(
         raise JournalError(f"journal integrity violation: {error}") from error
     except sqlite3.OperationalError as error:
         connection.rollback()
-        raise JournalError(f"journal write contention: {error}") from error
+        raise JournalError(
+            f"journal write contention: {error}",
+            code="contention",
+        ) from error
     except Exception:
         connection.rollback()
         raise
@@ -1556,21 +1576,14 @@ def find_message_by_idempotency_key(
     connection = _connect(scope)
     try:
         row = connection.execute(
-            """
+            f"""
             SELECT
               m.message_id,
               (
                 SELECT state.event_type
                 FROM events AS state
                 WHERE state.message_id = m.message_id
-                  AND state.event_type IN (
-                    'message.received',
-                    'message.processing',
-                    'message.applied',
-                    'message.needs_input',
-                    'message.failed',
-                    'message.superseded'
-                  )
+                  AND state.event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
                 ORDER BY state.sequence DESC
                 LIMIT 1
               ) AS state_event_type
@@ -1621,14 +1634,7 @@ def list_inbox(
                 ) AS rank
               FROM events
               WHERE message_id IS NOT NULL
-                AND event_type IN (
-                  'message.received',
-                  'message.processing',
-                  'message.applied',
-                  'message.needs_input',
-                  'message.failed',
-                  'message.superseded'
-                )
+                AND event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
             )
             SELECT
               m.message_id,
@@ -1699,7 +1705,10 @@ def create_snapshot(
     if keep < 1:
         raise JournalError("snapshot retention must be positive")
     if not scope.journal_path.exists():
-        raise JournalError(f"journal does not exist: {scope.journal_path}")
+        raise JournalError(
+            f"journal does not exist: {scope.journal_path}",
+            code="not_found",
+        )
 
     with lifecycle_lock(scope, exclusive=False):
         _check_journal_locked(scope)
@@ -1748,7 +1757,10 @@ def create_snapshot(
 
 def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
     if not scope.journal_path.exists():
-        raise JournalError(f"journal does not exist: {scope.journal_path}")
+        raise JournalError(
+            f"journal does not exist: {scope.journal_path}",
+            code="not_found",
+        )
     _initialize_journal(scope)
     connection = sqlite3.connect(scope.journal_path, timeout=10)
     try:

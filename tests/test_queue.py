@@ -13,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from aiq import queue as queue_module
 from aiq.journal import (
     JournalError,
     check_journal,
@@ -30,12 +31,15 @@ from aiq.queue import (
     claim_next_tasks,
     claim_task,
     dispose_message,
+    explain_task,
+    list_claims,
     list_tasks,
     next_tasks,
     parse_effect_document,
     read_status,
     release_claim,
     show_task,
+    task_history,
 )
 
 
@@ -515,8 +519,9 @@ class QueueTest(unittest.TestCase):
                 )
             return _now_us()
 
-        # list_tasks calls _now_us between its tasks and claims SELECTs;
-        # a writer committing a new claimed task there must not be visible.
+        # _read_snapshot pins its read snapshot before sampling the clock
+        # via _now_us; a writer committing a new claimed task at that
+        # moment must not be visible to the snapshot's later SELECTs.
         with patch("aiq.queue._now_us", write_between_selects):
             listed = list_tasks(self.scope)
 
@@ -956,12 +961,13 @@ class QueueTest(unittest.TestCase):
         self.assertFalse(first["replayed"])
         self.assertTrue(second["replayed"])
         self.assertEqual(list_inbox(self.scope)[0]["state"], "needs_input")
-        with self.assertRaisesRegex(JournalError, "not claimable"):
+        with self.assertRaisesRegex(JournalError, "not claimable") as caught:
             claim_message(
                 self.scope,
                 owner_id="other",
                 message_id=message.message_id,
             )
+        self.assertEqual(caught.exception.code, "not_claimable")
         self.assertEqual(check_journal(self.scope)["status"], "ok")
 
     def test_claim_release_is_retryable(self) -> None:
@@ -1207,6 +1213,73 @@ class QueueTest(unittest.TestCase):
         for result in completed:
             self.assertNotIn("\u001b", result.stdout)
             self.assertIn("\\u001b", result.stdout)
+
+    def test_read_paths_close_connections_on_success_and_error(self) -> None:
+        created = self.apply(
+            self.ingest("Create observed work").message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$work", {"title": "Observed work"}]],
+            },
+        )
+        task_id = created["aliases"]["$work"]
+        captured: list[sqlite3.Connection] = []
+        original_connect = queue_module._connect
+
+        def capturing_connect(scope):
+            connection = original_connect(scope)
+            captured.append(connection)
+            return connection
+
+        with patch.object(queue_module, "_connect", capturing_connect):
+            list_tasks(self.scope)
+            show_task(self.scope, task_id)
+            read_status(self.scope)
+            explain_task(self.scope, task_id)
+            task_history(self.scope, task_id)
+            list_claims(self.scope)
+            with self.assertRaisesRegex(JournalError, "task not found"):
+                explain_task(self.scope, "TASK-999")
+
+        self.assertEqual(len(captured), 7)
+        for connection in captured:
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                connection.execute("SELECT 1")
+
+    def test_explain_task_now_us_exercises_lease_expiry(self) -> None:
+        created = self.apply(
+            self.ingest("Create leased work").message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$work", {"title": "Leased work"}]],
+            },
+        )
+        task_id = created["aliases"]["$work"]
+        start_us = _now_us()
+        claim = claim_task(
+            self.scope,
+            task_id,
+            owner_id="worker",
+            lease_seconds=1,
+            now_us=start_us,
+        )["claim"]
+
+        active = explain_task(self.scope, task_id, now_us=start_us + 500_000)
+        self.assertEqual(active["state"], "active")
+        self.assertEqual(active["claim"]["claim_id"], claim["claim_id"])
+        self.assertEqual(active["claim"]["owner_id"], "worker")
+        self.assertTrue(active["claim"]["expires_at"].endswith("Z"))
+        self.assertEqual(
+            active["explanation"],
+            f"active: leased by worker until {active['claim']['expires_at']}",
+        )
+
+        expired = explain_task(self.scope, task_id, now_us=start_us + 1_000_001)
+        self.assertEqual(expired["state"], "ready")
+        self.assertIsNone(expired["claim"])
+        self.assertEqual(expired["explanation"], "ready: no prerequisites")
 
     def test_read_status_reports_bounded_counts_without_content(self) -> None:
         self.assertEqual(
