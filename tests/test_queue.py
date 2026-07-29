@@ -23,6 +23,7 @@ from aiq.journal import (
 from aiq.queue import (
     TRANSITIONS,
     _effective_states,
+    _now_us,
     _validate_graph,
     apply_effects,
     claim_message,
@@ -32,6 +33,7 @@ from aiq.queue import (
     list_tasks,
     next_tasks,
     parse_effect_document,
+    read_status,
     release_claim,
     show_task,
 )
@@ -402,10 +404,125 @@ class QueueTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(JournalError, "exceeds"):
             parse_effect_document(" " * 65537)
+        with self.assertRaisesRegex(JournalError, r"document\.v must be 1"):
+            parse_effect_document(
+                '{"v":1.0,"expect":{},"effects":[],"reason":"float version"}'
+            )
         with self.assertRaisesRegex(JournalError, "unknown operation"):
             parse_effect_document(
                 '{"v":1,"expect":{},"effects":[[["not-a-string"]]]}'
             )
+
+    def test_unknown_alias_reference_is_a_journal_error(self) -> None:
+        message = self.ingest("Create referenced work")
+        result = self.apply(
+            message.message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$work", {"title": "Work"}]],
+            },
+        )
+        work = result["aliases"]["$work"]
+        attempts = (
+            (
+                "create.parent",
+                {},
+                [["create", "$child", {"title": "Child", "parent": "$missing"}]],
+            ),
+            (
+                "create.requires",
+                {},
+                [["create", "$child", {"title": "Child", "requires": ["$missing"]}]],
+            ),
+            (
+                "update.parent",
+                {work: 1},
+                [["update", work, {"parent": "$missing"}]],
+            ),
+            (
+                "transition.by",
+                {work: 1},
+                [
+                    [
+                        "transition",
+                        work,
+                        "superseded",
+                        {"reason": "replace", "by": "$missing"},
+                    ]
+                ],
+            ),
+        )
+        for name, expect, effects in attempts:
+            with self.subTest(position=name):
+                attempt = self.ingest(f"Reject unknown alias in {name}")
+                with self.assertRaisesRegex(
+                    JournalError,
+                    r"unknown local task alias: \$missing",
+                ):
+                    self.apply(
+                        attempt.message_id,
+                        {"v": 1, "expect": expect, "effects": effects},
+                    )
+        self.assertEqual(show_task(self.scope, work)["revision"], 1)
+
+    def test_apply_rejects_oversized_document_dict(self) -> None:
+        message = self.ingest("Reject oversized document")
+        document = {
+            "v": 1,
+            "expect": {},
+            "effects": [
+                [
+                    "create",
+                    f"$task-{index}",
+                    {"title": "Padded", "objective": "x" * 2000},
+                ]
+                for index in range(40)
+            ],
+        }
+        with self.assertRaisesRegex(JournalError, "exceeds 65536 bytes"):
+            self.apply(message.message_id, document)
+        self.assertEqual(list_tasks(self.scope), [])
+
+    def test_read_snapshot_ignores_writer_between_selects(self) -> None:
+        setup_message = self.ingest("Create surviving work")
+        survivor = self.apply(
+            setup_message.message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$survivor", {"title": "Survivor"}]],
+            },
+        )["aliases"]["$survivor"]
+        contested_message = self.ingest("Create contested work")
+        fired = threading.Event()
+
+        def write_between_selects() -> int:
+            if not fired.is_set():
+                fired.set()
+                created = self.apply(
+                    contested_message.message_id,
+                    {
+                        "v": 1,
+                        "expect": {},
+                        "effects": [["create", "$contested", {"title": "Contested"}]],
+                    },
+                )
+                claim_task(
+                    self.scope,
+                    created["aliases"]["$contested"],
+                    owner_id="racer",
+                )
+            return _now_us()
+
+        # list_tasks calls _now_us between its tasks and claims SELECTs;
+        # a writer committing a new claimed task there must not be visible.
+        with patch("aiq.queue._now_us", write_between_selects):
+            listed = list_tasks(self.scope)
+
+        self.assertTrue(fired.is_set())
+        self.assertEqual([task["task_id"] for task in listed], [survivor])
+        self.assertEqual(len(list_tasks(self.scope)), 2)
 
     def test_failed_dependency_cannot_be_activated(self) -> None:
         message = self.ingest("Create dependent work")
@@ -1090,6 +1207,151 @@ class QueueTest(unittest.TestCase):
         for result in completed:
             self.assertNotIn("\u001b", result.stdout)
             self.assertIn("\\u001b", result.stdout)
+
+    def test_read_status_reports_bounded_counts_without_content(self) -> None:
+        self.assertEqual(
+            read_status(self.scope),
+            {
+                "messages": {
+                    "received": 0,
+                    "processing": 0,
+                    "applied": 0,
+                    "needs_input": 0,
+                    "failed": 0,
+                },
+                "tasks": {
+                    "queued": 0,
+                    "ready": 0,
+                    "active": 0,
+                    "blocked": 0,
+                    "done": 0,
+                    "canceled": 0,
+                    "superseded": 0,
+                },
+                "claims": {"active": 0},
+                "ready": [],
+            },
+        )
+
+        created = self.apply(
+            self.ingest("Create ready and dependent work").message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [
+                    ["create", "$ready", {"title": "Ready work", "priority": 5}],
+                    [
+                        "create",
+                        "$queued",
+                        {"title": "Dependent work", "requires": ["$ready"]},
+                    ],
+                ],
+            },
+        )
+        ready_id = created["aliases"]["$ready"]
+        self.ingest("Pending message")
+        processing = self.ingest("Processing message")
+        claim_message(
+            self.scope,
+            owner_id="status-test",
+            message_id=processing.message_id,
+        )
+        for content, disposition in (
+            ("Parked message", "needs_input"),
+            ("Broken message", "failed"),
+        ):
+            receipt = self.ingest(content)
+            claim = claim_message(
+                self.scope,
+                owner_id="status-test",
+                message_id=receipt.message_id,
+            )
+            assert claim is not None
+            dispose_message(
+                self.scope,
+                receipt.message_id,
+                claim_id=claim["claim_id"],
+                disposition=disposition,
+                reason="status coverage",
+            )
+
+        status = read_status(self.scope)
+        self.assertEqual(
+            status["messages"],
+            {
+                "received": 1,
+                "processing": 1,
+                "applied": 1,
+                "needs_input": 1,
+                "failed": 1,
+            },
+        )
+        self.assertEqual(status["tasks"]["ready"], 1)
+        self.assertEqual(status["tasks"]["queued"], 1)
+        self.assertEqual(status["claims"], {"active": 1})
+        self.assertEqual(
+            status["ready"],
+            [{"task_id": ready_id, "priority": 5, "title": "Ready work"}],
+        )
+
+        claimed = claim_next_tasks(self.scope, owner_id="status-test")
+        self.assertEqual(claimed[0]["task"]["task_id"], ready_id)
+        active_status = read_status(self.scope)
+        self.assertEqual(active_status["tasks"]["active"], 1)
+        self.assertEqual(active_status["tasks"]["ready"], 0)
+        self.assertEqual(active_status["ready"], [])
+        self.assertEqual(active_status["claims"], {"active": 2})
+
+    def test_read_status_counts_expired_message_lease_as_received(self) -> None:
+        message = self.ingest("Expiring message")
+        claim_message(
+            self.scope,
+            owner_id="status-test",
+            message_id=message.message_id,
+            lease_seconds=1,
+            now_us=1_000_000,
+        )
+
+        status = read_status(self.scope)
+
+        self.assertEqual(status["messages"]["processing"], 0)
+        self.assertEqual(status["messages"]["received"], 1)
+        self.assertEqual(status["claims"], {"active": 0})
+
+    def test_read_status_bounds_ready_tasks_by_priority(self) -> None:
+        self.apply(
+            self.ingest("Create many ready tasks").message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [
+                    [
+                        "create",
+                        f"$task{index}",
+                        {"title": f"Task {index}", "priority": index},
+                    ]
+                    for index in range(7)
+                ],
+            },
+        )
+
+        status = read_status(self.scope)
+
+        self.assertEqual(status["tasks"]["ready"], 7)
+        self.assertEqual(len(status["ready"]), 5)
+        self.assertEqual(
+            [task["priority"] for task in status["ready"]],
+            [6, 5, 4, 3, 2],
+        )
+        self.assertEqual(
+            [
+                task["priority"]
+                for task in read_status(self.scope, ready_limit=1)["ready"]
+            ],
+            [6],
+        )
+        with self.assertRaisesRegex(JournalError, "queue limit"):
+            read_status(self.scope, ready_limit=0)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,16 @@ SQLITE_MINIMUM_VERSION = (3, 37, 0)
 
 
 class JournalError(RuntimeError):
-    """Journal operation failed."""
+    """Journal operation failed.
+
+    ``code`` optionally carries a stable machine-readable error code from
+    the raise site so the CLI can classify the failure without matching
+    message substrings.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class _NotGitRepository(JournalError):
@@ -1124,7 +1133,7 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
             ).fetchone()[0]
             if object_count == 0:
                 _enable_wal(connection)
-                connection.execute("BEGIN IMMEDIATE")
+                _begin_immediate(connection)
                 try:
                     _execute_script_statements(connection, SCHEMA_SQL)
                     _create_v2_schema(connection)
@@ -1190,7 +1199,7 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                 )
                 _enable_wal(connection)
                 if version == 1:
-                    connection.execute("BEGIN IMMEDIATE")
+                    _begin_immediate(connection)
                     try:
                         current_version = _metadata(connection).get("schema_version")
                         if current_version != "1":
@@ -1254,7 +1263,7 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                             != expected_scope["scope_id"]
                         )
                     ):
-                        connection.execute("BEGIN IMMEDIATE")
+                        _begin_immediate(connection)
                         try:
                             _validate_metadata(
                                 connection,
@@ -1350,6 +1359,13 @@ def _connect(scope: JournalScope) -> sqlite3.Connection:
         raise
 
 
+def _begin_immediate(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as error:
+        raise JournalError(f"journal write contention: {error}") from error
+
+
 def ingest_message(
     scope: JournalScope,
     content: str,
@@ -1398,7 +1414,7 @@ def ingest_message(
 
     connection = _connect(scope)
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         if effective_key:
             existing = connection.execute(
                 """
@@ -1431,6 +1447,8 @@ def ingest_message(
                   ON e.message_id = m.message_id
                  AND e.event_type = 'message.received'
                 WHERE m.idempotency_key = ?
+                ORDER BY e.sequence ASC
+                LIMIT 1
                 """,
                 (effective_key,),
             ).fetchone()
@@ -1514,9 +1532,64 @@ def ingest_message(
             created=True,
             scope=scope,
         )
+    except sqlite3.IntegrityError as error:
+        connection.rollback()
+        raise JournalError(f"journal integrity violation: {error}") from error
+    except sqlite3.OperationalError as error:
+        connection.rollback()
+        raise JournalError(f"journal write contention: {error}") from error
     except Exception:
         connection.rollback()
         raise
+    finally:
+        connection.close()
+
+
+def find_message_by_idempotency_key(
+    scope: JournalScope,
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    """Return the first stored message for one idempotency key, if any."""
+
+    if not scope.journal_path.exists():
+        return None
+    connection = _connect(scope)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+              m.message_id,
+              (
+                SELECT state.event_type
+                FROM events AS state
+                WHERE state.message_id = m.message_id
+                  AND state.event_type IN (
+                    'message.received',
+                    'message.processing',
+                    'message.applied',
+                    'message.needs_input',
+                    'message.failed',
+                    'message.superseded'
+                  )
+                ORDER BY state.sequence DESC
+                LIMIT 1
+              ) AS state_event_type
+            FROM messages AS m
+            JOIN events AS received
+              ON received.message_id = m.message_id
+             AND received.event_type = 'message.received'
+            WHERE m.idempotency_key = ?
+            ORDER BY received.sequence ASC
+            LIMIT 1
+            """,
+            (idempotency_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "message_id": row["message_id"],
+            "state": row["state_event_type"].removeprefix("message."),
+        }
     finally:
         connection.close()
 
@@ -1661,7 +1734,7 @@ def create_snapshot(
         )
         removed: list[str] = []
         for expired_snapshot in snapshots[keep:]:
-            expired_snapshot.unlink()
+            expired_snapshot.unlink(missing_ok=True)
             removed.append(str(expired_snapshot))
 
     return {

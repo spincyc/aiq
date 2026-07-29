@@ -47,6 +47,15 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=False,
         idempotency="read-only",
     ),
+    "claim.list": _capability(
+        "List bounded unreleased message and task leases with expiry status.",
+        (
+            "aiq claim list [--owner OWNER] [--resource message|task] "
+            "[--status active|expired] [--limit N] [--json]"
+        ),
+        mutates=False,
+        idempotency="read-only",
+    ),
     "claim.release": _capability(
         "Release a message or task lease without completing its work.",
         "aiq claim release CLAIM_ID [--json]",
@@ -64,6 +73,31 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "aiq config show [--sources] [--json]",
         mutates=False,
         idempotency="read-only",
+    ),
+    "doctor": _capability(
+        "Summarize local configuration, dependency, journal, scope, and "
+        "integration health without mutating state.",
+        "aiq doctor [--json]",
+        mutates=False,
+        idempotency="read-only",
+        contract={
+            "checks": [
+                "python",
+                "sqlite",
+                "config",
+                "git",
+                "scope",
+                "journal",
+                "journal.deep",
+                "integration.codex",
+            ],
+            "statuses": ["ok", "warn", "fail", "skipped"],
+            "exit": "0 when no check fails; 1 when any check fails",
+            "deep": (
+                "deep journal verification stays explicit through "
+                "aiq journal check, which may migrate supported storage"
+            ),
+        },
     ),
     "inbox.apply": _capability(
         "Commit one claimed message's task effects atomically.",
@@ -149,20 +183,22 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="safe retry for the same claim and outcome",
     ),
     "integration.check": _capability(
-        "Detect whether the user-level Codex integration is installed or drifted.",
+        "Detect whether a managed hook or guidance integration is installed "
+        "or drifted.",
         (
-            "aiq integration check codex --user [--launcher PATH] "
-            "[--git-executable PATH] [--json]"
+            "aiq integration check ((claude|codex) --user [--launcher PATH] "
+            "[--git-executable PATH] | guidance --target PATH) [--json]"
         ),
         mutates=False,
         idempotency="read-only",
         version=2,
     ),
     "integration.install": _capability(
-        "Install or explicitly repair the user-level Codex integration.",
+        "Install or explicitly repair a managed hook or guidance integration.",
         (
-            "aiq integration install codex --user "
+            "aiq integration install ((claude|codex) --user "
             "[--launcher PATH] [--git-executable PATH] "
+            "| guidance --target PATH) "
             "[--plan-token TOKEN] [--repair] [--json]"
         ),
         mutates=True,
@@ -176,19 +212,20 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="read-only",
     ),
     "integration.plan": _capability(
-        "Preview a sanitized user-level Codex integration change.",
+        "Preview a sanitized managed hook or guidance integration change.",
         (
-            "aiq integration plan codex --user "
-            "[--launcher PATH] [--git-executable PATH] [--repair] [--json]"
+            "aiq integration plan ((claude|codex) --user "
+            "[--launcher PATH] [--git-executable PATH] "
+            "| guidance --target PATH) [--repair] [--json]"
         ),
         mutates=False,
         idempotency="read-only",
         version=2,
     ),
     "integration.print": _capability(
-        "Print an AGENTS bootstrap or Codex hook fragment for external management.",
+        "Print an AGENTS bootstrap or hook fragment for external management.",
         (
-            "aiq integration print (agents|codex) "
+            "aiq integration print (agents|claude|codex) "
             "[--user] [--launcher PATH] [--git-executable PATH] [--json]"
         ),
         mutates=False,
@@ -196,8 +233,11 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         version=2,
     ),
     "integration.uninstall": _capability(
-        "Remove unchanged AIQ-owned Codex integration material.",
-        "aiq integration uninstall codex --user [--json]",
+        "Remove unchanged AIQ-owned integration material.",
+        (
+            "aiq integration uninstall "
+            "((claude|codex) --user | guidance --target PATH) [--json]"
+        ),
         mutates=True,
         idempotency="safe retry when no owned material remains",
     ),
@@ -247,6 +287,27 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=True,
         idempotency="safe retry when an idempotency key is supplied",
     ),
+    "reconcile.run": _capability(
+        "Re-bind AIQ-owned integrations and validate or migrate selected "
+        "journal state after an external installer upgrades AIQ.",
+        (
+            "aiq reconcile --user [--apply] "
+            "[--launcher PATH] [--git-executable PATH] [--json]"
+        ),
+        mutates=True,
+        idempotency="report-only by default; --apply repairs only planned "
+        "AIQ-owned drift",
+    ),
+    "report.send": _capability(
+        "Report an AIQ defect as one deduplicated bug-fix task in the local "
+        "AIQ development repository's queue.",
+        (
+            "aiq report --summary TEXT (--detail TEXT|--detail-file FILE|-) "
+            "[--to PATH] [--priority N] [--json]"
+        ),
+        mutates=True,
+        idempotency="identical report replays without a second task",
+    ),
     "queue.next": _capability(
         "Lease the highest-priority eligible task.",
         "aiq queue next [--owner OWNER] [--limit N] [--json]",
@@ -259,9 +320,27 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=False,
         idempotency="read-only",
     ),
+    "status.show": _capability(
+        "Read one bounded work-state snapshot without message content.",
+        "aiq status [--json]",
+        mutates=False,
+        idempotency="read-only",
+    ),
     "task.list": _capability(
         "List bounded compact current task state.",
         "aiq task list [--state STATE] [--limit N] [--json]",
+        mutates=False,
+        idempotency="read-only",
+    ),
+    "task.explain": _capability(
+        "Explain deterministically why one task is or is not eligible.",
+        "aiq task explain TASK_ID [--json]",
+        mutates=False,
+        idempotency="read-only",
+    ),
+    "task.history": _capability(
+        "Read one task's bounded recorded event lineage, newest first.",
+        "aiq task history TASK_ID [--limit N] [--json]",
         mutates=False,
         idempotency="read-only",
     ),

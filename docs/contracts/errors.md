@@ -20,8 +20,11 @@ terminal-safe human explanation. Future optional fields may provide structured
 details; consumers must ignore unknown fields.
 
 Invocation errors, including missing commands and invalid arguments, honor
-JSON mode whether selected by configuration or `--json`. Unexpected defects
-use `internal_error`; JSON mode never emits a traceback.
+JSON mode whether selected by configuration or `--json`. For the `capability`
+and `integration` command families, which deliberately avoid configuration
+loading, JSON mode is selected by `--json` or the `AIQ_OUTPUT` environment
+variable, consistently for successes and failures. Unexpected defects use
+`internal_error`; JSON mode never emits a traceback.
 
 Outside JSON mode, AIQ writes a terminal-safe diagnostic to standard error.
 Human wording and formatting are not a compatibility surface. The
@@ -74,14 +77,16 @@ a compatible AIQ version; they must never be silently retried as mutations.
 |---|---|---|
 | `ingest --event-json` | Malformed, duplicate-key, unknown-field, oversized, or unsupported event | `invalid_document` |
 | Any ingest form | Idempotency identity reused with different content | `state_conflict` |
+| `journal export OUTPUT` | Output path names no file, an invalid parent, or managed state | `invalid_argument` |
 | `journal export OUTPUT` | Output already exists | `state_conflict` |
+| `inbox apply` | Effects document references an unknown local alias | `invalid_document` |
 | `journal destroy --confirm` | Missing, wrong, or stale inventory token | `state_conflict` |
-| Codex install/uninstall | Owned configuration or manifest has drifted | `integration_drift` |
-| Codex lifecycle | Explicit `--launcher` is relative | `invalid_argument` |
-| Codex lifecycle | Explicit `--git-executable` is relative or contains control characters | `invalid_argument` |
-| Codex lifecycle | Required launcher or host facility is unavailable | `unsupported_environment` |
-| Codex lifecycle | Required Python runtime is unavailable or not executable | `unsupported_environment` |
-| Codex lifecycle | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
+| Integration install/uninstall | Owned configuration or manifest has drifted | `integration_drift` |
+| Integration lifecycle | Explicit `--launcher` is relative | `invalid_argument` |
+| Integration lifecycle | Explicit `--git-executable` is relative or contains control characters | `invalid_argument` |
+| Integration lifecycle | Required launcher or host facility is unavailable | `unsupported_environment` |
+| Integration lifecycle | Required Python runtime is unavailable or not executable | `unsupported_environment` |
+| Integration lifecycle | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
 | Automatic or repo scope | Git is unavailable or repository discovery fails unexpectedly | `unsupported_environment` |
 | Configuration loading | Unknown, forbidden, malformed, or out-of-range setting | `invalid_config` |
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 from importlib import resources
 import json
 import os
@@ -13,21 +14,17 @@ from typing import Any, Mapping, Sequence
 from aiq import __version__
 from aiq.capabilities import list_capabilities, show_capability
 from aiq.config import Config, ConfigError, resolve_config
+from aiq.doctor import run_doctor
 from aiq.events import EVENT_JSON_MAX_BYTES, EventError, parse_event_json
-from aiq.integrations.codex import (
-    INTEGRATION_ID,
-    CodexIntegrationError,
-    check_integration,
-    install_integration,
-    plan_integration,
-    print_integration,
-    receive_hook_main,
-    uninstall_integration,
-)
+from aiq.integrations import claude as claude_integration
+from aiq.integrations import codex as codex_integration
+from aiq.integrations import guidance
+from aiq.integrations._hooks import HookIntegrationError
 from aiq.journal import (
     JournalError,
     check_journal,
     create_snapshot,
+    find_message_by_idempotency_key,
     ingest_message,
     initialize_journal,
     list_inbox,
@@ -40,16 +37,21 @@ from aiq.privacy import (
 )
 from aiq.queue import (
     EFFECT_DOCUMENT_MAX_BYTES,
+    MESSAGE_STATES,
     TASK_STATES,
     apply_effects,
     claim_message,
     claim_next_tasks,
     dispose_message,
+    explain_task,
+    list_claims,
     list_tasks,
     next_tasks,
     parse_effect_document,
+    read_status,
     release_claim,
     show_task,
+    task_history,
 )
 
 
@@ -107,10 +109,14 @@ def _invocation_wants_json(arguments: Sequence[str]) -> bool:
     if command not in {
         "claim",
         "config",
+        "doctor",
         "inbox",
         "ingest",
         "journal",
         "queue",
+        "reconcile",
+        "report",
+        "status",
         "task",
     }:
         return False
@@ -129,6 +135,14 @@ def _invocation_wants_json(arguments: Sequence[str]) -> bool:
         return False
 
 
+def _wants_json(arguments: argparse.Namespace) -> bool:
+    """JSON selection for commands that deliberately avoid config loading."""
+    return bool(
+        getattr(arguments, "json", False)
+        or os.environ.get("AIQ_OUTPUT") == "json"
+    )
+
+
 def _single_line(value: str) -> str:
     return "".join(
         character
@@ -139,6 +153,13 @@ def _single_line(value: str) -> str:
 
 
 def _versioned(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if "v" in payload and payload["v"] != PROTOCOL_VERSION:
+        raise AssertionError(
+            f"internal error: payload version {payload['v']!r} conflicts "
+            f"with protocol envelope version {PROTOCOL_VERSION}; a "
+            "diverging payload contract version requires a new envelope "
+            "field"
+        )
     return {"v": PROTOCOL_VERSION, **payload}
 
 
@@ -424,6 +445,36 @@ def _config_check(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _doctor(arguments: argparse.Namespace) -> int:
+    report = run_doctor(
+        requested_scope=arguments.scope,
+        cwd=arguments.cwd,
+        agent_root=arguments.agent_root,
+        repo_config=not arguments.no_repo_config,
+        invoked_launcher=_invoked_console_launcher(),
+        python_executable=_invoked_python_executable(),
+    )
+    as_json = (
+        arguments.json
+        or (report.config is not None and report.config.output == "json")
+        or os.environ.get("AIQ_OUTPUT") == "json"
+    )
+    if as_json:
+        _emit(
+            {"status": report.status, "checks": list(report.checks)},
+            as_json=True,
+        )
+    else:
+        name_width = max(len(check["check"]) for check in report.checks)
+        for check in report.checks:
+            print(
+                f"{check['check']:<{name_width}}  "
+                f"{check['status']:<7}  "
+                f"{_single_line(check['detail'])}"
+            )
+    return 0 if report.status == "ok" else 1
+
+
 def _ingest(arguments: argparse.Namespace) -> int:
     if arguments.event_json is not None:
         event = parse_event_json(
@@ -587,6 +638,26 @@ def _claim_release(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _claim_list(arguments: argparse.Namespace) -> int:
+    claims = list_claims(
+        _scope(arguments),
+        owner_id=arguments.owner,
+        resource_kind=arguments.resource,
+        status=arguments.status,
+        limit=arguments.limit,
+    )
+    if arguments.json:
+        _emit({"claims": claims}, as_json=True)
+        return 0
+    for claim in claims:
+        print(
+            f"{claim['claim_id']}\t{claim['resource_kind']}\t"
+            f"{claim['resource_id']}\t{_single_line(claim['owner_id'])}\t"
+            f"{claim['status']}\t{claim['expires_at']}"
+        )
+    return 0
+
+
 def _task_list(arguments: argparse.Namespace) -> int:
     tasks = [
         _task_summary(task)
@@ -611,6 +682,63 @@ def _task_list(arguments: argparse.Namespace) -> int:
 def _task_show(arguments: argparse.Namespace) -> int:
     detail = _task_detail(show_task(_scope(arguments), arguments.task_id))
     _emit({"task": detail}, as_json=arguments.json)
+    return 0
+
+
+def _task_explain(arguments: argparse.Namespace) -> int:
+    explained = explain_task(_scope(arguments), arguments.task_id)
+    if arguments.json:
+        _emit({"explain": explained}, as_json=True)
+        return 0
+    print(
+        f"{explained['task_id']}\t{explained['state']}\t"
+        f"r{explained['revision']}\t{_single_line(explained['explanation'])}"
+    )
+    for prerequisite in explained["prerequisites"]:
+        met = "met" if prerequisite["satisfied"] else "unmet"
+        print(
+            f"requires\t{prerequisite['task_id']}\t"
+            f"{prerequisite['state']}\t{met}"
+        )
+    return 0
+
+
+def _history_compact(entry: Mapping[str, Any]) -> str:
+    event_type = entry["type"]
+    detail = entry["detail"]
+    if event_type == "task.created":
+        return f"r{detail['revision']} {detail['state']}"
+    if event_type == "task.revised":
+        return f"r{detail['revision']} {','.join(detail['fields'])}"
+    if event_type == "task.state_changed":
+        compact = f"r{detail['revision']} {detail['state']}"
+        if detail["superseded_by_task_id"] is not None:
+            compact += f" by={detail['superseded_by_task_id']}"
+        return compact
+    if event_type in {"task.dependency_added", "task.dependency_removed"}:
+        sign = "+" if event_type.endswith("added") else "-"
+        return f"r{detail['revision']} {sign}{detail['dependency']}"
+    if event_type == "claim.acquired":
+        return f"{detail['claim_id']} {detail['owner_id']}"
+    if event_type.startswith("claim."):
+        return f"{detail['claim_id']} {detail['disposition']}"
+    return ""
+
+
+def _task_history(arguments: argparse.Namespace) -> int:
+    events = task_history(
+        _scope(arguments),
+        arguments.task_id,
+        limit=arguments.limit,
+    )
+    if arguments.json:
+        _emit({"task_id": arguments.task_id, "events": events}, as_json=True)
+        return 0
+    for entry in events:
+        print(
+            f"{entry['occurred_at']}\t{entry['type']}\t"
+            f"{_single_line(_history_compact(entry))}"
+        )
     return 0
 
 
@@ -665,9 +793,192 @@ def _queue_next(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _status(arguments: argparse.Namespace) -> int:
+    scope = _scope(arguments)
+    result = read_status(scope)
+    if arguments.json:
+        _emit({**result, "scope": scope.to_dict()}, as_json=True)
+        return 0
+    for label, states in (
+        ("messages", MESSAGE_STATES),
+        ("tasks", TASK_STATES),
+    ):
+        counts = result[label]
+        print(
+            f"{label:<8}  "
+            + "  ".join(f"{state}={counts[state]}" for state in states)
+        )
+    print(f"{'claims':<8}  active={result['claims']['active']}")
+    for task in result["ready"]:
+        print(
+            f"{'ready':<8}  {task['task_id']}\tp{task['priority']}\t"
+            f"{_single_line(task['title'])}"
+        )
+    return 0
+
+
+_REPORT_OWNER = "dev-report"
+_REPORT_SUMMARY_MAX_CHARS = 200
+_REPORT_DETAIL_MAX_CHARS = 16000
+_REPORT_OBJECTIVE_MAX_CHARS = 2000
+
+
+def _report_target(arguments: argparse.Namespace) -> Path:
+    if arguments.to is not None:
+        if not arguments.to.is_absolute():
+            raise JournalError(
+                "--to must be an absolute path",
+                code="invalid_argument",
+            )
+        return arguments.to
+    configured = arguments.effective_config.dev_report_repo
+    if configured is None:
+        raise ConfigError(
+            "dev_report_repo is not configured; set it in user "
+            "configuration or AIQ_DEV_REPORT_REPO, or pass --to PATH"
+        )
+    return Path(configured)
+
+
+def _report_emit(
+    arguments: argparse.Namespace,
+    payload: Mapping[str, Any],
+) -> int:
+    if arguments.json:
+        _emit(payload, as_json=True)
+        return 0
+    print(
+        "\t".join(
+            str(payload[key])
+            for key in ("status", "task_id", "message_id")
+            if payload.get(key) is not None
+        )
+    )
+    return 0
+
+
+def _report(arguments: argparse.Namespace) -> int:
+    summary = arguments.summary
+    if not 1 <= len(summary) <= _REPORT_SUMMARY_MAX_CHARS:
+        raise JournalError(
+            f"summary must contain 1 to {_REPORT_SUMMARY_MAX_CHARS} characters",
+            code="invalid_argument",
+        )
+    detail = (
+        arguments.detail
+        if arguments.detail is not None
+        else _read_text_argument(
+            arguments.detail_file,
+            4 * _REPORT_DETAIL_MAX_CHARS,
+            label="detail",
+        )
+    )
+    if not 1 <= len(detail) <= _REPORT_DETAIL_MAX_CHARS:
+        raise JournalError(
+            f"detail must contain 1 to {_REPORT_DETAIL_MAX_CHARS} characters",
+            code="invalid_argument",
+        )
+    if not -1_000_000 <= arguments.priority <= 1_000_000:
+        raise JournalError(
+            "priority must be between -1000000 and 1000000",
+            code="invalid_argument",
+        )
+    target = _report_target(arguments)
+    if not target.is_dir():
+        raise JournalError(f"dev report target does not exist: {target}")
+    scope = resolve_scope("repo", cwd=target)
+    if not scope.journal_path.is_file():
+        raise JournalError(
+            f"dev report target journal does not exist: {scope.journal_path} "
+            "(initialize the development checkout with: aiq journal init)"
+        )
+    content = json.dumps(
+        {"aiq_version": __version__, "detail": detail, "summary": summary},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    idempotency_key = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    duplicate: dict[str, Any] = {
+        "status": "duplicate",
+        "scope": scope.to_dict(),
+    }
+    try:
+        ingested = ingest_message(
+            scope,
+            content,
+            source="dev-report",
+            idempotency_key=idempotency_key,
+            cwd=os.fspath(arguments.cwd.resolve()),
+        )
+    except JournalError as error:
+        # An identical report from another origin repository stores a
+        # different message identity; treat it as the same known defect.
+        if "different message identity" not in str(error):
+            raise
+        existing = find_message_by_idempotency_key(scope, idempotency_key)
+        if existing is None:
+            raise
+        return _report_emit(
+            arguments,
+            {**duplicate, "message_id": existing["message_id"]},
+        )
+    if not ingested.created:
+        return _report_emit(
+            arguments,
+            {**duplicate, "message_id": ingested.message_id},
+        )
+    try:
+        claimed = claim_message(
+            scope,
+            owner_id=_REPORT_OWNER,
+            lease_seconds=arguments.effective_config.lease_seconds,
+            message_id=ingested.message_id,
+        )
+    except JournalError as error:
+        # A concurrent instance claimed or applied the message first.
+        if "not claimable" not in str(error):
+            raise
+        claimed = None
+    if claimed is None:
+        return _report_emit(
+            arguments,
+            {**duplicate, "message_id": ingested.message_id},
+        )
+    applied = apply_effects(
+        scope,
+        ingested.message_id,
+        {
+            "v": 1,
+            "expect": {},
+            "effects": [
+                [
+                    "create",
+                    "$report",
+                    {
+                        "title": summary,
+                        "objective": detail[:_REPORT_OBJECTIVE_MAX_CHARS],
+                        "priority": arguments.priority,
+                    },
+                ]
+            ],
+        },
+        claim_id=claimed["claim_id"],
+    )
+    return _report_emit(
+        arguments,
+        {
+            "status": "reported",
+            "task_id": applied["aliases"]["$report"],
+            "message_id": ingested.message_id,
+            "scope": scope.to_dict(),
+        },
+    )
+
+
 def _capability_list(arguments: argparse.Namespace) -> int:
     capabilities = list_capabilities()
-    if arguments.json:
+    if _wants_json(arguments):
         _emit({"capabilities": capabilities}, as_json=True)
         return 0
     for capability in capabilities:
@@ -680,7 +991,7 @@ def _capability_list(arguments: argparse.Namespace) -> int:
 
 def _capability_show(arguments: argparse.Namespace) -> int:
     capability = show_capability(arguments.capability_id)
-    if arguments.json:
+    if _wants_json(arguments):
         _emit(capability, as_json=True)
     else:
         print(
@@ -694,20 +1005,37 @@ def _capability_show(arguments: argparse.Namespace) -> int:
     return 0
 
 
+_INTEGRATION_MODULES = {
+    "claude": claude_integration,
+    "codex": codex_integration,
+}
+_INTEGRATION_CHOICES = tuple(sorted(_INTEGRATION_MODULES))
+
+
 def _integration_list(arguments: argparse.Namespace) -> int:
     integrations = [
         {
-            "id": "codex",
-            "purpose": "Capture Codex UserPromptSubmit events.",
-            "version": 1,
-        },
+            "id": integration_id,
+            "purpose": module.PURPOSE,
+            "version": module.CONTRACT_VERSION,
+        }
+        for integration_id, module in sorted(_INTEGRATION_MODULES.items())
+    ]
+    integrations.append(
         {
             "id": "generic",
             "purpose": "Ingest canonical provider-neutral event JSON.",
             "version": 1,
-        },
-    ]
-    if arguments.json:
+        }
+    )
+    integrations.append(
+        {
+            "id": "guidance",
+            "purpose": "Manage one AIQ-owned block in a chosen guidance file.",
+            "version": 1,
+        }
+    )
+    if _wants_json(arguments):
         _emit({"integrations": integrations}, as_json=True)
     else:
         for integration in integrations:
@@ -729,23 +1057,73 @@ def _invoked_python_executable() -> Path:
     return Path(os.path.abspath(sys.executable))
 
 
+def _guidance_target(arguments: argparse.Namespace) -> Path:
+    if arguments.user:
+        raise guidance.GuidanceIntegrationError(
+            "the guidance integration uses --target, not --user"
+        )
+    for option in ("launcher", "git_executable"):
+        if getattr(arguments, option, None) is not None:
+            raise guidance.GuidanceIntegrationError(
+                "the guidance integration does not accept "
+                f"--{option.replace('_', '-')}"
+            )
+    return arguments.target
+
+
+def _hook_selector(arguments: argparse.Namespace) -> None:
+    integration_id = arguments.integration_id
+    error_class = _INTEGRATION_MODULES[integration_id].SPEC.error_class
+    if getattr(arguments, "target", None) is not None:
+        raise error_class(
+            f"the {integration_id} integration uses --user, not --target"
+        )
+    if not arguments.user:
+        raise error_class(
+            f"the {integration_id} integration requires --user"
+        )
+
+
 def _integration_plan(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.plan_integration(
+                target=_guidance_target(arguments),
+                repair=arguments.repair,
+            ),
+            as_json=as_json,
+        )
+        return 0
+    _hook_selector(arguments)
     _emit(
-        plan_integration(
+        _INTEGRATION_MODULES[arguments.integration_id].plan_integration(
             launcher=arguments.launcher,
             invoked_launcher=_invoked_console_launcher(),
             python_executable=_invoked_python_executable(),
             git_executable=arguments.git_executable,
             repair=arguments.repair,
         ),
-        as_json=arguments.json,
+        as_json=as_json,
     )
     return 0
 
 
 def _integration_install(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.install_integration(
+                target=_guidance_target(arguments),
+                repair=arguments.repair,
+                plan_token=arguments.plan_token,
+            ),
+            as_json=as_json,
+        )
+        return 0
+    _hook_selector(arguments)
     _emit(
-        install_integration(
+        _INTEGRATION_MODULES[arguments.integration_id].install_integration(
             launcher=arguments.launcher,
             invoked_launcher=_invoked_console_launcher(),
             python_executable=_invoked_python_executable(),
@@ -753,37 +1131,59 @@ def _integration_install(arguments: argparse.Namespace) -> int:
             repair=arguments.repair,
             plan_token=arguments.plan_token,
         ),
-        as_json=arguments.json,
+        as_json=as_json,
     )
     return 0
 
 
 def _integration_check(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.check_integration(target=_guidance_target(arguments)),
+            as_json=as_json,
+        )
+        return 0
+    _hook_selector(arguments)
     _emit(
-        check_integration(
+        _INTEGRATION_MODULES[arguments.integration_id].check_integration(
             launcher=arguments.launcher,
             invoked_launcher=_invoked_console_launcher(),
             python_executable=_invoked_python_executable(),
             git_executable=arguments.git_executable,
         ),
-        as_json=arguments.json,
+        as_json=as_json,
     )
     return 0
 
 
 def _integration_uninstall(arguments: argparse.Namespace) -> int:
-    _emit(uninstall_integration(), as_json=arguments.json)
+    as_json = _wants_json(arguments)
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.uninstall_integration(
+                target=_guidance_target(arguments),
+            ),
+            as_json=as_json,
+        )
+        return 0
+    _hook_selector(arguments)
+    _emit(
+        _INTEGRATION_MODULES[arguments.integration_id].uninstall_integration(),
+        as_json=as_json,
+    )
     return 0
 
 
 def _integration_print(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
     if arguments.integration_id == "agents":
         guidance = (
             resources.files("aiq._resources")
             .joinpath("AGENTS.md")
             .read_text(encoding="utf-8")
         )
-        if arguments.json:
+        if as_json:
             _emit(
                 {"artifact": "agents", "content": guidance},
                 as_json=True,
@@ -792,16 +1192,17 @@ def _integration_print(arguments: argparse.Namespace) -> int:
             sys.stdout.write(guidance)
         return 0
 
-    rendered = print_integration(
+    module = _INTEGRATION_MODULES[arguments.integration_id]
+    rendered = module.print_integration(
         launcher=arguments.launcher,
         invoked_launcher=_invoked_console_launcher(),
         python_executable=_invoked_python_executable(),
         git_executable=arguments.git_executable,
     )
-    if arguments.json:
+    if as_json:
         _emit(
             {
-                "integration": "codex",
+                "integration": arguments.integration_id,
                 "fragment": json.loads(rendered),
             },
             as_json=True,
@@ -812,10 +1213,156 @@ def _integration_print(arguments: argparse.Namespace) -> int:
 
 
 def _integration_receive(arguments: argparse.Namespace) -> int:
-    return receive_hook_main(
-        integration_id=arguments.integration_id,
+    module = _INTEGRATION_MODULES[arguments.integration]
+    integration_id = (
+        module.INTEGRATION_ID
+        if arguments.integration_id is None
+        else arguments.integration_id
+    )
+    return module.receive_hook_main(
+        integration_id=integration_id,
         git_executable=arguments.git_executable,
     )
+
+
+_RECONCILE_PROBLEM_STATUSES = frozenset({"blocked", "drifted", "failed"})
+
+
+def _recorded_executable(recorded: str) -> Path | None:
+    path = Path(recorded)
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+    return None
+
+
+def _reconcile_integration(
+    integration_id: str,
+    module: Any,
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "integration": integration_id,
+        "status": "skipped",
+        "action": "none",
+        "reason": None,
+    }
+    try:
+        manifest = module.installed_manifest()
+    except HookIntegrationError as error:
+        entry.update({"status": "failed", "reason": str(error)})
+        return entry
+    if manifest is None:
+        entry["reason"] = (
+            f"no installed AIQ {integration_id} integration manifest"
+        )
+        return entry
+    entry["target"] = manifest["target"]
+    invoked_launcher = _invoked_console_launcher()
+    if arguments.launcher is None and invoked_launcher is None:
+        invoked_launcher = _recorded_executable(manifest["launcher"])
+    git_executable: Path | None = arguments.git_executable
+    if git_executable is None:
+        git_executable = _recorded_executable(manifest["git_executable"])
+    options: dict[str, Any] = {
+        "launcher": arguments.launcher,
+        "invoked_launcher": invoked_launcher,
+        "python_executable": _invoked_python_executable(),
+        "git_executable": git_executable,
+    }
+    try:
+        plan = module.plan_integration(**options)
+        if plan["status"] == "installed" and plan["action"] == "none":
+            entry["status"] = "ok"
+            return entry
+        if plan["status"] != "drifted":
+            entry.update(
+                {"status": "blocked", "reason": plan["blocked_reason"]}
+            )
+            return entry
+        if not arguments.apply:
+            entry.update(
+                {
+                    "status": "drifted",
+                    "action": "repair",
+                    "reason": plan["blocked_reason"],
+                }
+            )
+            return entry
+        repair_plan = module.plan_integration(**options, repair=True)
+        if repair_plan["action"] != "repair":
+            entry.update(
+                {
+                    "status": "blocked",
+                    "reason": repair_plan["blocked_reason"]
+                    or "no safe owned repair is planned",
+                }
+            )
+            return entry
+        repaired = module.install_integration(
+            **options,
+            repair=True,
+            plan_token=repair_plan["plan_token"],
+        )
+        entry.update(
+            {
+                "status": "repaired",
+                "action": "repair",
+                "backup": repaired.get("backup"),
+            }
+        )
+    except HookIntegrationError as error:
+        entry.update({"status": "failed", "reason": str(error)})
+    return entry
+
+
+def _reconcile_journal(arguments: argparse.Namespace) -> dict[str, Any]:
+    try:
+        result = check_journal(_scope(arguments))
+    except JournalError as error:
+        message = str(error)
+        status = "skipped" if "does not exist" in message else "failed"
+        return {"status": status, "reason": message}
+    except (OSError, sqlite3.Error) as error:
+        return {"status": "failed", "reason": str(error)}
+    return {"status": result["status"], "reason": None, "scope": result["scope"]}
+
+
+def _reconcile(arguments: argparse.Namespace) -> int:
+    integrations = [
+        _reconcile_integration(integration_id, module, arguments)
+        for integration_id, module in sorted(_INTEGRATION_MODULES.items())
+    ]
+    journal = _reconcile_journal(arguments)
+    problems = sum(
+        entry["status"] in _RECONCILE_PROBLEM_STATUSES
+        for entry in (*integrations, journal)
+    )
+    status = "ok" if problems == 0 else "attention"
+    if arguments.json:
+        _emit(
+            {
+                "status": status,
+                "apply": arguments.apply,
+                "integrations": integrations,
+                "journal": journal,
+                "problems": problems,
+            },
+            as_json=True,
+        )
+    else:
+        for entry in (
+            *(
+                {**entry, "kind": f"integration\t{entry['integration']}"}
+                for entry in integrations
+            ),
+            {**journal, "kind": "journal"},
+        ):
+            line = f"{entry['kind']}\t{entry['status']}"
+            if entry.get("reason"):
+                line += f"\t{_single_line(entry['reason'])}"
+            print(line)
+        print(f"status\t{status}\tproblems\t{problems}")
+    return 0 if problems == 0 else 1
 
 
 def _scope_parser(
@@ -841,6 +1388,19 @@ def _add_user_selector(
     )
 
 
+def _add_lifecycle_selectors(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "integration_id",
+        choices=(*_INTEGRATION_CHOICES, "guidance"),
+    )
+    _add_user_selector(parser)
+    parser.add_argument(
+        "--target",
+        type=Path,
+        help="absolute guidance file managed by the guidance integration",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="aiq")
     parser.add_argument("--version", action="version", version=__version__)
@@ -858,6 +1418,17 @@ def build_parser() -> argparse.ArgumentParser:
     config_check = config_commands.add_parser("check")
     _add_config_arguments(config_check, operational=False)
     config_check.set_defaults(handler=_config_check)
+
+    doctor = commands.add_parser(
+        "doctor",
+        description=(
+            "Run cheap read-only local health checks. Deep journal "
+            "verification stays explicit through aiq journal check, "
+            "which may migrate supported storage."
+        ),
+    )
+    _add_config_arguments(doctor)
+    doctor.set_defaults(handler=_doctor)
 
     journal = commands.add_parser("journal")
     journal_commands = journal.add_subparsers(
@@ -933,6 +1504,13 @@ def build_parser() -> argparse.ArgumentParser:
     task_show = _scope_parser(task_commands, "show")
     task_show.add_argument("task_id")
     task_show.set_defaults(handler=_task_show)
+    task_explain = _scope_parser(task_commands, "explain")
+    task_explain.add_argument("task_id")
+    task_explain.set_defaults(handler=_task_explain)
+    task_history = _scope_parser(task_commands, "history")
+    task_history.add_argument("task_id")
+    task_history.add_argument("--limit", type=int, default=50)
+    task_history.set_defaults(handler=_task_history)
 
     queue = commands.add_parser("queue")
     queue_commands = queue.add_subparsers(dest="queue_command", required=True)
@@ -947,9 +1525,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     claim = commands.add_parser("claim")
     claim_commands = claim.add_subparsers(dest="claim_command", required=True)
+    claim_list = _scope_parser(claim_commands, "list")
+    claim_list.add_argument("--owner")
+    claim_list.add_argument("--resource", choices=("message", "task"))
+    claim_list.add_argument("--status", choices=("active", "expired"))
+    claim_list.add_argument("--limit", type=int, default=100)
+    claim_list.set_defaults(handler=_claim_list)
     claim_release = _scope_parser(claim_commands, "release")
     claim_release.add_argument("claim_id")
     claim_release.set_defaults(handler=_claim_release)
+
+    status = commands.add_parser("status")
+    _add_config_arguments(status)
+    status.set_defaults(load_config=True, handler=_status)
+
+    report = commands.add_parser("report")
+    _add_config_arguments(report)
+    report.add_argument("--summary", required=True)
+    detail_group = report.add_mutually_exclusive_group(required=True)
+    detail_group.add_argument("--detail")
+    detail_group.add_argument("--detail-file", type=Path, metavar="FILE|-")
+    report.add_argument("--to", type=Path)
+    report.add_argument("--priority", type=int, default=60)
+    report.set_defaults(load_config=True, handler=_report)
 
     capability = commands.add_parser("capability")
     capability_commands = capability.add_subparsers(
@@ -973,16 +1571,14 @@ def build_parser() -> argparse.ArgumentParser:
     integration_list.add_argument("--json", action="store_true")
     integration_list.set_defaults(handler=_integration_list)
     integration_plan = integration_commands.add_parser("plan")
-    integration_plan.add_argument("integration_id", choices=("codex",))
-    _add_user_selector(integration_plan, required=True)
+    _add_lifecycle_selectors(integration_plan)
     integration_plan.add_argument("--launcher", type=Path)
     integration_plan.add_argument("--git-executable", type=Path)
     integration_plan.add_argument("--repair", action="store_true")
     integration_plan.add_argument("--json", action="store_true")
     integration_plan.set_defaults(handler=_integration_plan)
     integration_install = integration_commands.add_parser("install")
-    integration_install.add_argument("integration_id", choices=("codex",))
-    _add_user_selector(integration_install, required=True)
+    _add_lifecycle_selectors(integration_install)
     integration_install.add_argument("--launcher", type=Path)
     integration_install.add_argument("--git-executable", type=Path)
     integration_install.add_argument("--repair", action="store_true")
@@ -990,21 +1586,19 @@ def build_parser() -> argparse.ArgumentParser:
     integration_install.add_argument("--json", action="store_true")
     integration_install.set_defaults(handler=_integration_install)
     integration_check = integration_commands.add_parser("check")
-    integration_check.add_argument("integration_id", choices=("codex",))
-    _add_user_selector(integration_check, required=True)
+    _add_lifecycle_selectors(integration_check)
     integration_check.add_argument("--launcher", type=Path)
     integration_check.add_argument("--git-executable", type=Path)
     integration_check.add_argument("--json", action="store_true")
     integration_check.set_defaults(handler=_integration_check)
     integration_uninstall = integration_commands.add_parser("uninstall")
-    integration_uninstall.add_argument("integration_id", choices=("codex",))
-    _add_user_selector(integration_uninstall, required=True)
+    _add_lifecycle_selectors(integration_uninstall)
     integration_uninstall.add_argument("--json", action="store_true")
     integration_uninstall.set_defaults(handler=_integration_uninstall)
     integration_print = integration_commands.add_parser("print")
     integration_print.add_argument(
         "integration_id",
-        choices=("agents", "codex"),
+        choices=("agents", *_INTEGRATION_CHOICES),
     )
     _add_user_selector(integration_print)
     integration_print.add_argument("--launcher", type=Path)
@@ -1012,11 +1606,8 @@ def build_parser() -> argparse.ArgumentParser:
     integration_print.add_argument("--json", action="store_true")
     integration_print.set_defaults(handler=_integration_print)
     integration_receive = integration_commands.add_parser("receive")
-    integration_receive.add_argument("integration", choices=("codex",))
-    integration_receive.add_argument(
-        "--integration-id",
-        default=INTEGRATION_ID,
-    )
+    integration_receive.add_argument("integration", choices=_INTEGRATION_CHOICES)
+    integration_receive.add_argument("--integration-id")
     integration_receive.add_argument(
         "--git-executable",
         type=Path,
@@ -1024,10 +1615,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     integration_receive.set_defaults(handler=_integration_receive)
 
+    reconcile = commands.add_parser("reconcile")
+    _add_config_arguments(reconcile)
+    _add_user_selector(reconcile, required=True)
+    reconcile.add_argument("--apply", action="store_true")
+    reconcile.add_argument("--launcher", type=Path)
+    reconcile.add_argument("--git-executable", type=Path)
+    reconcile.set_defaults(handler=_reconcile, load_config=True)
+
     return parser
 
 
+# Stable machine-readable codes set at JournalError raise sites, mapped to
+# their (code, exit) classification. Codes take precedence over the substring
+# fallback rules below.
+_JOURNAL_ERROR_CODE_EXITS: dict[str, tuple[str, int]] = {
+    "invalid_argument": ("invalid_argument", 2),
+    "invalid_document": ("invalid_document", 2),
+}
+
+
 def _classify_journal_error(error: JournalError) -> tuple[str, int]:
+    explicit = _JOURNAL_ERROR_CODE_EXITS.get(getattr(error, "code", None))
+    if explicit is not None:
+        return explicit
     message = str(error).lower()
     if "not found" in message or "does not exist" in message:
         return "not_found", 3
@@ -1061,6 +1672,7 @@ def _classify_journal_error(error: JournalError) -> tuple[str, int]:
             "limit must",
             "limit must be",
             "must be positive",
+            "unsupported claim",
             "unsupported task state",
         )
     ):
@@ -1112,8 +1724,21 @@ def _classify_error(error: Exception) -> tuple[str, int]:
         return "invalid_config", 2
     if isinstance(error, EventError):
         return "invalid_document", 2
-    if isinstance(error, CodexIntegrationError):
+    if isinstance(error, guidance.GuidanceIntegrationError):
         message = str(error).lower()
+        if (
+            "--target" in message
+            or "--user" in message
+            or "--launcher" in message
+            or "--git-executable" in message
+            or "control characters" in message
+        ):
+            return "invalid_argument", 2
+        return "integration_drift", 6
+    if isinstance(error, HookIntegrationError):
+        message = str(error).lower()
+        if "requires --user" in message or "not --target" in message:
+            return "invalid_argument", 2
         if "launcher must be an absolute path" in message:
             return "invalid_argument", 2
         if (
@@ -1160,18 +1785,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         ValueError,
     ) as error:
         code, exit_code = _classify_error(error)
-        _emit_error(
-            code,
-            str(error),
-            as_json=getattr(arguments, "json", False)
-            or os.environ.get("AIQ_OUTPUT") == "json",
-        )
+        _emit_error(code, str(error), as_json=_wants_json(arguments))
         return exit_code
     except Exception as error:
         _emit_error(
             "internal_error",
             str(error) or error.__class__.__name__,
-            as_json=getattr(arguments, "json", False)
-            or os.environ.get("AIQ_OUTPUT") == "json",
+            as_json=_wants_json(arguments),
         )
         return 70

@@ -150,10 +150,16 @@ def _export_rows(
 def _validated_output_path(scope: JournalScope, output_path: Path) -> Path:
     requested = output_path.expanduser()
     if requested.name in {"", ".", ".."}:
-        raise JournalError("export output must name a file")
+        raise JournalError(
+            "export output must name a file",
+            code="invalid_argument",
+        )
     parent = requested.parent.resolve(strict=True)
     if not parent.is_dir():
-        raise JournalError(f"export parent is not a directory: {parent}")
+        raise JournalError(
+            f"export parent is not a directory: {parent}",
+            code="invalid_argument",
+        )
     target = parent / requested.name
     if os.path.lexists(target):
         raise JournalError(f"export output already exists: {target}")
@@ -164,7 +170,10 @@ def _validated_output_path(scope: JournalScope, output_path: Path) -> Path:
     except ValueError:
         pass
     else:
-        raise JournalError("export output must be outside managed journal state")
+        raise JournalError(
+            "export output must be outside managed journal state",
+            code="invalid_argument",
+        )
     return target
 
 

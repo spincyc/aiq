@@ -27,10 +27,14 @@ Both TOML files are optional, flat, and must declare `version = 1`.
 | `lease_seconds` | `1`–`86400` | `900` | yes | yes |
 | `snapshot_keep` | `1`–`10000` | `5` | yes | no |
 | `output` | `human`, `json` | `human` | yes | no |
+| `dev_report_repo` | Absolute path | `None` | yes | no |
 
 Repository configuration can set only bounded lease duration. It cannot choose
 scope, identity, output, or retention. `snapshot_keep` controls snapshot
-retention only; it never removes messages or task history.
+retention only; it never removes messages or task history. `dev_report_repo`
+names the local AIQ development checkout that receives `aiq report` bug
+reports; it is deliberately excluded from repository configuration so a cloned
+repository cannot redirect reports.
 
 Example user configuration:
 
@@ -59,6 +63,7 @@ lease_seconds = 1200
 | `AIQ_LEASE_SECONDS` | `lease_seconds` |
 | `AIQ_SNAPSHOT_KEEP` | `snapshot_keep` |
 | `AIQ_OUTPUT` | `output` |
+| `AIQ_DEV_REPORT_REPO` | `dev_report_repo` |
 
 Integer variables must contain unsigned decimal digits.
 

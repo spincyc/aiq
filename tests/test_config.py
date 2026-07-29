@@ -34,6 +34,7 @@ class ConfigTests(unittest.TestCase):
                 "lease_seconds": 900,
                 "snapshot_keep": 5,
                 "output": "human",
+                "dev_report_repo": None,
             },
         )
         self.assertEqual(set(config.sources.values()), {"default"})

@@ -25,6 +25,7 @@ CONFIG_KEYS = frozenset(
         "lease_seconds",
         "snapshot_keep",
         "output",
+        "dev_report_repo",
     }
 )
 USER_CONFIG_KEYS = CONFIG_KEYS
@@ -40,6 +41,7 @@ ENVIRONMENT_KEYS = {
     "AIQ_LEASE_SECONDS": "lease_seconds",
     "AIQ_SNAPSHOT_KEEP": "snapshot_keep",
     "AIQ_OUTPUT": "output",
+    "AIQ_DEV_REPORT_REPO": "dev_report_repo",
 }
 
 _INTEGER_PATTERN = re.compile(r"[0-9]+\Z")
@@ -60,6 +62,7 @@ class Config:
     lease_seconds: int
     snapshot_keep: int
     output: str
+    dev_report_repo: str | None
     sources: Mapping[str, str]
 
     def to_dict(self, *, include_sources: bool = False) -> dict[str, Any]:
@@ -70,6 +73,7 @@ class Config:
             "lease_seconds": self.lease_seconds,
             "snapshot_keep": self.snapshot_keep,
             "output": self.output,
+            "dev_report_repo": self.dev_report_repo,
         }
         if include_sources:
             result["sources"] = dict(self.sources)
@@ -135,6 +139,11 @@ def _validate_value(key: str, value: object) -> str | int:
         if output not in {"human", "json"}:
             raise ConfigError("output must be one of: human, json")
         return output
+    if key == "dev_report_repo":
+        path = _validate_string(value, key=key, maximum=4096)
+        if not Path(path).is_absolute():
+            raise ConfigError("dev_report_repo must be an absolute path")
+        return path
     raise ConfigError(f"unknown configuration key: {key}")
 
 
@@ -338,12 +347,13 @@ def resolve_config(
         "owner",
         _default_owner() if default_owner is None else default_owner,
     )
-    values: dict[str, str | int] = {
+    values: dict[str, str | int | None] = {
         "scope": "auto",
         "owner": owner,
         "lease_seconds": 900,
         "snapshot_keep": 5,
         "output": "human",
+        "dev_report_repo": None,
     }
     sources = {key: "default" for key in values}
 
@@ -382,6 +392,7 @@ def resolve_config(
     values.update(cli_values)
     sources.update({key: "cli" for key in cli_values})
 
+    dev_report_repo = values["dev_report_repo"]
     return Config(
         version=CONFIG_VERSION,
         scope=str(values["scope"]),
@@ -389,5 +400,8 @@ def resolve_config(
         lease_seconds=int(values["lease_seconds"]),
         snapshot_keep=int(values["snapshot_keep"]),
         output=str(values["output"]),
+        dev_report_repo=(
+            None if dev_report_repo is None else str(dev_report_repo)
+        ),
         sources=MappingProxyType(dict(sources)),
     )

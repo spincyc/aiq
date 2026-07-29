@@ -99,6 +99,12 @@ implicitly update pipx-managed applications. `pipx upgrade-all` updates every
 unpinned pipx application when explicitly invoked; normal AIQ releases will
 bump the package version so `pipx upgrade aiq-workqueue` can update AIQ alone.
 
+After the installer refreshes AIQ, run `aiq reconcile --user` to report
+whether AIQ-owned integration hooks still match the current installation and
+whether the selected journal state validates; `aiq reconcile --user --apply`
+re-binds only AIQ-owned hooks and migrates supported journal storage. It
+never modifies pipx, venv, Homebrew, or distro-owned package environments.
+
 ## Quickstart
 
 Run this inside the Git repository whose work you want to track. The example
@@ -142,6 +148,7 @@ one contract instead of carrying every tool description in context.
 | See command flags | `aiq COMMAND --help` |
 | Locate the active journal | `aiq journal path --json` |
 | Inspect pending messages | `aiq inbox list` |
+| Summarize bounded work state | `aiq status` |
 | Preview ready work | `aiq queue peek` |
 | Lease ready work | `aiq queue next --owner OWNER` |
 | Verify storage and history | `aiq journal check` |
@@ -166,14 +173,17 @@ committed.
 | Integration | Alpha status |
 |---|---|
 | [Generic input](docs/integrations/generic.md) | Message, stdin, and canonical event JSON ingestion |
+| [Claude Code](docs/integrations/claude.md) | Reversible user-level prompt hook |
 | [Codex](docs/integrations/codex.md) | Reversible user-level prompt hook |
+| [Guidance](docs/integrations/guidance.md) | Reversible AIQ-owned block in an explicit guidance file |
 | Manual guidance | The terse canonical bootstrap is [`AGENTS.md`](AGENTS.md) |
 
 AIQ never replaces an entire agent configuration. Integration installers use
 preview, minimal mutation, ownership records, drift checks, and targeted
-uninstall. The Codex integration records its launcher identity and absolute
-Python and Git executables. Its hook runs Python with `-I`, so dotfiles,
-`PATH`, `PYTHONPATH`, and `PYTHONHOME` cannot redirect the runtime.
+uninstall. The Claude Code and Codex integrations record their launcher
+identity and absolute Python and Git executables. Their hooks run Python with
+`-I`, so dotfiles, `PATH`, `PYTHONPATH`, and `PYTHONHOME` cannot redirect the
+runtime.
 
 ## Documentation
 

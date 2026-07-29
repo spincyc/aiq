@@ -6,7 +6,9 @@ give AIQ permission to execute the resulting work.
 | Integration | Current alpha |
 |---|---|
 | [Generic](generic.md) | Manual text, stdin text, and canonical event JSON |
+| [Claude Code](claude.md) | Reversible user-level `UserPromptSubmit` hook |
 | [Codex](codex.md) | Reversible user-level `UserPromptSubmit` hook |
+| [Guidance](guidance.md) | Reversible AIQ-owned block in an explicit local guidance file |
 | Other agents | Use generic ingestion; add an adapter after observing a real contract |
 
 ## Boundary

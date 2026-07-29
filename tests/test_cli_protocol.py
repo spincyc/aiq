@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from aiq.cli import _classify_error, build_parser
+from aiq.cli import _classify_error, _versioned, build_parser
 from aiq.integrations.codex import CodexIntegrationError
 
 
@@ -17,12 +17,13 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 JSON_COMMAND_PATHS = {
     tuple(name.split("."))
     for name in """
-        capability.list capability.show claim.release config.check config.show
-        inbox.apply inbox.claim inbox.fail inbox.list inbox.needs-input ingest
-        integration.check integration.install integration.list integration.plan
-        integration.print integration.uninstall journal.check journal.destroy
-        journal.export journal.init journal.path journal.snapshot queue.next
-        queue.peek task.list task.show
+        capability.list capability.show claim.list claim.release config.check
+        config.show doctor inbox.apply inbox.claim inbox.fail inbox.list
+        inbox.needs-input ingest integration.check integration.install
+        integration.list integration.plan integration.print
+        integration.uninstall journal.check journal.destroy journal.export
+        journal.init journal.path journal.snapshot queue.next queue.peek
+        reconcile report status task.explain task.history task.list task.show
     """.split()
 }
 
@@ -192,6 +193,8 @@ class CliProtocolTests(unittest.TestCase):
         path = self.ok("journal", "path", *self.scope)
         self.assertEqual(set(path), {"scope", "v"})
         self.ok("journal", "init", *self.scope)
+        doctor = self.ok("doctor", *self.scope)
+        self.assertEqual(set(doctor), {"checks", "status", "v"})
         ingested = self.ok(
             "ingest", "--message", "Create a protocol-test task",
             "--source", "protocol-test", *self.scope,
@@ -221,7 +224,29 @@ class CliProtocolTests(unittest.TestCase):
         self.ok("task", "list", *self.scope)
         task = self.ok("task", "show", task_id, *self.scope)
         self.assertEqual(set(task), {"task", "v"})
+        explained = self.ok("task", "explain", task_id, *self.scope)
+        self.assertEqual(set(explained), {"explain", "v"})
+        self.assertEqual(explained["explain"]["state"], "ready")
+        history = self.ok("task", "history", task_id, *self.scope)
+        self.assertEqual(set(history), {"events", "task_id", "v"})
+        self.assertEqual(
+            history["events"][-1]["type"],
+            "task.created",
+        )
         self.ok("queue", "peek", *self.scope)
+        status = self.ok("status", *self.scope)
+        self.assertEqual(
+            set(status),
+            {"claims", "messages", "ready", "scope", "tasks", "v"},
+        )
+        self.assertEqual(status["messages"]["applied"], 1)
+        self.assertEqual(status["tasks"]["ready"], 1)
+        self.assertEqual(status["claims"]["active"], 0)
+        self.assertEqual(len(status["ready"]), 1)
+        self.assertEqual(
+            status["ready"][0],
+            {"task_id": task_id, "priority": 7, "title": "Protocol task"},
+        )
         next_result = self.ok(
             "queue", "next", "--owner", "protocol-test", *self.scope,
         )
@@ -230,6 +255,13 @@ class CliProtocolTests(unittest.TestCase):
         item = next_result["items"][0]
         self.assertEqual(set(item), {"claim", "task"})
         self.assertNotIn("claim", item["task"])
+        claims = self.ok("claim", "list", *self.scope)
+        self.assertEqual(set(claims), {"claims", "v"})
+        self.assertEqual(
+            [claim["claim_id"] for claim in claims["claims"]],
+            [item["claim"]["claim_id"]],
+        )
+        self.assertEqual(claims["claims"][0]["status"], "active")
         self.ok("claim", "release", item["claim"]["claim_id"], *self.scope)
 
         for command, status in (("needs-input", "needs_input"), ("fail", "failed")):
@@ -247,7 +279,17 @@ class CliProtocolTests(unittest.TestCase):
             )
             self.assertEqual(disposed["status"], status)
 
+        reported = self.ok(
+            "report", "--summary", "Protocol report",
+            "--detail", "Protocol report detail",
+            "--to", str(self.repository), *self.scope,
+        )
+        self.assertEqual(reported["status"], "reported")
+
         self.ok("journal", "check", *self.scope)
+        reconciled = self.ok("reconcile", "--user", *self.scope)
+        self.assertEqual(reconciled["status"], "ok")
+        self.assertEqual(reconciled["integrations"][0]["status"], "skipped")
         self.ok("journal", "snapshot", *self.scope)
         self.ok(
             "journal", "export", str(self.root / "journal.jsonl"), *self.scope,
@@ -360,6 +402,71 @@ class CliProtocolTests(unittest.TestCase):
             6,
             "unsupported_environment",
         )
+
+    def test_envelope_rejects_conflicting_payload_version(self) -> None:
+        self.assertEqual(
+            _versioned({"v": 1, "status": "installed"}),
+            {"v": 1, "status": "installed"},
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "conflicts with protocol envelope version",
+        ):
+            _versioned({"v": 2, "status": "installed"})
+
+    def test_export_argument_validation_is_invalid_argument(self) -> None:
+        self.assert_error(
+            self.run_aiq("journal", "export", ".", *self.scope),
+            2,
+            "invalid_argument",
+        )
+
+    def test_unknown_effects_alias_is_invalid_document(self) -> None:
+        self.run_aiq("journal", "init", *self.scope)
+        ingested = json.loads(
+            self.run_aiq(
+                "ingest", "--message", "Unknown alias coverage", *self.scope,
+            ).stdout
+        )
+        message_id = str(ingested["message_id"])
+        claimed = json.loads(
+            self.run_aiq(
+                "inbox", "claim", message_id,
+                "--owner", "protocol-test", *self.scope,
+            ).stdout
+        )
+        effects = json.dumps(
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["update", "$missing", {"title": "New"}]],
+            },
+            separators=(",", ":"),
+        )
+        self.assert_error(
+            self.run_aiq(
+                "inbox", "apply", message_id,
+                "--claim", claimed["claim"]["claim_id"],
+                "--effects", "-", *self.scope, input_text=effects,
+            ),
+            2,
+            "invalid_document",
+        )
+
+    def test_environment_output_selects_json_for_uncfg_commands(self) -> None:
+        environment = {**self.environment, "AIQ_OUTPUT": "json"}
+        for arguments, key in (
+            (("capability", "list"), "capabilities"),
+            (("integration", "list"), "integrations"),
+        ):
+            with self.subTest(command=arguments):
+                completed = self.run_aiq(*arguments, environment=environment)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(completed.stdout.count("\n"), 1)
+                payload = json.loads(completed.stdout)
+                self.assertEqual(payload["v"], 1)
+                self.assertIn(key, payload)
 
     def test_python_runtime_errors_are_environment_errors(self) -> None:
         self.assertEqual(
