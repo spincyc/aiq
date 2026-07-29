@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def run(
+    command: list[str],
+    *,
+    cwd: Path = REPO_ROOT,
+    environment: dict[str, str] | None = None,
+) -> str:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"command failed ({result.returncode}): {' '.join(command)}\n"
+            f"{result.stdout.strip()}"
+        )
+    return result.stdout
+
+
+def check_arch_packages() -> None:
+    lines = (REPO_ROOT / "Makefile").read_text().splitlines()
+    declarations = [
+        index for index, line in enumerate(lines) if line.startswith("ARCH_PACKAGES")
+    ]
+    if len(declarations) != 1 or lines[declarations[0]] != "ARCH_PACKAGES := \\":
+        raise RuntimeError("Makefile must contain one canonical ARCH_PACKAGES list")
+    start = declarations[0]
+    package_lines: list[str] = []
+    for line in lines[start + 1 :]:
+        if not line.startswith("  "):
+            break
+        package_lines.append(line)
+    if not package_lines:
+        raise RuntimeError("ARCH_PACKAGES must not be empty")
+    packages: list[str] = []
+    for index, line in enumerate(package_lines):
+        suffix = r" \\" if index < len(package_lines) - 1 else ""
+        match = re.fullmatch(r"  ([a-z0-9][a-z0-9@._+-]*)" + suffix, line)
+        if not match:
+            raise RuntimeError("list each Arch package on its own line")
+        packages.append(match.group(1))
+    if packages != sorted(set(packages)):
+        raise RuntimeError("Arch packages must be sorted and unique")
+
+
+def check_tool_syntax() -> None:
+    for path in sorted((REPO_ROOT / "tools").iterdir()):
+        if not path.is_file() or path.suffix:
+            continue
+        content = path.read_bytes()
+        if not content:
+            raise RuntimeError(f"{path.relative_to(REPO_ROOT)} is empty")
+        first_line = content.splitlines()[0].decode("utf-8", errors="replace")
+        if first_line == "#!/bin/sh":
+            run(["/bin/sh", "-n", str(path)])
+        elif first_line == "#!/usr/bin/env python3":
+            try:
+                compile(content, str(path.relative_to(REPO_ROOT)), "exec")
+            except (SyntaxError, UnicodeError) as error:
+                raise RuntimeError(
+                    f"{path.relative_to(REPO_ROOT)}: {error}"
+                ) from error
+        else:
+            raise RuntimeError(f"{path.relative_to(REPO_ROOT)} has no known shebang")
+
+
+def check_bootstrap() -> None:
+    source = (REPO_ROOT / "AGENTS.md").read_bytes()
+    packaged = (REPO_ROOT / "src/aiq/_resources/AGENTS.md").read_bytes()
+    if source != packaged:
+        raise RuntimeError("packaged AGENTS.md differs from the canonical file")
+    words = len(source.decode().split())
+    if words > 150:
+        raise RuntimeError(f"AGENTS.md has {words} words; maximum is 150")
+
+
+def check_public_paths() -> None:
+    forbidden_suffixes = (".db", ".sqlite", ".sqlite3", ".pyc")
+    tracked = run(["git", "ls-files", "-z"]).split("\0")
+    offenders = [
+        path
+        for path in tracked
+        if path.endswith(forbidden_suffixes)
+        or "__pycache__/" in path
+        or path.startswith((".aiq/", ".journal/", "dist/", "build/"))
+    ]
+    if offenders:
+        raise RuntimeError(f"private/generated paths are tracked: {offenders}")
+
+
+def check_python() -> None:
+    for root in ("src", "tests", "tools"):
+        for path in sorted((REPO_ROOT / root).rglob("*.py")):
+            try:
+                compile(path.read_bytes(), str(path.relative_to(REPO_ROOT)), "exec")
+            except (SyntaxError, UnicodeError) as error:
+                raise RuntimeError(f"{path.relative_to(REPO_ROOT)}: {error}") from error
+
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    source_path = str(REPO_ROOT / "src")
+    existing_path = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        f"{source_path}{os.pathsep}{existing_path}" if existing_path else source_path
+    )
+    run(
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+        environment=environment,
+    )
+
+
+def check_build() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    with tempfile.TemporaryDirectory(prefix="aiq-build-") as directory:
+        temporary_root = Path(directory)
+        checkout = temporary_root / "checkout"
+        checkout.mkdir()
+        for name in ("LICENSE", "MANIFEST.in", "README.md", "pyproject.toml"):
+            shutil.copyfile(REPO_ROOT / name, checkout / name)
+        shutil.copytree(
+            REPO_ROOT / "src",
+            checkout / "src",
+            ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "*.pyc"),
+        )
+        output = temporary_root / "dist"
+        run(
+            [
+                sys.executable,
+                "-m",
+                "build",
+                "--no-isolation",
+                "--outdir",
+                str(output),
+            ],
+            cwd=checkout,
+            environment=environment,
+        )
+        distributions = sorted(
+            path.name for path in output.iterdir() if path.is_file()
+        )
+    wheels = [name for name in distributions if name.endswith(".whl")]
+    source_distributions = [
+        name for name in distributions if name.endswith(".tar.gz")
+    ]
+    if len(wheels) != 1 or len(source_distributions) != 1:
+        raise RuntimeError(
+            "build must produce exactly one wheel and one source distribution; "
+            f"found {distributions}"
+        )
+
+
+def main() -> int:
+    checks = (
+        check_arch_packages,
+        check_tool_syntax,
+        check_bootstrap,
+        check_public_paths,
+        check_python,
+        check_build,
+    )
+    failures: list[str] = []
+    for check in checks:
+        try:
+            check()
+        except (OSError, RuntimeError, ValueError) as error:
+            failures.append(f"{check.__name__}: {error}")
+    if failures:
+        for failure in failures:
+            print(f"FAIL {failure}")
+        return 1
+    print("Verification passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

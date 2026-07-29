@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+missing_packages=
+
+check_command() {
+  command_name=$1
+  package_name=$2
+
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    missing_packages="${missing_packages}${missing_packages:+
+}${package_name}"
+  fi
+}
+
+check_command git git
+check_command gitleaks gitleaks
+check_command make make
+check_command pipx python-pipx
+check_command pyproject-build python-build
+check_command python3 python
+
+if [ -n "$missing_packages" ]; then
+  printf 'Missing required Arch packages:\n' >&2
+  printf '%s\n' "$missing_packages" | sed 's/^/  /' >&2
+  printf 'Run `make install-packages`, then rerun `make sanity-check`.\n' >&2
+  exit 1
+fi
+
+python3 - <<'PY'
+import fcntl
+import sqlite3
+import sys
+
+if not ((3, 11) <= sys.version_info[:2] < (3, 15)):
+    raise SystemExit(f"Python 3.11-3.14 is required; found {sys.version.split()[0]}")
+if sqlite3.sqlite_version_info < (3, 37, 0):
+    raise SystemExit(
+        f"SQLite 3.37+ is required; found {sqlite3.sqlite_version}"
+    )
+connection = sqlite3.connect(":memory:")
+try:
+    connection.execute("CREATE TABLE capability(value TEXT) STRICT")
+    result = connection.execute(
+        """SELECT json_valid('[]'), json_type('[]'), json_extract('{"v":1}', '$.v')"""
+    ).fetchone()
+finally:
+    connection.close()
+if result != (1, "array", 1):
+    raise SystemExit("SQLite JSON functions are unavailable")
+PY
+
+printf 'Sanity check passed.\n'

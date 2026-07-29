@@ -1,0 +1,384 @@
+{
+  "$id": "https://raw.githubusercontent.com/spincyc/aiq/main/schemas/effects-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "effects": {
+            "maxItems": 0
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reason"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "reason"
+          ]
+        }
+      }
+    }
+  ],
+  "properties": {
+    "effects": {
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/create"
+          },
+          {
+            "$ref": "#/$defs/update"
+          },
+          {
+            "$ref": "#/$defs/transition"
+          },
+          {
+            "$ref": "#/$defs/require"
+          },
+          {
+            "$ref": "#/$defs/unrequire"
+          }
+        ]
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "expect": {
+      "additionalProperties": {
+        "maximum": 9223372036854775807,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "propertyNames": {
+        "pattern": "^TASK-[1-9][0-9]*$"
+      },
+      "type": "object"
+    },
+    "reason": {
+      "$ref": "#/$defs/requiredReason"
+    },
+    "v": {
+      "const": 1
+    }
+  },
+  "required": [
+    "v",
+    "expect",
+    "effects"
+  ],
+  "title": "AIQ effects document v1",
+  "type": "object",
+  "$defs": {
+    "alias": {
+      "pattern": "^\\$[a-z][a-z0-9_-]{0,31}$",
+      "type": "string"
+    },
+    "claimId": {
+      "pattern": "^clm_[0-9a-f]{32}$",
+      "type": "string"
+    },
+    "create": {
+      "items": false,
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "const": "create"
+        },
+        {
+          "$ref": "#/$defs/alias"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "objective": {
+              "$ref": "#/$defs/objective"
+            },
+            "parent": {
+              "$ref": "#/$defs/taskReference"
+            },
+            "priority": {
+              "$ref": "#/$defs/priority"
+            },
+            "requires": {
+              "items": {
+                "$ref": "#/$defs/taskReference"
+              },
+              "maxItems": 64,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        }
+      ],
+      "type": "array"
+    },
+    "doneTransition": {
+      "items": false,
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+        {
+          "const": "transition"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        },
+        {
+          "const": "done"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "claim": {
+              "$ref": "#/$defs/claimId"
+            },
+            "reason": {
+              "$ref": "#/$defs/reason"
+            }
+          },
+          "required": [
+            "claim"
+          ],
+          "type": "object"
+        }
+      ],
+      "type": "array"
+    },
+    "failedTransition": {
+      "items": false,
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+        {
+          "const": "transition"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        },
+        {
+          "enum": [
+            "blocked",
+            "canceled"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/requiredReason"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        }
+      ],
+      "type": "array"
+    },
+    "objective": {
+      "maxLength": 2000,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$",
+      "type": "string"
+    },
+    "priority": {
+      "maximum": 1000000,
+      "minimum": -1000000,
+      "type": "integer"
+    },
+    "reason": {
+      "maxLength": 1000,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$",
+      "type": "string"
+    },
+    "require": {
+      "items": false,
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "const": "require"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        }
+      ],
+      "type": "array"
+    },
+    "requiredReason": {
+      "maxLength": 1000,
+      "minLength": 1,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$",
+      "type": "string"
+    },
+    "supersededTransition": {
+      "items": false,
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+        {
+          "const": "transition"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        },
+        {
+          "const": "superseded"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "by": {
+              "$ref": "#/$defs/taskReference"
+            },
+            "reason": {
+              "$ref": "#/$defs/requiredReason"
+            }
+          },
+          "required": [
+            "by",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ],
+      "type": "array"
+    },
+    "taskReference": {
+      "pattern": "^(TASK-[1-9][0-9]*|\\$[a-z][a-z0-9_-]{0,31})$",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$",
+      "type": "string"
+    },
+    "transition": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ordinaryTransition"
+        },
+        {
+          "$ref": "#/$defs/failedTransition"
+        },
+        {
+          "$ref": "#/$defs/doneTransition"
+        },
+        {
+          "$ref": "#/$defs/supersededTransition"
+        }
+      ]
+    },
+    "ordinaryTransition": {
+      "items": false,
+      "maxItems": 4,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "const": "transition"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        },
+        {
+          "enum": [
+            "queued",
+            "ready"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/reason"
+            }
+          },
+          "type": "object"
+        }
+      ],
+      "type": "array"
+    },
+    "unrequire": {
+      "items": false,
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "const": "unrequire"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        }
+      ],
+      "type": "array"
+    },
+    "update": {
+      "items": false,
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "const": "update"
+        },
+        {
+          "$ref": "#/$defs/taskReference"
+        },
+        {
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "objective": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/objective"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "parent": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/taskReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "priority": {
+              "$ref": "#/$defs/priority"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            }
+          },
+          "type": "object"
+        }
+      ],
+      "type": "array"
+    }
+  }
+}

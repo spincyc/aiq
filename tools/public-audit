@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+ALLOWED_TOP_LEVEL = frozenset(
+    {
+        ".github",
+        ".gitignore",
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "MANIFEST.in",
+        "Makefile",
+        "README.md",
+        "SECURITY.md",
+        "docs",
+        "pyproject.toml",
+        "schemas",
+        "src",
+        "tests",
+        "tools",
+    }
+)
+
+DENIED_PATH_PARTS = frozenset(
+    {
+        ".aiq",
+        ".claude",
+        ".codex",
+        ".env",
+        ".gemini",
+        ".gnupg",
+        ".journal",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ssh",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "htmlcov",
+        "node_modules",
+    }
+)
+
+DENIED_PATH_SUFFIXES = (
+    ".db",
+    ".key",
+    ".p12",
+    ".pem",
+    ".pfx",
+    ".pyc",
+    ".sqlite",
+    ".sqlite3",
+)
+
+DENIED_CONTENT = (
+    (
+        "personal Unix home path",
+        re.compile(rb"(?<![A-Za-z0-9_])/(?:home|Users)/[^/\s\"'<>]+"),
+    ),
+    (
+        "personal Windows home path",
+        re.compile(rb"(?i)(?<![A-Za-z0-9_])[A-Z]:\\Users\\[^\\\s\"'<>]+"),
+    ),
+    (
+        "local account name",
+        re.compile(rb"(?i)(?<![A-Za-z0-9_])ksh(?![A-Za-z0-9_])"),
+    ),
+    (
+        "dotfiles repository coupling",
+        re.compile(rb"(?i)(?:spincyc/dotfiles|github\.com/spincyc/dotfiles)"),
+    ),
+    (
+        "dotfiles guidance coupling",
+        re.compile(rb"(?:AI_GUIDANCE\.md|ai-guidance/)"),
+    ),
+    (
+        "private-key material",
+        re.compile(rb"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
+    ),
+)
+
+ALLOWED_CONTENT_VIOLATIONS = {
+    ".github/workflows/ci.yml": frozenset({"personal Unix home path"}),
+    "tests/test_config.py": frozenset({"personal Unix home path"}),
+    "tools/public-audit": frozenset(
+        {
+            "dotfiles guidance coupling",
+            "dotfiles repository coupling",
+            "local account name",
+        }
+    ),
+}
+
+
+class AuditFailure(RuntimeError):
+    pass
+
+
+def run(
+    command: list[str],
+    *,
+    cwd: Path = REPO_ROOT,
+    input_bytes: bytes | None = None,
+) -> bytes:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if result.returncode:
+        output = result.stdout.decode("utf-8", errors="replace").strip()
+        raise AuditFailure(
+            f"command failed ({result.returncode}): {' '.join(command)}"
+            + (f"\n{output}" if output else "")
+        )
+    return result.stdout
+
+
+def candidate_paths() -> list[str]:
+    output = run(
+        [
+            "git",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ]
+    )
+    return sorted({path for path in output.decode().split("\0") if path})
+
+
+def path_violations(path: str) -> list[str]:
+    violations: list[str] = []
+    candidate = PurePosixPath(path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        violations.append("path is not repository-relative")
+        return violations
+    if not candidate.parts or candidate.parts[0] not in ALLOWED_TOP_LEVEL:
+        violations.append("top-level path is not allowlisted")
+    denied_parts = sorted(set(candidate.parts) & DENIED_PATH_PARTS)
+    if denied_parts:
+        violations.append(f"denied path component: {', '.join(denied_parts)}")
+    lower_name = candidate.name.lower()
+    if lower_name == ".env" or lower_name.startswith(".env."):
+        violations.append("environment file is denied")
+    if lower_name.endswith(DENIED_PATH_SUFFIXES):
+        violations.append("private or generated file suffix is denied")
+    return violations
+
+
+def content_violations(path: str, content: bytes) -> list[str]:
+    violations: list[str] = []
+    if b"\0" in content:
+        violations.append("binary content is not allowlisted")
+        return violations
+    for description, pattern in DENIED_CONTENT:
+        if (
+            pattern.search(content)
+            and description not in ALLOWED_CONTENT_VIOLATIONS.get(path, ())
+        ):
+            violations.append(description)
+    return violations
+
+
+def audit_worktree(paths: list[str]) -> list[str]:
+    violations: list[str] = []
+    for path in paths:
+        violations.extend(f"path: {path}: {item}" for item in path_violations(path))
+        source = REPO_ROOT / path
+        if source.is_symlink():
+            violations.append(f"path: {path}: symbolic links are not allowlisted")
+            continue
+        if not source.is_file():
+            violations.append(f"path: {path}: candidate is not a regular file")
+            continue
+        violations.extend(
+            f"content: {path}: {item}"
+            for item in content_violations(path, source.read_bytes())
+        )
+    return violations
+
+
+def history_objects() -> list[tuple[str, str]]:
+    if int(run(["git", "rev-list", "--all", "--count"]).strip() or b"0") == 0:
+        return []
+    objects: list[tuple[str, str]] = []
+    for record in run(["git", "rev-list", "--objects", "--all"]).splitlines():
+        fields = record.decode("utf-8", errors="surrogateescape").split(" ", 1)
+        if len(fields) == 2:
+            objects.append((fields[0], fields[1]))
+    return sorted(set(objects), key=lambda item: (item[1], item[0]))
+
+
+def audit_history(objects: list[tuple[str, str]]) -> list[str]:
+    violations: list[str] = []
+    for object_id, path in objects:
+        if run(["git", "cat-file", "-t", object_id]).strip() != b"blob":
+            continue
+        violations.extend(
+            f"history path: {path}: {item}" for item in path_violations(path)
+        )
+        content = run(["git", "cat-file", "blob", object_id])
+        violations.extend(
+            f"history content: {path}@{object_id[:12]}: {item}"
+            for item in content_violations(path, content)
+        )
+    if objects:
+        messages = run(
+            ["git", "log", "--all", "--format=%H%x00%B%x00"]
+        ).split(b"\0")
+        for index in range(0, len(messages) - 1, 2):
+            commit = messages[index].decode("ascii", errors="replace")
+            message = messages[index + 1]
+            violations.extend(
+                f"history message: {commit[:12]}: {item}"
+                for item in content_violations("<commit-message>", message)
+            )
+    return violations
+
+
+def run_gitleaks(paths: list[str], *, has_history: bool) -> None:
+    executable = shutil.which("gitleaks")
+    if executable is None:
+        raise AuditFailure("required command is missing: gitleaks")
+    environment = os.environ.copy()
+    environment.pop("GITLEAKS_CONFIG", None)
+    environment.pop("GITLEAKS_CONFIG_TOML", None)
+    common = [
+        executable,
+        "--redact=100",
+        "--no-banner",
+        "--no-color",
+        "--ignore-gitleaks-allow",
+    ]
+    with tempfile.TemporaryDirectory(prefix="aiq-public-audit-") as directory:
+        scan_root = Path(directory)
+        for path in paths:
+            source = REPO_ROOT / path
+            if source.is_file() and not source.is_symlink():
+                destination = scan_root / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+        result = subprocess.run(
+            [*common, "dir", str(scan_root)],
+            cwd=REPO_ROOT,
+            env=environment,
+        )
+        if result.returncode:
+            raise AuditFailure("Gitleaks worktree scan failed")
+    if has_history:
+        result = subprocess.run(
+            [*common, "git", str(REPO_ROOT)],
+            cwd=REPO_ROOT,
+            env=environment,
+        )
+        if result.returncode:
+            raise AuditFailure("Gitleaks history scan failed")
+
+
+def main() -> int:
+    try:
+        root = run(["git", "rev-parse", "--show-toplevel"]).decode().strip()
+        if Path(root).resolve() != REPO_ROOT:
+            raise AuditFailure(f"script is not at the Git repository root: {root}")
+        paths = candidate_paths()
+        objects = history_objects()
+        violations = sorted(set(audit_worktree(paths) + audit_history(objects)))
+        run_gitleaks(paths, has_history=bool(objects))
+    except (AuditFailure, OSError, UnicodeError) as error:
+        print(f"FAIL public audit: {error}", file=sys.stderr)
+        return 1
+    if violations:
+        for violation in violations:
+            print(f"FAIL {violation}", file=sys.stderr)
+        return 1
+    print("Public audit passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

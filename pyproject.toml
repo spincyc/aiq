@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiq-workqueue"
+version = "0.1.0a1"
+description = "Deterministic, local-first work ledger for humans and AI agents"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+keywords = [
+  "agents",
+  "automation",
+  "journal",
+  "local-first",
+  "queue",
+  "workflow",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development",
+]
+
+[project.scripts]
+aiq = "aiq.cli:main"
+
+[project.urls]
+Changelog = "https://github.com/spincyc/aiq/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/spincyc/aiq"
+Issues = "https://github.com/spincyc/aiq/issues"
+Repository = "https://github.com/spincyc/aiq.git"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["aiq", "aiq.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+"aiq._resources" = ["AGENTS.md"]

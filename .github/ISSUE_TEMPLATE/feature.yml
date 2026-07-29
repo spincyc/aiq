@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a reusable AIQ capability or behavior
+title: "feature: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the recurring use case and who encounters it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe observable behavior, not implementation details.
+    validations:
+      required: true
+  - type: textarea
+    id: deterministic_alternative
+    attributes:
+      label: Deterministic or local alternative
+      description: Explain what existing tool or local procedure was considered.
+    validations:
+      required: true
+  - type: textarea
+    id: resource_effect
+    attributes:
+      label: Resource effect
+      description: Describe effects on compute, context, and user stalls.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: Note changes to public CLI or versioned contracts, if any.
+    validations:
+      required: true

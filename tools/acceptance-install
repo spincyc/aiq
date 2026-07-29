@@ -1,0 +1,637 @@
+#!/bin/sh
+set -eu
+
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+source_location=${AIQ_ACCEPTANCE_SOURCE:-$repo_dir}
+
+fail() {
+  printf 'acceptance-install: %s\n' "$*" >&2
+  exit 1
+}
+
+stage() {
+  printf '==> %s\n' "$1"
+}
+
+for command_name in git pipx python3; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    fail "missing required command: $command_name"
+  fi
+done
+
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/aiq-acceptance.XXXXXX")
+case "$test_root" in
+  "${TMPDIR:-/tmp}"/aiq-acceptance.*) ;;
+  *) fail "mktemp returned an unexpected path: $test_root" ;;
+esac
+
+cleanup() {
+  chmod -R u+rwX "$test_root" 2>/dev/null || true
+  rm -rf -- "$test_root"
+}
+trap cleanup EXIT HUP INT TERM
+
+home_dir=$test_root/home
+config_home=$test_root/xdg/config
+state_home=$test_root/xdg/state
+data_home=$test_root/xdg/data
+cache_home=$test_root/xdg/cache
+pipx_home=$test_root/pipx
+pipx_bin_dir=$test_root/bin
+source_checkout=$test_root/source/aiq
+source_offline=$test_root/source/aiq.offline
+work_repo=$home_dir/work/unrelated
+results_dir=$test_root/results
+
+mkdir -p \
+  "$home_dir" \
+  "$config_home" \
+  "$state_home" \
+  "$data_home" \
+  "$cache_home" \
+  "$pipx_home" \
+  "$pipx_bin_dir" \
+  "$results_dir"
+chmod 0700 \
+  "$home_dir" \
+  "$config_home" \
+  "$state_home" \
+  "$data_home" \
+  "$cache_home" \
+  "$pipx_home" \
+  "$pipx_bin_dir" \
+  "$results_dir"
+
+export HOME=$home_dir
+export XDG_CONFIG_HOME=$config_home
+export XDG_STATE_HOME=$state_home
+export XDG_DATA_HOME=$data_home
+export XDG_CACHE_HOME=$cache_home
+export PIPX_HOME=$pipx_home
+export PIPX_BIN_DIR=$pipx_bin_dir
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+export PYTHONNOUSERSITE=1
+export PATH=$pipx_bin_dir:$PATH
+
+assert_json_object() {
+  python3 - "$1" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+try:
+    value = json.loads(path.read_text())
+except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"{path} is not valid JSON: {error}")
+if not isinstance(value, dict):
+    raise SystemExit(f"{path} does not contain a JSON object")
+PY
+}
+
+tree_manifest() {
+  python3 - "$@" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+entries = []
+for raw_root in sys.argv[1:]:
+    root = Path(raw_root)
+    if not os.path.lexists(root):
+        entries.append([str(root), "missing"])
+        continue
+    paths = [root]
+    if root.is_dir():
+        paths.extend(sorted(root.rglob("*")))
+    for path in paths:
+        relative = "." if path == root else str(path.relative_to(root))
+        metadata = path.lstat()
+        mode = stat.S_IMODE(metadata.st_mode)
+        if path.is_symlink():
+            entries.append([str(root), relative, "link", mode, os.readlink(path)])
+        elif path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            entries.append([str(root), relative, "file", mode, digest])
+        elif path.is_dir():
+            entries.append([str(root), relative, "directory", mode])
+        else:
+            entries.append([str(root), relative, "other", mode])
+print(json.dumps(entries, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+stage "clone source"
+git clone --quiet -- "$source_location" "$source_checkout" ||
+  fail "could not clone AIQ source from $source_location"
+for required_path in AGENTS.md LICENSE pyproject.toml src tests tools; do
+  if [ ! -e "$source_checkout/$required_path" ]; then
+    fail "cloned source is missing $required_path"
+  fi
+done
+if [ -n "$(git -C "$source_checkout" status --porcelain)" ]; then
+  fail "fresh source clone is not clean"
+fi
+cp "$source_checkout/AGENTS.md" "$results_dir/canonical-AGENTS.md"
+
+stage "install source with pipx"
+(
+  cd "$source_checkout"
+  pipx install .
+)
+aiq_bin=$pipx_bin_dir/aiq
+if [ ! -x "$aiq_bin" ]; then
+  fail "pipx did not install the aiq entry point"
+fi
+"$aiq_bin" --version >"$results_dir/version.txt"
+"$aiq_bin" capability list --json >"$results_dir/capabilities.json"
+assert_json_object "$results_dir/capabilities.json"
+if [ -n "$(git -C "$source_checkout" status --porcelain)" ]; then
+  fail "pipx installation changed the source checkout"
+fi
+
+stage "prove installed package is independent of source checkout"
+mv "$source_checkout" "$source_offline"
+"$aiq_bin" --version >"$results_dir/offline-version.txt"
+"$aiq_bin" capability list --json >"$results_dir/offline-capabilities.json"
+assert_json_object "$results_dir/offline-capabilities.json"
+
+if ! "$aiq_bin" integration --help >"$results_dir/integration-help.txt" 2>&1; then
+  sed -n '1,80p' "$results_dir/integration-help.txt" >&2
+  fail "planned integration CLI is unavailable; expected: aiq integration {plan,install,check,uninstall,print}"
+fi
+for integration_command in plan install check uninstall print; do
+  if ! "$aiq_bin" integration "$integration_command" --help \
+    >"$results_dir/integration-$integration_command-help.txt" 2>&1; then
+    sed -n '1,80p' \
+      "$results_dir/integration-$integration_command-help.txt" >&2
+    fail "planned integration command is unavailable: $integration_command"
+  fi
+done
+
+stage "verify packaged bootstrap guidance"
+"$aiq_bin" integration print agents >"$results_dir/installed-AGENTS.md"
+if ! cmp -s \
+  "$results_dir/canonical-AGENTS.md" \
+  "$results_dir/installed-AGENTS.md"; then
+  fail "installed bootstrap guidance differs from canonical AGENTS.md"
+fi
+
+stage "prepare unrelated user environment"
+mkdir -p "$work_repo" "$home_dir/.codex"
+git -C "$work_repo" init --quiet -b main
+cat >"$home_dir/.codex/hooks.json" <<'EOF'
+{
+  "description": "user-owned acceptance configuration",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "true"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+cat >"$home_dir/.codex/AGENTS.md" <<'EOF'
+# Existing user guidance
+
+This file is not owned by AIQ.
+EOF
+cp "$home_dir/.codex/hooks.json" "$results_dir/original-hooks.json"
+cp "$home_dir/.codex/AGENTS.md" "$results_dir/original-user-AGENTS.md"
+
+tree_manifest \
+  "$home_dir/.codex" \
+  "$state_home/aiq/integrations" \
+  >"$results_dir/before-plan.json"
+
+stage "plan Codex integration without mutation"
+"$aiq_bin" integration plan codex --user --json \
+  >"$results_dir/integration-plan.json"
+assert_json_object "$results_dir/integration-plan.json"
+tree_manifest \
+  "$home_dir/.codex" \
+  "$state_home/aiq/integrations" \
+  >"$results_dir/after-plan.json"
+if ! cmp -s "$results_dir/before-plan.json" "$results_dir/after-plan.json"; then
+  fail "integration plan changed user or integration state"
+fi
+
+stage "install and check Codex integration"
+"$aiq_bin" integration install codex --user --json \
+  >"$results_dir/integration-install.json"
+assert_json_object "$results_dir/integration-install.json"
+python3 - "$home_dir/.codex/hooks.json" "$home_dir/.codex/AGENTS.md" \
+  "$results_dir/original-user-AGENTS.md" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+hooks_path = Path(sys.argv[1])
+guidance_path = Path(sys.argv[2])
+original_guidance_path = Path(sys.argv[3])
+configuration = json.loads(hooks_path.read_text())
+session_start = configuration.get("hooks", {}).get("SessionStart")
+expected = [
+    {
+        "hooks": [
+            {
+                "type": "command",
+                "command": "true",
+            }
+        ]
+    }
+]
+if session_start != expected:
+    raise SystemExit("Codex integration changed unrelated user hooks")
+if guidance_path.read_bytes() != original_guidance_path.read_bytes():
+    raise SystemExit("Codex integration changed existing user guidance")
+PY
+
+integration_state=$state_home/aiq/integrations
+python3 - "$integration_state" <<'PY'
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+files = [path for path in root.rglob("*") if path.is_file()]
+if not files:
+    raise SystemExit("integration install created no ownership manifest")
+for path in files:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode != 0o600:
+        raise SystemExit(f"integration state file is not private: {path}: {mode:04o}")
+PY
+
+tree_manifest \
+  "$home_dir/.codex" \
+  "$integration_state" \
+  >"$results_dir/after-first-install.json"
+"$aiq_bin" integration install codex --user --json \
+  >"$results_dir/integration-reinstall.json"
+assert_json_object "$results_dir/integration-reinstall.json"
+tree_manifest \
+  "$home_dir/.codex" \
+  "$integration_state" \
+  >"$results_dir/after-second-install.json"
+if ! cmp -s \
+  "$results_dir/after-first-install.json" \
+  "$results_dir/after-second-install.json"; then
+  fail "repeated integration install changed managed state"
+fi
+"$aiq_bin" integration check codex --user --json \
+  >"$results_dir/integration-check.json"
+assert_json_object "$results_dir/integration-check.json"
+
+stage "execute installed Codex prompt hook"
+python3 - \
+  "$home_dir/.codex/hooks.json" \
+  "$work_repo" \
+  "$results_dir/hook-output.txt" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+configuration = json.loads(Path(sys.argv[1]).read_text())
+commands = []
+for group in configuration.get("hooks", {}).get("UserPromptSubmit", []):
+    for hook in group.get("hooks", []):
+        command = hook.get("command")
+        if hook.get("type") == "command" and isinstance(command, str):
+            if "aiq" in command:
+                commands.append(command)
+if len(commands) != 1:
+    raise SystemExit(f"expected one installed AIQ prompt hook; found {len(commands)}")
+
+event = {
+    "hook_event_name": "UserPromptSubmit",
+    "session_id": "acceptance-session",
+    "turn_id": "acceptance-turn",
+    "cwd": sys.argv[2],
+    "prompt": "Create the acceptance task",
+}
+result = subprocess.run(
+    commands[0],
+    cwd=sys.argv[2],
+    env=os.environ.copy(),
+    input=json.dumps(event),
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    shell=True,
+    executable="/bin/sh",
+)
+Path(sys.argv[3]).write_text(result.stdout)
+if result.returncode:
+    raise SystemExit(
+        f"installed prompt hook failed ({result.returncode}): {result.stderr.strip()}"
+    )
+if result.stdout:
+    raise SystemExit("installed prompt hook produced stdout")
+PY
+
+stage "verify repository-local journal scope"
+(
+  cd "$work_repo"
+  "$aiq_bin" journal path --json >"$results_dir/journal-path.json"
+)
+python3 - "$results_dir/journal-path.json" "$work_repo" "$source_offline" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+journal = Path(payload["scope"]["journal_path"]).resolve()
+common = Path(
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            sys.argv[2],
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+).resolve()
+source = Path(sys.argv[3]).resolve()
+if not journal.is_relative_to(common):
+    raise SystemExit(f"journal is outside the unrelated repository: {journal}")
+if journal.is_relative_to(source):
+    raise SystemExit(f"journal incorrectly belongs to the AIQ source: {journal}")
+PY
+
+stage "exercise message and queue lifecycle"
+(
+  cd "$work_repo"
+  "$aiq_bin" inbox list --include-content --json \
+    >"$results_dir/inbox-received.json"
+)
+message_id=$(python3 - "$results_dir/inbox-received.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+messages = json.loads(Path(sys.argv[1]).read_text()).get("messages")
+if not isinstance(messages, list) or len(messages) != 1:
+    raise SystemExit("prompt hook did not create exactly one inbox message")
+message = messages[0]
+if message.get("content") != "Create the acceptance task":
+    raise SystemExit("prompt hook did not preserve exact message content")
+print(message["message_id"])
+PY
+)
+(
+  cd "$work_repo"
+  "$aiq_bin" inbox claim "$message_id" --owner acceptance --json \
+    >"$results_dir/message-claim.json"
+)
+message_claim=$(python3 - "$results_dir/message-claim.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+print(json.loads(Path(sys.argv[1]).read_text())["claim"]["claim_id"])
+PY
+)
+cat >"$results_dir/create-effects.json" <<'EOF'
+{"v":1,"expect":{},"effects":[["create","$acceptance",{"title":"Acceptance task"}]]}
+EOF
+(
+  cd "$work_repo"
+  "$aiq_bin" inbox apply "$message_id" \
+    --claim "$message_claim" \
+    --effects "$results_dir/create-effects.json" \
+    --json >"$results_dir/create-result.json"
+)
+task_id=$(python3 - "$results_dir/create-result.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+result = json.loads(Path(sys.argv[1]).read_text())
+if result.get("status") != "applied":
+    raise SystemExit("create effects were not applied")
+print(result["aliases"]["$acceptance"])
+PY
+)
+(
+  cd "$work_repo"
+  "$aiq_bin" queue peek --json >"$results_dir/queue-peek.json"
+  "$aiq_bin" queue next --owner acceptance --json \
+    >"$results_dir/queue-next.json"
+)
+set -- $(python3 - "$results_dir/queue-peek.json" \
+  "$results_dir/queue-next.json" "$task_id" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+peek = json.loads(Path(sys.argv[1]).read_text())["tasks"]
+claimed = json.loads(Path(sys.argv[2]).read_text())["items"]
+task_id = sys.argv[3]
+if len(peek) != 1 or peek[0]["task_id"] != task_id:
+    raise SystemExit("queue peek did not expose the created task")
+if len(claimed) != 1 or claimed[0]["task"]["task_id"] != task_id:
+    raise SystemExit("queue next did not claim the created task")
+print(claimed[0]["claim"]["claim_id"], claimed[0]["task"]["revision"])
+PY
+)
+task_claim=$1
+task_revision=$2
+
+(
+  cd "$work_repo"
+  "$aiq_bin" ingest \
+    --message "Acceptance task completed" \
+    --source acceptance \
+    --idempotency-key acceptance:completion \
+    --json >"$results_dir/completion-ingest.json"
+  "$aiq_bin" ingest \
+    --message "Acceptance task completed" \
+    --source acceptance \
+    --idempotency-key acceptance:completion \
+    --json >"$results_dir/completion-replay.json"
+)
+completion_message=$(python3 - \
+  "$results_dir/completion-ingest.json" \
+  "$results_dir/completion-replay.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+created = json.loads(Path(sys.argv[1]).read_text())
+replayed = json.loads(Path(sys.argv[2]).read_text())
+if created["message_id"] != replayed["message_id"]:
+    raise SystemExit("idempotent ingestion changed message identity")
+if created.get("created") is not True or replayed.get("created") is not False:
+    raise SystemExit("idempotent ingestion did not report create/replay correctly")
+print(created["message_id"])
+PY
+)
+if (
+  cd "$work_repo"
+  "$aiq_bin" ingest \
+    --message "Different completion" \
+    --source acceptance \
+    --idempotency-key acceptance:completion \
+    --json >/dev/null 2>"$results_dir/idempotency-error.json"
+); then
+  fail "an idempotency key accepted different content"
+fi
+
+(
+  cd "$work_repo"
+  "$aiq_bin" inbox claim "$completion_message" --owner acceptance --json \
+    >"$results_dir/completion-claim.json"
+)
+completion_claim=$(python3 - "$results_dir/completion-claim.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+print(json.loads(Path(sys.argv[1]).read_text())["claim"]["claim_id"])
+PY
+)
+python3 - \
+  "$results_dir/complete-effects.json" \
+  "$task_id" \
+  "$task_revision" \
+  "$task_claim" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+document = {
+    "v": 1,
+    "expect": {sys.argv[2]: int(sys.argv[3])},
+    "effects": [
+        [
+            "transition",
+            sys.argv[2],
+            "done",
+            {"claim": sys.argv[4]},
+        ]
+    ],
+}
+Path(sys.argv[1]).write_text(
+    json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+)
+PY
+(
+  cd "$work_repo"
+  "$aiq_bin" inbox apply "$completion_message" \
+    --claim "$completion_claim" \
+    --effects "$results_dir/complete-effects.json" \
+    --json >"$results_dir/complete-result.json"
+  "$aiq_bin" inbox apply "$completion_message" \
+    --claim "$completion_claim" \
+    --effects "$results_dir/complete-effects.json" \
+    --json >"$results_dir/complete-replay.json"
+  "$aiq_bin" inbox list --json >"$results_dir/inbox-final.json"
+  "$aiq_bin" queue peek --json >"$results_dir/queue-final.json"
+  "$aiq_bin" task list --json >"$results_dir/tasks-final.json"
+  "$aiq_bin" task show "$task_id" --json >"$results_dir/task-done.json"
+  "$aiq_bin" journal check --json >"$results_dir/journal-check.json"
+)
+python3 - \
+  "$results_dir/complete-result.json" \
+  "$results_dir/complete-replay.json" \
+  "$results_dir/inbox-final.json" \
+  "$results_dir/queue-final.json" \
+  "$results_dir/tasks-final.json" \
+  "$results_dir/task-done.json" \
+  "$results_dir/journal-check.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+values = [json.loads(Path(path).read_text()) for path in sys.argv[1:]]
+completed, replayed, inbox, queue, tasks, task, check = values
+if completed.get("status") != "applied" or completed.get("replayed") is not False:
+    raise SystemExit("task completion effects were not applied")
+if replayed.get("replayed") is not True:
+    raise SystemExit("effects replay was not deterministic")
+if inbox.get("messages") != []:
+    raise SystemExit("applied messages remain in the inbox")
+if queue.get("tasks") != []:
+    raise SystemExit("completed task remains runnable")
+if tasks.get("tasks") != []:
+    raise SystemExit("terminal task appears in the default task list")
+if task.get("task", {}).get("state") != "done":
+    raise SystemExit("task did not reach done")
+if check.get("status") != "ok" or check.get("messages") != 2:
+    raise SystemExit("journal integrity check did not pass")
+PY
+
+python3 - "$results_dir/journal-path.json" <<'PY'
+import json
+from pathlib import Path
+import stat
+import sys
+
+journal = Path(
+    json.loads(Path(sys.argv[1]).read_text())["scope"]["journal_path"]
+)
+directory_mode = stat.S_IMODE(journal.parent.stat().st_mode)
+journal_mode = stat.S_IMODE(journal.stat().st_mode)
+if directory_mode != 0o700:
+    raise SystemExit(f"journal directory mode is {directory_mode:04o}, expected 0700")
+if journal_mode != 0o600:
+    raise SystemExit(f"journal mode is {journal_mode:04o}, expected 0600")
+PY
+if [ -n "$(git -C "$work_repo" status --porcelain)" ]; then
+  fail "AIQ runtime state changed the unrelated repository worktree"
+fi
+
+stage "uninstall integration without removing user state"
+"$aiq_bin" integration uninstall codex --user --json \
+  >"$results_dir/integration-uninstall.json"
+assert_json_object "$results_dir/integration-uninstall.json"
+if ! cmp -s \
+  "$results_dir/original-hooks.json" \
+  "$home_dir/.codex/hooks.json"; then
+  fail "integration uninstall did not restore the original hooks file"
+fi
+if ! cmp -s \
+  "$results_dir/original-user-AGENTS.md" \
+  "$home_dir/.codex/AGENTS.md"; then
+  fail "integration uninstall changed existing user guidance"
+fi
+"$aiq_bin" integration uninstall codex --user --json \
+  >"$results_dir/integration-reuninstall.json"
+assert_json_object "$results_dir/integration-reuninstall.json"
+(
+  cd "$work_repo"
+  "$aiq_bin" journal check --json \
+    >"$results_dir/journal-after-uninstall.json"
+)
+assert_json_object "$results_dir/journal-after-uninstall.json"
+
+stage "uninstall package and verify source remains clean"
+pipx uninstall aiq-workqueue
+if [ -e "$aiq_bin" ]; then
+  fail "pipx uninstall left the aiq entry point installed"
+fi
+mv "$source_offline" "$source_checkout"
+if [ -n "$(git -C "$source_checkout" status --porcelain)" ]; then
+  fail "acceptance run changed the cloned source"
+fi
+
+printf 'Install acceptance passed.\n'
