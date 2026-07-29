@@ -259,6 +259,12 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=False,
         idempotency="read-only",
     ),
+    "status.show": _capability(
+        "Read one bounded work-state snapshot without message content.",
+        "aiq status [--json]",
+        mutates=False,
+        idempotency="read-only",
+    ),
     "task.list": _capability(
         "List bounded compact current task state.",
         "aiq task list [--state STATE] [--limit N] [--json]",

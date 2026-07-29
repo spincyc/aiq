@@ -39,6 +39,7 @@ EXPECTED_COMMAND_PATHS = {
     "message.ingest": ("ingest",),
     "queue.next": ("queue", "next"),
     "queue.peek": ("queue", "peek"),
+    "status.show": ("status",),
     "task.list": ("task", "list"),
     "task.show": ("task", "show"),
 }

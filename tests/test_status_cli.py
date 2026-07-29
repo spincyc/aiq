@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+
+
+class StatusCliTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.repository = self.root / "repository"
+        self.repository.mkdir()
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch=main", str(self.repository)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("AIQ_", "GIT_"))
+            and key not in {"PYTHONPATH", "XDG_CONFIG_HOME", "XDG_STATE_HOME"}
+        }
+        self.environment.update(
+            {
+                "HOME": str(self.home),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": str(REPOSITORY_ROOT / "src"),
+                "XDG_CONFIG_HOME": str(self.root / "config"),
+                "XDG_STATE_HOME": str(self.root / "state"),
+            }
+        )
+        self.scope = ("--scope", "repo", "--cwd", str(self.repository))
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def run_aiq(
+        self,
+        *arguments: str,
+        input_text: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "aiq", *arguments],
+            cwd=self.repository,
+            env=self.environment,
+            input=input_text,
+            text=True,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def ok(
+        self,
+        *arguments: str,
+        input_text: str | None = None,
+    ) -> dict[str, object]:
+        completed = self.run_aiq(
+            *arguments, "--json", input_text=input_text
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout)
+
+    def create_ready_task(self) -> str:
+        self.ok("journal", "init", *self.scope)
+        ingested = self.ok(
+            "ingest", "--message", "Confidential prompt content",
+            "--source", "status-test", *self.scope,
+        )
+        message_id = str(ingested["message_id"])
+        claimed = self.ok(
+            "inbox", "claim", message_id,
+            "--owner", "status-test", *self.scope,
+        )
+        effects = json.dumps(
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [
+                    ["create", "$task", {"title": "Status task", "priority": 3}]
+                ],
+            },
+            separators=(",", ":"),
+        )
+        applied = self.ok(
+            "inbox", "apply", message_id,
+            "--claim", str(claimed["claim"]["claim_id"]),
+            "--effects", "-", *self.scope, input_text=effects,
+        )
+        return str(applied["aliases"]["$task"])
+
+    def test_json_status_is_versioned_bounded_and_content_free(self) -> None:
+        task_id = self.create_ready_task()
+
+        completed = self.run_aiq("status", *self.scope, "--json")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        self.assertEqual(completed.stdout.count("\n"), 1)
+        self.assertNotIn("Confidential", completed.stdout)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["v"], 1)
+        self.assertEqual(
+            set(payload),
+            {"claims", "messages", "ready", "scope", "tasks", "v"},
+        )
+        self.assertEqual(
+            payload["messages"],
+            {
+                "received": 0,
+                "processing": 0,
+                "applied": 1,
+                "needs_input": 0,
+                "failed": 0,
+            },
+        )
+        self.assertEqual(payload["tasks"]["ready"], 1)
+        self.assertEqual(payload["claims"], {"active": 0})
+        self.assertEqual(
+            payload["ready"],
+            [{"task_id": task_id, "priority": 3, "title": "Status task"}],
+        )
+
+    def test_human_status_is_terse_and_content_free(self) -> None:
+        task_id = self.create_ready_task()
+
+        completed = self.run_aiq("status", *self.scope)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        self.assertNotIn("Confidential", completed.stdout)
+        lines = completed.stdout.splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(
+            lines[0],
+            "messages  received=0  processing=0  applied=1  "
+            "needs_input=0  failed=0",
+        )
+        self.assertEqual(
+            lines[1],
+            "tasks     queued=0  ready=1  active=0  blocked=0  "
+            "done=0  canceled=0  superseded=0",
+        )
+        self.assertEqual(lines[2], "claims    active=0")
+        self.assertEqual(lines[3], f"ready     {task_id}\tp3\tStatus task")
+
+    def test_missing_journal_reports_zeros_without_creating_storage(self) -> None:
+        payload = self.ok("status", *self.scope)
+
+        self.assertEqual(payload["v"], 1)
+        self.assertEqual(sum(payload["messages"].values()), 0)
+        self.assertEqual(sum(payload["tasks"].values()), 0)
+        self.assertEqual(payload["claims"], {"active": 0})
+        self.assertEqual(payload["ready"], [])
+        self.assertFalse(
+            (self.repository / ".git" / "aiq" / "journal.sqlite3").exists()
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

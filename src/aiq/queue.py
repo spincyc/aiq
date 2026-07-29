@@ -20,6 +20,13 @@ from aiq.journal import (
 
 EFFECT_DOCUMENT_MAX_BYTES = 65536
 EFFECT_COUNT_MAX = 64
+MESSAGE_STATES = (
+    "received",
+    "processing",
+    "applied",
+    "needs_input",
+    "failed",
+)
 TASK_STATES = (
     "queued",
     "ready",
@@ -1053,6 +1060,117 @@ def next_tasks(
     if limit < 1 or limit > 64:
         raise JournalError("queue limit must be between 1 and 64")
     return list_tasks(scope, states={"ready"}, limit=limit)
+
+
+def read_status(
+    scope: JournalScope,
+    *,
+    ready_limit: int = 5,
+    now_us: int | None = None,
+) -> dict[str, Any]:
+    if ready_limit < 1 or ready_limit > 64:
+        raise JournalError("queue limit must be between 1 and 64")
+    message_counts = dict.fromkeys(MESSAGE_STATES, 0)
+    task_counts = dict.fromkeys(TASK_STATES, 0)
+    result: dict[str, Any] = {
+        "messages": message_counts,
+        "tasks": task_counts,
+        "claims": {"active": 0},
+        "ready": [],
+    }
+    if not scope.journal_path.exists():
+        return result
+    effective_now = _now_us() if now_us is None else now_us
+    connection = _connect(scope)
+    try:
+        connection.execute("BEGIN")
+        rows = connection.execute(
+            """
+            WITH lifecycle AS (
+              SELECT
+                event.message_id,
+                event.event_type,
+                ROW_NUMBER() OVER (
+                  PARTITION BY event.message_id
+                  ORDER BY event.sequence DESC
+                ) AS rank
+              FROM events AS event
+              WHERE event.message_id IS NOT NULL
+                AND event.event_type IN (
+                  'message.received',
+                  'message.processing',
+                  'message.applied',
+                  'message.needs_input',
+                  'message.failed',
+                  'message.superseded'
+                )
+            )
+            SELECT
+              CASE WHEN
+                lifecycle.event_type = 'message.processing'
+                AND EXISTS (
+                  SELECT 1
+                  FROM claims AS claim
+                  LEFT JOIN claim_releases AS release
+                    ON release.claim_id = claim.claim_id
+                  WHERE claim.resource_kind = 'message'
+                    AND claim.resource_id = lifecycle.message_id
+                    AND release.claim_id IS NULL
+                    AND claim.expires_at_us <= ?
+                )
+              THEN 'message.received'
+              ELSE lifecycle.event_type
+              END AS state_event,
+              COUNT(*) AS total
+            FROM lifecycle
+            WHERE lifecycle.rank = 1
+            GROUP BY state_event
+            """,
+            (effective_now,),
+        ).fetchall()
+        for row in rows:
+            state = row["state_event"].removeprefix("message.")
+            if state in message_counts:
+                message_counts[state] += row["total"]
+        tasks = _load_current_tasks(connection, now_us=effective_now)
+        states = _effective_states(tasks)
+        for task_id in tasks:
+            task_counts[states[task_id]] += 1
+        ready = [
+            task
+            for task in tasks.values()
+            if states[task["task_id"]] == "ready"
+        ]
+        ready.sort(
+            key=lambda task: (
+                -task["priority"],
+                task["created_sequence"],
+                task["task_number"],
+            )
+        )
+        result["ready"] = [
+            {
+                "task_id": task["task_id"],
+                "priority": task["priority"],
+                "title": task["title"],
+            }
+            for task in ready[:ready_limit]
+        ]
+        result["claims"]["active"] = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM claims AS claim
+            LEFT JOIN claim_releases AS release
+              ON release.claim_id = claim.claim_id
+            WHERE release.claim_id IS NULL
+              AND claim.expires_at_us > ?
+            """,
+            (effective_now,),
+        ).fetchone()["total"]
+        return result
+    finally:
+        connection.rollback()
+        connection.close()
 
 
 def _resolve(reference: str, aliases: dict[str, str]) -> str:

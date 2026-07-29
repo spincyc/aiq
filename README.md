@@ -142,6 +142,7 @@ one contract instead of carrying every tool description in context.
 | See command flags | `aiq COMMAND --help` |
 | Locate the active journal | `aiq journal path --json` |
 | Inspect pending messages | `aiq inbox list` |
+| Summarize bounded work state | `aiq status` |
 | Preview ready work | `aiq queue peek` |
 | Lease ready work | `aiq queue next --owner OWNER` |
 | Verify storage and history | `aiq journal check` |

@@ -22,7 +22,7 @@ JSON_COMMAND_PATHS = {
         integration.check integration.install integration.list integration.plan
         integration.print integration.uninstall journal.check journal.destroy
         journal.export journal.init journal.path journal.snapshot queue.next
-        queue.peek task.list task.show
+        queue.peek status task.list task.show
     """.split()
 }
 
@@ -222,6 +222,19 @@ class CliProtocolTests(unittest.TestCase):
         task = self.ok("task", "show", task_id, *self.scope)
         self.assertEqual(set(task), {"task", "v"})
         self.ok("queue", "peek", *self.scope)
+        status = self.ok("status", *self.scope)
+        self.assertEqual(
+            set(status),
+            {"claims", "messages", "ready", "scope", "tasks", "v"},
+        )
+        self.assertEqual(status["messages"]["applied"], 1)
+        self.assertEqual(status["tasks"]["ready"], 1)
+        self.assertEqual(status["claims"]["active"], 0)
+        self.assertEqual(len(status["ready"]), 1)
+        self.assertEqual(
+            status["ready"][0],
+            {"task_id": task_id, "priority": 7, "title": "Protocol task"},
+        )
         next_result = self.ok(
             "queue", "next", "--owner", "protocol-test", *self.scope,
         )
