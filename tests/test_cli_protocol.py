@@ -269,6 +269,24 @@ class CliProtocolTests(unittest.TestCase):
         self.assertEqual(claims["claims"][0]["status"], "active")
         self.ok("claim", "release", item["claim"]["claim_id"], *self.scope)
 
+        stored = self.ok(
+            "ingest", "--message", "Deduplicated protocol content",
+            "--if-new", *self.scope,
+        )
+        deduped = self.ok(
+            "ingest", "--message", "Deduplicated protocol content",
+            "--if-new", *self.scope,
+        )
+        self.assertEqual(
+            set(stored),
+            {"created", "deduped", "message_id", "scope", "state", "v"},
+        )
+        self.assertTrue(stored["created"])
+        self.assertFalse(stored["deduped"])
+        self.assertFalse(deduped["created"])
+        self.assertTrue(deduped["deduped"])
+        self.assertEqual(deduped["message_id"], stored["message_id"])
+
         for command, status in (("needs-input", "needs_input"), ("fail", "failed")):
             receipt = self.ok(
                 "ingest", "--message", f"Message to {command}", *self.scope,

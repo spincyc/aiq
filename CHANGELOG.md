@@ -42,6 +42,9 @@ effects documents, capability contracts, and integration manifests.
 - Dev-mode `aiq report`: file an AIQ defect from any local repository as one
   deduplicated bug-fix task in the configured `dev_report_repo` development
   checkout's queue.
+- `aiq ingest --if-new`: return the existing unapplied (`received` or
+  `needs_input`) message with a `deduped` flag when identical content is
+  already pending, instead of storing a duplicate.
 
 ### Changed
 

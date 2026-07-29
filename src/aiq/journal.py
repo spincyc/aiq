@@ -204,6 +204,7 @@ class IngestResult:
     state: str
     created: bool
     scope: JournalScope
+    deduped: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -1389,16 +1390,17 @@ def _begin_immediate(connection: sqlite3.Connection) -> None:
         ) from error
 
 
-def ingest_message(
-    scope: JournalScope,
+def _canonical_ingest_event(
     content: str,
     *,
-    source: str = "user",
-    idempotency_key: str | None = None,
-    session_id: str | None = None,
-    turn_id: str | None = None,
-    cwd: str | None = None,
-) -> IngestResult:
+    source: str,
+    idempotency_key: str | None,
+    session_id: str | None,
+    turn_id: str | None,
+    cwd: str | None,
+):
+    """Validate one ingest request as a canonical event before storage."""
+
     from aiq.events import EventError, validate_event
 
     document: dict[str, Any] = {
@@ -1415,9 +1417,39 @@ def ingest_message(
         if value is not None:
             document[name] = value
     try:
-        event = validate_event(document)
+        return validate_event(document)
     except EventError as error:
         raise JournalError(str(error)) from error
+
+
+def _ingest_connected(
+    connection: sqlite3.Connection,
+    scope: JournalScope,
+    content: str,
+    *,
+    source: str = "user",
+    idempotency_key: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    cwd: str | None = None,
+    if_new: bool = False,
+) -> IngestResult:
+    """Validate and store one message inside an already-open transaction.
+
+    The caller owns the connection, the surrounding transaction, and the
+    commit or rollback. Composed transactional commands reuse this so one
+    database transaction can persist a message, claim it, and apply its
+    effects atomically.
+    """
+
+    event = _canonical_ingest_event(
+        content,
+        source=source,
+        idempotency_key=idempotency_key,
+        session_id=session_id,
+        turn_id=turn_id,
+        cwd=cwd,
+    )
 
     content = event.content
     source = event.source
@@ -1435,120 +1467,206 @@ def ingest_message(
             turn_id=turn_id,
         )
 
-    connection = _connect(scope)
-    try:
-        _begin_immediate(connection)
-        if effective_key:
-            existing = connection.execute(
-                f"""
-                SELECT
-                  m.message_id,
-                  m.content_sha256,
-                  m.source,
-                  m.session_id,
-                  m.turn_id,
-                  m.cwd,
-                  e.event_id,
-                  e.sequence,
-                  (
-                    SELECT state.event_type
-                    FROM events AS state
-                    WHERE state.message_id = m.message_id
-                      AND state.event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
-                    ORDER BY state.sequence DESC
-                    LIMIT 1
-                  ) AS state_event_type
-                FROM messages AS m
-                JOIN events AS e
-                  ON e.message_id = m.message_id
-                 AND e.event_type = 'message.received'
-                WHERE m.idempotency_key = ?
-                ORDER BY e.sequence ASC
-                LIMIT 1
-                """,
-                (effective_key,),
-            ).fetchone()
-            if existing:
-                existing_identity = (
-                    existing["content_sha256"],
-                    existing["source"],
-                    existing["session_id"],
-                    existing["turn_id"],
-                    existing["cwd"],
-                )
-                requested_identity = (
-                    content_hash,
-                    source,
-                    session_id,
-                    turn_id,
-                    cwd,
-                )
-                if existing_identity != requested_identity:
-                    raise JournalError(
-                        "idempotency key already belongs to a different "
-                        "message identity",
-                        code="state_conflict",
-                    )
-                connection.commit()
-                return IngestResult(
-                    message_id=existing["message_id"],
-                    event_id=existing["event_id"],
-                    sequence=existing["sequence"],
-                    state=existing["state_event_type"].removeprefix("message."),
-                    created=False,
-                    scope=scope,
-                )
-
-        received_at = _utc_now()
-        message_id = _identifier("msg")
-        event_id = _identifier("evt")
-        connection.execute(
-            """
-            INSERT INTO messages(
-              message_id,
-              received_at,
-              source,
-              content,
-              content_sha256,
-              idempotency_key,
-              session_id,
-              turn_id,
-              cwd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    if if_new:
+        duplicate = connection.execute(
+            f"""
+            WITH lifecycle AS (
+              SELECT
+                event.message_id,
+                event.event_type,
+                ROW_NUMBER() OVER (
+                  PARTITION BY event.message_id
+                  ORDER BY event.sequence DESC
+                ) AS rank
+              FROM events AS event
+              WHERE event.message_id IS NOT NULL
+                AND event.event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
+            )
+            SELECT
+              m.message_id,
+              lifecycle.event_type AS state_event_type,
+              received.event_id,
+              received.sequence
+            FROM messages AS m
+            JOIN lifecycle
+              ON lifecycle.message_id = m.message_id
+             AND lifecycle.rank = 1
+            JOIN events AS received
+              ON received.sequence = (
+                SELECT MIN(sequence)
+                FROM events
+                WHERE message_id = m.message_id
+                  AND event_type = 'message.received'
+              )
+            WHERE m.content_sha256 = ?
+              AND m.content = ?
+              AND lifecycle.event_type IN (
+                'message.received',
+                'message.needs_input'
+              )
+            ORDER BY received.sequence
+            LIMIT 1
             """,
-            (
-                message_id,
-                received_at,
-                source,
-                content,
+            (content_hash, content),
+        ).fetchone()
+        if duplicate:
+            return IngestResult(
+                message_id=duplicate["message_id"],
+                event_id=duplicate["event_id"],
+                sequence=duplicate["sequence"],
+                state=duplicate["state_event_type"].removeprefix("message."),
+                created=False,
+                scope=scope,
+                deduped=True,
+            )
+
+    if effective_key:
+        existing = connection.execute(
+            f"""
+            SELECT
+              m.message_id,
+              m.content_sha256,
+              m.source,
+              m.session_id,
+              m.turn_id,
+              m.cwd,
+              e.event_id,
+              e.sequence,
+              (
+                SELECT state.event_type
+                FROM events AS state
+                WHERE state.message_id = m.message_id
+                  AND state.event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
+                ORDER BY state.sequence DESC
+                LIMIT 1
+              ) AS state_event_type
+            FROM messages AS m
+            JOIN events AS e
+              ON e.message_id = m.message_id
+             AND e.event_type = 'message.received'
+            WHERE m.idempotency_key = ?
+            ORDER BY e.sequence ASC
+            LIMIT 1
+            """,
+            (effective_key,),
+        ).fetchone()
+        if existing:
+            existing_identity = (
+                existing["content_sha256"],
+                existing["source"],
+                existing["session_id"],
+                existing["turn_id"],
+                existing["cwd"],
+            )
+            requested_identity = (
                 content_hash,
-                effective_key,
+                source,
                 session_id,
                 turn_id,
                 cwd,
-            ),
-        )
-        cursor = connection.execute(
-            """
-            INSERT INTO events(
-              event_id,
-              occurred_at,
-              event_type,
-              message_id,
-              payload_json
-            ) VALUES (?, ?, 'message.received', ?, ?)
-            """,
-            (event_id, received_at, message_id, "{}"),
+            )
+            if existing_identity != requested_identity:
+                raise JournalError(
+                    "idempotency key already belongs to a different "
+                    "message identity",
+                    code="state_conflict",
+                )
+            return IngestResult(
+                message_id=existing["message_id"],
+                event_id=existing["event_id"],
+                sequence=existing["sequence"],
+                state=existing["state_event_type"].removeprefix("message."),
+                created=False,
+                scope=scope,
+            )
+
+    received_at = _utc_now()
+    message_id = _identifier("msg")
+    event_id = _identifier("evt")
+    connection.execute(
+        """
+        INSERT INTO messages(
+          message_id,
+          received_at,
+          source,
+          content,
+          content_sha256,
+          idempotency_key,
+          session_id,
+          turn_id,
+          cwd
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            message_id,
+            received_at,
+            source,
+            content,
+            content_hash,
+            effective_key,
+            session_id,
+            turn_id,
+            cwd,
+        ),
+    )
+    cursor = connection.execute(
+        """
+        INSERT INTO events(
+          event_id,
+          occurred_at,
+          event_type,
+          message_id,
+          payload_json
+        ) VALUES (?, ?, 'message.received', ?, ?)
+        """,
+        (event_id, received_at, message_id, "{}"),
+    )
+    return IngestResult(
+        message_id=message_id,
+        event_id=event_id,
+        sequence=cursor.lastrowid,
+        state="received",
+        created=True,
+        scope=scope,
+    )
+
+
+def ingest_message(
+    scope: JournalScope,
+    content: str,
+    *,
+    source: str = "user",
+    idempotency_key: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    cwd: str | None = None,
+    if_new: bool = False,
+) -> IngestResult:
+    # Reject noncanonical input before any storage exists or mutates.
+    _canonical_ingest_event(
+        content,
+        source=source,
+        idempotency_key=idempotency_key,
+        session_id=session_id,
+        turn_id=turn_id,
+        cwd=cwd,
+    )
+    connection = _connect(scope)
+    try:
+        _begin_immediate(connection)
+        result = _ingest_connected(
+            connection,
+            scope,
+            content,
+            source=source,
+            idempotency_key=idempotency_key,
+            session_id=session_id,
+            turn_id=turn_id,
+            cwd=cwd,
+            if_new=if_new,
         )
         connection.commit()
-        return IngestResult(
-            message_id=message_id,
-            event_id=event_id,
-            sequence=cursor.lastrowid,
-            state="received",
-            created=True,
-            scope=scope,
-        )
+        return result
     except sqlite3.IntegrityError as error:
         connection.rollback()
         raise JournalError(f"journal integrity violation: {error}") from error

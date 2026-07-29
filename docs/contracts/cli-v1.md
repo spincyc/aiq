@@ -106,7 +106,7 @@ The tables list fields in addition to top-level `v`.
 | `journal export OUTPUT --json` | `status: "exported"`, `output_path`, format fields, record/byte counts, digest, `scope` |
 | `journal destroy --plan --json` | confirmation status, token, inventory totals, targets, `scope` |
 | `journal destroy --confirm TOKEN --json` | `status: "destroyed"` or `"already_absent"`, `deleted_files`, `scope` |
-| `ingest --json` | `message_id`, `state`, `created`, `scope` |
+| `ingest --json` | `message_id`, `state`, `created`, `scope`; with `--if-new`, adds `deduped` |
 | `inbox list --json` | `messages` containing message summaries |
 | `inbox claim --json` | `claim`, `message`; both null when none is claimable |
 | `inbox apply --json` | application receipt described below |

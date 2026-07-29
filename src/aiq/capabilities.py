@@ -286,10 +286,12 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         (
             "aiq ingest "
             "(--message TEXT|--stdin|--event-json FILE|-) "
-            "[--idempotency-key KEY] [--json]"
+            "[--idempotency-key KEY] [--if-new] [--json]"
         ),
         mutates=True,
-        idempotency="safe retry when an idempotency key is supplied",
+        idempotency="safe retry when an idempotency key is supplied; "
+        "--if-new returns the existing unapplied message for identical "
+        "content with a deduped flag instead of storing a duplicate",
     ),
     "reconcile.run": _capability(
         "Report AIQ-owned integration and journal health after an external "

@@ -19,6 +19,7 @@ from aiq.journal import (
     list_inbox,
     resolve_scope,
 )
+from aiq.queue import claim_message, dispose_message
 
 
 class IngestIdentityTest(unittest.TestCase):
@@ -124,6 +125,132 @@ class IngestIdentityTest(unittest.TestCase):
                 self.assertEqual(retry.message_id, first.message_id)
                 self.assertFalse(retry.created)
                 self.assertEqual(len(list_inbox(scope)), 2)
+
+    def test_if_new_deduplicates_identical_unapplied_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with patch.dict(
+                os.environ,
+                {"XDG_STATE_HOME": str(root / "state")},
+            ):
+                scope = self.scope(root)
+                first = ingest_message(
+                    scope,
+                    "same request",
+                    source="test-source",
+                    if_new=True,
+                )
+                duplicate = ingest_message(
+                    scope,
+                    "same request",
+                    source="test-source",
+                    if_new=True,
+                )
+                different = ingest_message(
+                    scope,
+                    "other request",
+                    source="test-source",
+                    if_new=True,
+                )
+                without_flag = ingest_message(
+                    scope,
+                    "same request",
+                    source="test-source",
+                )
+
+                self.assertTrue(first.created)
+                self.assertFalse(first.deduped)
+                self.assertFalse(duplicate.created)
+                self.assertTrue(duplicate.deduped)
+                self.assertEqual(duplicate.message_id, first.message_id)
+                self.assertEqual(duplicate.state, "received")
+                self.assertTrue(different.created)
+                self.assertFalse(different.deduped)
+                # Without the flag an identical message stores normally.
+                self.assertTrue(without_flag.created)
+                self.assertEqual(len(list_inbox(scope)), 3)
+
+    def test_if_new_matches_needs_input_but_not_settled_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with patch.dict(
+                os.environ,
+                {"XDG_STATE_HOME": str(root / "state")},
+            ):
+                scope = self.scope(root)
+                parked = ingest_message(
+                    scope,
+                    "parked content",
+                    source="test-source",
+                )
+                claim = claim_message(
+                    scope,
+                    owner_id="worker",
+                    message_id=parked.message_id,
+                )
+                assert claim is not None
+                dispose_message(
+                    scope,
+                    parked.message_id,
+                    claim_id=claim["claim_id"],
+                    disposition="needs_input",
+                    reason="waiting for input",
+                )
+                parked_match = ingest_message(
+                    scope,
+                    "parked content",
+                    source="test-source",
+                    if_new=True,
+                )
+                self.assertTrue(parked_match.deduped)
+                self.assertEqual(parked_match.message_id, parked.message_id)
+                self.assertEqual(parked_match.state, "needs_input")
+
+                failed = ingest_message(
+                    scope,
+                    "failed content",
+                    source="test-source",
+                )
+                failed_claim = claim_message(
+                    scope,
+                    owner_id="worker",
+                    message_id=failed.message_id,
+                )
+                assert failed_claim is not None
+                dispose_message(
+                    scope,
+                    failed.message_id,
+                    claim_id=failed_claim["claim_id"],
+                    disposition="failed",
+                    reason="unprocessable",
+                )
+                after_failure = ingest_message(
+                    scope,
+                    "failed content",
+                    source="test-source",
+                    if_new=True,
+                )
+                self.assertTrue(after_failure.created)
+                self.assertFalse(after_failure.deduped)
+
+                processing = ingest_message(
+                    scope,
+                    "processing content",
+                    source="test-source",
+                )
+                claim_message(
+                    scope,
+                    owner_id="worker",
+                    message_id=processing.message_id,
+                )
+                while_processing = ingest_message(
+                    scope,
+                    "processing content",
+                    source="test-source",
+                    if_new=True,
+                )
+                self.assertTrue(while_processing.created)
+                self.assertFalse(while_processing.deduped)
 
     def test_core_ingestion_rejects_noncanonical_fields_before_mutation(
         self,

@@ -508,6 +508,7 @@ def _ingest(arguments: argparse.Namespace) -> int:
             session_id=event.session_id,
             turn_id=event.turn_id,
             cwd=os.fspath(effective_cwd.resolve()),
+            if_new=arguments.if_new,
         )
     else:
         _resolve_config(arguments)
@@ -531,17 +532,18 @@ def _ingest(arguments: argparse.Namespace) -> int:
             session_id=arguments.session_id,
             turn_id=arguments.turn_id,
             cwd=os.fspath(arguments.cwd.resolve()),
+            if_new=arguments.if_new,
         )
     if not arguments.quiet:
-        _emit(
-            {
-                "message_id": result.message_id,
-                "state": result.state,
-                "created": result.created,
-                "scope": result.scope.to_dict(),
-            },
-            as_json=arguments.json,
-        )
+        payload = {
+            "message_id": result.message_id,
+            "state": result.state,
+            "created": result.created,
+            "scope": result.scope.to_dict(),
+        }
+        if arguments.if_new:
+            payload["deduped"] = result.deduped
+        _emit(payload, as_json=arguments.json)
     return 0
 
 
@@ -1521,6 +1523,15 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--idempotency-key")
     ingest.add_argument("--session-id")
     ingest.add_argument("--turn-id")
+    ingest.add_argument(
+        "--if-new",
+        action="store_true",
+        help=(
+            "return the existing message instead of storing a duplicate "
+            "when an unapplied (received or needs_input) message in the "
+            "selected scope already carries the identical content"
+        ),
+    )
     ingest.add_argument("--quiet", action="store_true")
     ingest.set_defaults(handler=_ingest)
 

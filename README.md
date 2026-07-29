@@ -147,6 +147,7 @@ one contract instead of carrying every tool description in context.
 | Load one operation contract | `aiq capability show inbox.apply` |
 | See command flags | `aiq COMMAND --help` |
 | Locate the active journal | `aiq journal path --json` |
+| Capture a message without duplicates | `aiq ingest --if-new --message TEXT` |
 | Inspect pending messages | `aiq inbox list` |
 | Summarize bounded work state | `aiq status` |
 | Preview ready work | `aiq queue peek` |
