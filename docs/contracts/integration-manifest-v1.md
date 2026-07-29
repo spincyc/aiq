@@ -50,6 +50,22 @@ and stored as a lexical absolute path without resolving symlinks. The owned
 hook passes that path back to AIQ explicitly, so capture does not discover Git
 from the host agent's process environment.
 
+## Guidance fields
+
+| Field | Meaning |
+|---|---|
+| `v` | Manifest contract version |
+| `status` | `installed` or `uninstalled` |
+| `integration` | Adapter name: `guidance` |
+| `integration_id` | Stable identifier embedded in the block marker lines |
+| `target` | Absolute managed guidance file path selected by explicit `--target` |
+| `managed_block` | Exact owned marked block text |
+| `managed_block_sha256` | Digest of that block |
+| `separator` | Newline AIQ inserted before the appended block, if any |
+| `config_sha256` | Digest of the target file after the operation |
+| `created_file` | Whether AIQ created the target file |
+| `backups` | Private pre-change copies and their digests |
+
 ## Safety semantics
 
 `check` compares the manifest-owned group with current configuration.

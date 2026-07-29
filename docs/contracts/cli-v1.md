@@ -327,6 +327,26 @@ aiq integration uninstall INTEGRATION --user
 | `claude` | `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` | `session_id` and optional `prompt_id` |
 | `codex` | `${CODEX_HOME:-~/.codex}/hooks.json` | `session_id` and `turn_id` |
 
+The guidance lifecycle manages one AIQ-owned marked block containing the
+packaged `AGENTS.md` bootstrap inside an explicitly selected file:
+
+```text
+aiq integration plan guidance --target PATH [--repair]
+aiq integration install guidance --target PATH [--repair]
+                                 [--plan-token TOKEN]
+aiq integration check guidance --target PATH
+aiq integration uninstall guidance --target PATH
+```
+
+`--target` is required and must be absolute; AIQ never infers a Codex home, a
+repository root, or a dotfiles location. Install appends the block between
+`aiq-guidance-v1` marker lines, creates the file only when absent, and
+preserves unrelated bytes exactly. Markers without an AIQ manifest are
+unmanaged and block every operation; an edited owned block is drift and
+requires explicit `--repair`. Uninstall removes only the unchanged owned block
+and deletes the file only when AIQ created it and nothing else remains. See
+[`integrations/guidance.md`](../integrations/guidance.md).
+
 Launcher selection is deterministic:
 
 | Precedence | Candidate |
@@ -363,7 +383,8 @@ The selected path must name an executable regular file and is not resolved
 through symlinks. The hook command embeds the absolute Python and Git paths, so
 capture never searches the host agent's `PATH` for AIQ, Python, or Git.
 
-Omitting `--user` is invalid. `plan` and `check` are read-only. Lifecycle
+Omitting `--user` for `codex`, or `--target` for `guidance`, is invalid.
+`plan` and `check` are read-only. Lifecycle
 results identify `integration`, `target`, `status`, and `action`; they add
 `integration_id`, `changes`, digests, plan token, backup, trust, or ownership
 metadata when relevant. `plan_token` lets install reject a stale reviewed

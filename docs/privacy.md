@@ -42,9 +42,9 @@ retention. Copies made outside AIQ are not tracked or removed by AIQ.
 ### Integration backups
 
 Integration install and uninstall keep exact pre-change copies of the complete
-managed file (Codex `hooks.json`, Claude Code `settings.json`). Those files may
-contain unrelated hooks, settings, or secrets. They are stored with mode `0600`
-below
+managed file (Codex `hooks.json`, Claude Code `settings.json`, or the selected
+guidance file). Those files may contain unrelated hooks, settings, guidance, or
+secrets. They are stored with mode `0600` below
 `${XDG_STATE_HOME:-$HOME/.local/state}/aiq/integrations/<integration>/<target-id>/backups/`
 and are retained indefinitely.
 

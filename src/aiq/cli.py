@@ -17,6 +17,7 @@ from aiq.doctor import run_doctor
 from aiq.events import EVENT_JSON_MAX_BYTES, EventError, parse_event_json
 from aiq.integrations import claude as claude_integration
 from aiq.integrations import codex as codex_integration
+from aiq.integrations import guidance
 from aiq.integrations._hooks import HookIntegrationError
 from aiq.journal import (
     JournalError,
@@ -850,6 +851,13 @@ def _integration_list(arguments: argparse.Namespace) -> int:
             "version": 1,
         }
     )
+    integrations.append(
+        {
+            "id": "guidance",
+            "purpose": "Manage one AIQ-owned block in a chosen guidance file.",
+            "version": 1,
+        }
+    )
     if arguments.json:
         _emit({"integrations": integrations}, as_json=True)
     else:
@@ -872,7 +880,44 @@ def _invoked_python_executable() -> Path:
     return Path(os.path.abspath(sys.executable))
 
 
+def _guidance_target(arguments: argparse.Namespace) -> Path:
+    if arguments.user:
+        raise guidance.GuidanceIntegrationError(
+            "the guidance integration uses --target, not --user"
+        )
+    for option in ("launcher", "git_executable"):
+        if getattr(arguments, option, None) is not None:
+            raise guidance.GuidanceIntegrationError(
+                "the guidance integration does not accept "
+                f"--{option.replace('_', '-')}"
+            )
+    return arguments.target
+
+
+def _hook_selector(arguments: argparse.Namespace) -> None:
+    integration_id = arguments.integration_id
+    error_class = _INTEGRATION_MODULES[integration_id].SPEC.error_class
+    if getattr(arguments, "target", None) is not None:
+        raise error_class(
+            f"the {integration_id} integration uses --user, not --target"
+        )
+    if not arguments.user:
+        raise error_class(
+            f"the {integration_id} integration requires --user"
+        )
+
+
 def _integration_plan(arguments: argparse.Namespace) -> int:
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.plan_integration(
+                target=_guidance_target(arguments),
+                repair=arguments.repair,
+            ),
+            as_json=arguments.json,
+        )
+        return 0
+    _hook_selector(arguments)
     _emit(
         _INTEGRATION_MODULES[arguments.integration_id].plan_integration(
             launcher=arguments.launcher,
@@ -887,6 +932,17 @@ def _integration_plan(arguments: argparse.Namespace) -> int:
 
 
 def _integration_install(arguments: argparse.Namespace) -> int:
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.install_integration(
+                target=_guidance_target(arguments),
+                repair=arguments.repair,
+                plan_token=arguments.plan_token,
+            ),
+            as_json=arguments.json,
+        )
+        return 0
+    _hook_selector(arguments)
     _emit(
         _INTEGRATION_MODULES[arguments.integration_id].install_integration(
             launcher=arguments.launcher,
@@ -902,6 +958,13 @@ def _integration_install(arguments: argparse.Namespace) -> int:
 
 
 def _integration_check(arguments: argparse.Namespace) -> int:
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.check_integration(target=_guidance_target(arguments)),
+            as_json=arguments.json,
+        )
+        return 0
+    _hook_selector(arguments)
     _emit(
         _INTEGRATION_MODULES[arguments.integration_id].check_integration(
             launcher=arguments.launcher,
@@ -915,6 +978,15 @@ def _integration_check(arguments: argparse.Namespace) -> int:
 
 
 def _integration_uninstall(arguments: argparse.Namespace) -> int:
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.uninstall_integration(
+                target=_guidance_target(arguments),
+            ),
+            as_json=arguments.json,
+        )
+        return 0
+    _hook_selector(arguments)
     _emit(
         _INTEGRATION_MODULES[arguments.integration_id].uninstall_integration(),
         as_json=arguments.json,
@@ -1134,6 +1206,19 @@ def _add_user_selector(
     )
 
 
+def _add_lifecycle_selectors(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "integration_id",
+        choices=(*_INTEGRATION_CHOICES, "guidance"),
+    )
+    _add_user_selector(parser)
+    parser.add_argument(
+        "--target",
+        type=Path,
+        help="absolute guidance file managed by the guidance integration",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="aiq")
     parser.add_argument("--version", action="version", version=__version__)
@@ -1294,19 +1379,14 @@ def build_parser() -> argparse.ArgumentParser:
     integration_list.add_argument("--json", action="store_true")
     integration_list.set_defaults(handler=_integration_list)
     integration_plan = integration_commands.add_parser("plan")
-    integration_plan.add_argument("integration_id", choices=_INTEGRATION_CHOICES)
-    _add_user_selector(integration_plan, required=True)
+    _add_lifecycle_selectors(integration_plan)
     integration_plan.add_argument("--launcher", type=Path)
     integration_plan.add_argument("--git-executable", type=Path)
     integration_plan.add_argument("--repair", action="store_true")
     integration_plan.add_argument("--json", action="store_true")
     integration_plan.set_defaults(handler=_integration_plan)
     integration_install = integration_commands.add_parser("install")
-    integration_install.add_argument(
-        "integration_id",
-        choices=_INTEGRATION_CHOICES,
-    )
-    _add_user_selector(integration_install, required=True)
+    _add_lifecycle_selectors(integration_install)
     integration_install.add_argument("--launcher", type=Path)
     integration_install.add_argument("--git-executable", type=Path)
     integration_install.add_argument("--repair", action="store_true")
@@ -1314,18 +1394,13 @@ def build_parser() -> argparse.ArgumentParser:
     integration_install.add_argument("--json", action="store_true")
     integration_install.set_defaults(handler=_integration_install)
     integration_check = integration_commands.add_parser("check")
-    integration_check.add_argument("integration_id", choices=_INTEGRATION_CHOICES)
-    _add_user_selector(integration_check, required=True)
+    _add_lifecycle_selectors(integration_check)
     integration_check.add_argument("--launcher", type=Path)
     integration_check.add_argument("--git-executable", type=Path)
     integration_check.add_argument("--json", action="store_true")
     integration_check.set_defaults(handler=_integration_check)
     integration_uninstall = integration_commands.add_parser("uninstall")
-    integration_uninstall.add_argument(
-        "integration_id",
-        choices=_INTEGRATION_CHOICES,
-    )
-    _add_user_selector(integration_uninstall, required=True)
+    _add_lifecycle_selectors(integration_uninstall)
     integration_uninstall.add_argument("--json", action="store_true")
     integration_uninstall.set_defaults(handler=_integration_uninstall)
     integration_print = integration_commands.add_parser("print")
@@ -1445,8 +1520,21 @@ def _classify_error(error: Exception) -> tuple[str, int]:
         return "invalid_config", 2
     if isinstance(error, EventError):
         return "invalid_document", 2
+    if isinstance(error, guidance.GuidanceIntegrationError):
+        message = str(error).lower()
+        if (
+            "--target" in message
+            or "--user" in message
+            or "--launcher" in message
+            or "--git-executable" in message
+            or "control characters" in message
+        ):
+            return "invalid_argument", 2
+        return "integration_drift", 6
     if isinstance(error, HookIntegrationError):
         message = str(error).lower()
+        if "requires --user" in message or "not --target" in message:
+            return "invalid_argument", 2
         if "launcher must be an absolute path" in message:
             return "invalid_argument", 2
         if (

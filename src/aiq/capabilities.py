@@ -183,20 +183,22 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="safe retry for the same claim and outcome",
     ),
     "integration.check": _capability(
-        "Detect whether a user-level hook integration is installed or drifted.",
+        "Detect whether a managed hook or guidance integration is installed "
+        "or drifted.",
         (
-            "aiq integration check (claude|codex) --user [--launcher PATH] "
-            "[--git-executable PATH] [--json]"
+            "aiq integration check ((claude|codex) --user [--launcher PATH] "
+            "[--git-executable PATH] | guidance --target PATH) [--json]"
         ),
         mutates=False,
         idempotency="read-only",
         version=2,
     ),
     "integration.install": _capability(
-        "Install or explicitly repair a user-level hook integration.",
+        "Install or explicitly repair a managed hook or guidance integration.",
         (
-            "aiq integration install (claude|codex) --user "
+            "aiq integration install ((claude|codex) --user "
             "[--launcher PATH] [--git-executable PATH] "
+            "| guidance --target PATH) "
             "[--plan-token TOKEN] [--repair] [--json]"
         ),
         mutates=True,
@@ -210,10 +212,11 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="read-only",
     ),
     "integration.plan": _capability(
-        "Preview a sanitized user-level hook integration change.",
+        "Preview a sanitized managed hook or guidance integration change.",
         (
-            "aiq integration plan (claude|codex) --user "
-            "[--launcher PATH] [--git-executable PATH] [--repair] [--json]"
+            "aiq integration plan ((claude|codex) --user "
+            "[--launcher PATH] [--git-executable PATH] "
+            "| guidance --target PATH) [--repair] [--json]"
         ),
         mutates=False,
         idempotency="read-only",
@@ -231,7 +234,10 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     ),
     "integration.uninstall": _capability(
         "Remove unchanged AIQ-owned integration material.",
-        "aiq integration uninstall (claude|codex) --user [--json]",
+        (
+            "aiq integration uninstall "
+            "((claude|codex) --user | guidance --target PATH) [--json]"
+        ),
         mutates=True,
         idempotency="safe retry when no owned material remains",
     ),

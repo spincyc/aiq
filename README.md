@@ -175,6 +175,7 @@ committed.
 | [Generic input](docs/integrations/generic.md) | Message, stdin, and canonical event JSON ingestion |
 | [Claude Code](docs/integrations/claude.md) | Reversible user-level prompt hook |
 | [Codex](docs/integrations/codex.md) | Reversible user-level prompt hook |
+| [Guidance](docs/integrations/guidance.md) | Reversible AIQ-owned block in an explicit guidance file |
 | Manual guidance | The terse canonical bootstrap is [`AGENTS.md`](AGENTS.md) |
 
 AIQ never replaces an entire agent configuration. Integration installers use
