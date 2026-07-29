@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 from aiq import __version__
 from aiq.capabilities import list_capabilities, show_capability
 from aiq.config import Config, ConfigError, resolve_config
+from aiq.doctor import run_doctor
 from aiq.events import EVENT_JSON_MAX_BYTES, EventError, parse_event_json
 from aiq.integrations.codex import (
     INTEGRATION_ID,
@@ -107,6 +108,7 @@ def _invocation_wants_json(arguments: Sequence[str]) -> bool:
     if command not in {
         "claim",
         "config",
+        "doctor",
         "inbox",
         "ingest",
         "journal",
@@ -422,6 +424,36 @@ def _config_check(arguments: argparse.Namespace) -> int:
     _resolve_config(arguments)
     _emit({"status": "ok"}, as_json=arguments.json)
     return 0
+
+
+def _doctor(arguments: argparse.Namespace) -> int:
+    report = run_doctor(
+        requested_scope=arguments.scope,
+        cwd=arguments.cwd,
+        agent_root=arguments.agent_root,
+        repo_config=not arguments.no_repo_config,
+        invoked_launcher=_invoked_console_launcher(),
+        python_executable=_invoked_python_executable(),
+    )
+    as_json = (
+        arguments.json
+        or (report.config is not None and report.config.output == "json")
+        or os.environ.get("AIQ_OUTPUT") == "json"
+    )
+    if as_json:
+        _emit(
+            {"status": report.status, "checks": list(report.checks)},
+            as_json=True,
+        )
+    else:
+        name_width = max(len(check["check"]) for check in report.checks)
+        for check in report.checks:
+            print(
+                f"{check['check']:<{name_width}}  "
+                f"{check['status']:<7}  "
+                f"{_single_line(check['detail'])}"
+            )
+    return 0 if report.status == "ok" else 1
 
 
 def _ingest(arguments: argparse.Namespace) -> int:
@@ -858,6 +890,17 @@ def build_parser() -> argparse.ArgumentParser:
     config_check = config_commands.add_parser("check")
     _add_config_arguments(config_check, operational=False)
     config_check.set_defaults(handler=_config_check)
+
+    doctor = commands.add_parser(
+        "doctor",
+        description=(
+            "Run cheap read-only local health checks. Deep journal "
+            "verification stays explicit through aiq journal check, "
+            "which may migrate supported storage."
+        ),
+    )
+    _add_config_arguments(doctor)
+    doctor.set_defaults(handler=_doctor)
 
     journal = commands.add_parser("journal")
     journal_commands = journal.add_subparsers(

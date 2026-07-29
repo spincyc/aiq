@@ -77,6 +77,21 @@ def _integration_state_directory(
     )
 
 
+def integration_present(
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Report whether the Codex target or AIQ-owned state exists."""
+
+    effective_environment = os.environ if environment is None else environment
+    target = _target_path(effective_environment)
+    state_directory = _integration_state_directory(
+        effective_environment,
+        target,
+    )
+    return target.exists() or state_directory.exists()
+
+
 def _ensure_private_directory(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     status = path.lstat()
