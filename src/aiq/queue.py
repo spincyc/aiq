@@ -158,7 +158,7 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
         required={"v", "expect", "effects"},
         path="document",
     )
-    if document["v"] != 1 or isinstance(document["v"], bool):
+    if type(document["v"]) is not int or document["v"] != 1:
         raise JournalError("document.v must be 1")
     if not isinstance(document["expect"], dict):
         raise JournalError("document.expect must be an object")
@@ -983,6 +983,16 @@ def dispose_message(
         connection.close()
 
 
+def _load_current_tasks_snapshot(
+    connection: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    connection.execute("BEGIN DEFERRED")
+    try:
+        return _load_current_tasks(connection)
+    finally:
+        connection.rollback()
+
+
 def list_tasks(
     scope: JournalScope,
     *,
@@ -995,7 +1005,7 @@ def list_tasks(
         raise JournalError("unsupported task state filter")
     connection = _connect(scope)
     try:
-        tasks = _load_current_tasks(connection)
+        tasks = _load_current_tasks_snapshot(connection)
         effective = _effective_states(tasks)
         selected = [
             task
@@ -1026,7 +1036,7 @@ def show_task(scope: JournalScope, task_id: str) -> dict[str, Any]:
         raise JournalError(f"invalid task ID: {task_id}")
     connection = _connect(scope)
     try:
-        tasks = _load_current_tasks(connection)
+        tasks = _load_current_tasks_snapshot(connection)
         if task_id not in tasks:
             raise JournalError(f"task not found: {task_id}")
         effective = _effective_states(tasks)
@@ -1132,6 +1142,10 @@ def apply_effects(
         raise JournalError(f"invalid claim ID: {claim_id}")
     _validate_document_shape(document)
     canonical = _canonical_json(document)
+    if len(canonical.encode("utf-8")) > EFFECT_DOCUMENT_MAX_BYTES:
+        raise JournalError(
+            f"effects document exceeds {EFFECT_DOCUMENT_MAX_BYTES} bytes"
+        )
     effects_hash = hashlib.sha256(canonical.encode()).hexdigest()
     effects = document["effects"]
 
@@ -1273,11 +1287,12 @@ def apply_effects(
             return canonical_id
 
         def resolved_before(reference: str, index: int) -> str:
+            canonical_id = _resolve(reference, aliases)
             if reference.startswith("$") and create_indexes[reference] >= index:
                 raise JournalError(
                     f"local alias must be created before effect {index}: {reference}"
                 )
-            return _resolve(reference, aliases)
+            return canonical_id
 
         for index, effect in enumerate(effects):
             operation = effect[0]

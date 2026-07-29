@@ -23,6 +23,7 @@ from aiq.journal import (
 from aiq.queue import (
     TRANSITIONS,
     _effective_states,
+    _now_us,
     _validate_graph,
     apply_effects,
     claim_message,
@@ -402,10 +403,125 @@ class QueueTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(JournalError, "exceeds"):
             parse_effect_document(" " * 65537)
+        with self.assertRaisesRegex(JournalError, r"document\.v must be 1"):
+            parse_effect_document(
+                '{"v":1.0,"expect":{},"effects":[],"reason":"float version"}'
+            )
         with self.assertRaisesRegex(JournalError, "unknown operation"):
             parse_effect_document(
                 '{"v":1,"expect":{},"effects":[[["not-a-string"]]]}'
             )
+
+    def test_unknown_alias_reference_is_a_journal_error(self) -> None:
+        message = self.ingest("Create referenced work")
+        result = self.apply(
+            message.message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$work", {"title": "Work"}]],
+            },
+        )
+        work = result["aliases"]["$work"]
+        attempts = (
+            (
+                "create.parent",
+                {},
+                [["create", "$child", {"title": "Child", "parent": "$missing"}]],
+            ),
+            (
+                "create.requires",
+                {},
+                [["create", "$child", {"title": "Child", "requires": ["$missing"]}]],
+            ),
+            (
+                "update.parent",
+                {work: 1},
+                [["update", work, {"parent": "$missing"}]],
+            ),
+            (
+                "transition.by",
+                {work: 1},
+                [
+                    [
+                        "transition",
+                        work,
+                        "superseded",
+                        {"reason": "replace", "by": "$missing"},
+                    ]
+                ],
+            ),
+        )
+        for name, expect, effects in attempts:
+            with self.subTest(position=name):
+                attempt = self.ingest(f"Reject unknown alias in {name}")
+                with self.assertRaisesRegex(
+                    JournalError,
+                    r"unknown local task alias: \$missing",
+                ):
+                    self.apply(
+                        attempt.message_id,
+                        {"v": 1, "expect": expect, "effects": effects},
+                    )
+        self.assertEqual(show_task(self.scope, work)["revision"], 1)
+
+    def test_apply_rejects_oversized_document_dict(self) -> None:
+        message = self.ingest("Reject oversized document")
+        document = {
+            "v": 1,
+            "expect": {},
+            "effects": [
+                [
+                    "create",
+                    f"$task-{index}",
+                    {"title": "Padded", "objective": "x" * 2000},
+                ]
+                for index in range(40)
+            ],
+        }
+        with self.assertRaisesRegex(JournalError, "exceeds 65536 bytes"):
+            self.apply(message.message_id, document)
+        self.assertEqual(list_tasks(self.scope), [])
+
+    def test_read_snapshot_ignores_writer_between_selects(self) -> None:
+        setup_message = self.ingest("Create surviving work")
+        survivor = self.apply(
+            setup_message.message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$survivor", {"title": "Survivor"}]],
+            },
+        )["aliases"]["$survivor"]
+        contested_message = self.ingest("Create contested work")
+        fired = threading.Event()
+
+        def write_between_selects() -> int:
+            if not fired.is_set():
+                fired.set()
+                created = self.apply(
+                    contested_message.message_id,
+                    {
+                        "v": 1,
+                        "expect": {},
+                        "effects": [["create", "$contested", {"title": "Contested"}]],
+                    },
+                )
+                claim_task(
+                    self.scope,
+                    created["aliases"]["$contested"],
+                    owner_id="racer",
+                )
+            return _now_us()
+
+        # list_tasks calls _now_us between its tasks and claims SELECTs;
+        # a writer committing a new claimed task there must not be visible.
+        with patch("aiq.queue._now_us", write_between_selects):
+            listed = list_tasks(self.scope)
+
+        self.assertTrue(fired.is_set())
+        self.assertEqual([task["task_id"] for task in listed], [survivor])
+        self.assertEqual(len(list_tasks(self.scope)), 2)
 
     def test_failed_dependency_cannot_be_activated(self) -> None:
         message = self.ingest("Create dependent work")
