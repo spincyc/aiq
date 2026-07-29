@@ -985,6 +985,23 @@ def install_integration(
         return result
 
 
+def installed_manifest(
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Return the validated installed user-level manifest, if one exists."""
+
+    effective_environment = os.environ if environment is None else environment
+    target = _target_path(effective_environment)
+    manifest = _read_manifest(
+        _integration_state_directory(effective_environment, target),
+        target=target,
+    )
+    if manifest is None or manifest.get("status") != "installed":
+        return None
+    return manifest
+
+
 def check_integration(
     *,
     launcher: str | Path | None = None,

@@ -99,6 +99,12 @@ implicitly update pipx-managed applications. `pipx upgrade-all` updates every
 unpinned pipx application when explicitly invoked; normal AIQ releases will
 bump the package version so `pipx upgrade aiq-workqueue` can update AIQ alone.
 
+After the installer refreshes AIQ, run `aiq reconcile --user` to report
+whether AIQ-owned integration hooks still match the current installation and
+whether the selected journal state validates; `aiq reconcile --user --apply`
+re-binds only AIQ-owned hooks and migrates supported journal storage. It
+never modifies pipx, venv, Homebrew, or distro-owned package environments.
+
 ## Quickstart
 
 Run this inside the Git repository whose work you want to track. The example

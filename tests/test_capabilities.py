@@ -38,6 +38,7 @@ EXPECTED_COMMAND_PATHS = {
     "journal.snapshot": ("journal", "snapshot"),
     "message.ingest": ("ingest",),
     "queue.next": ("queue", "next"),
+    "reconcile.run": ("reconcile",),
     "queue.peek": ("queue", "peek"),
     "task.list": ("task", "list"),
     "task.show": ("task", "show"),

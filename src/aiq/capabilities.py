@@ -247,6 +247,17 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=True,
         idempotency="safe retry when an idempotency key is supplied",
     ),
+    "reconcile.run": _capability(
+        "Re-bind AIQ-owned integrations and validate or migrate selected "
+        "journal state after an external installer upgrades AIQ.",
+        (
+            "aiq reconcile --user [--apply] "
+            "[--launcher PATH] [--git-executable PATH] [--json]"
+        ),
+        mutates=True,
+        idempotency="report-only by default; --apply repairs only planned "
+        "AIQ-owned drift",
+    ),
     "queue.next": _capability(
         "Lease the highest-priority eligible task.",
         "aiq queue next [--owner OWNER] [--limit N] [--json]",
