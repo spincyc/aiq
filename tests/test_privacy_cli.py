@@ -153,7 +153,7 @@ class PrivacyCliTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "exported")
-        self.assertEqual(payload["output_path"], str(export))
+        self.assertEqual(payload["output_path"], str(export.resolve()))
         self.assertEqual(payload["format"], "aiq-journal-jsonl")
         self.assertEqual(payload["format_version"], 1)
         self.assertEqual(stat.S_IMODE(export.stat().st_mode), 0o600)

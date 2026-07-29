@@ -185,7 +185,7 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(
                 repository_config_path(nested),
-                repository / ".aiq.toml",
+                repository.resolve() / ".aiq.toml",
             )
             self.assertIsNone(
                 repository_config_path(Path(temporary_directory)),
@@ -213,7 +213,7 @@ class ConfigTests(unittest.TestCase):
                 os.environ["GIT_WORK_TREE"] = str(redirected_repository)
                 self.assertEqual(
                     repository_config_path(expected_repository),
-                    expected_repository / ".aiq.toml",
+                    expected_repository.resolve() / ".aiq.toml",
                 )
             finally:
                 for key, value in previous.items():

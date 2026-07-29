@@ -36,13 +36,16 @@ def run(
     return result.stdout
 
 
-def check_arch_packages() -> None:
-    lines = (REPO_ROOT / "Makefile").read_text().splitlines()
+def read_package_list(path: Path) -> list[str]:
+    lines = path.read_text().splitlines()
     declarations = [
-        index for index, line in enumerate(lines) if line.startswith("ARCH_PACKAGES")
+        index for index, line in enumerate(lines) if line.startswith("AIQ_PACKAGES")
     ]
-    if len(declarations) != 1 or lines[declarations[0]] != "ARCH_PACKAGES := \\":
-        raise RuntimeError("Makefile must contain one canonical ARCH_PACKAGES list")
+    relative_path = path.relative_to(REPO_ROOT)
+    if len(declarations) != 1 or lines[declarations[0]] != "AIQ_PACKAGES := \\":
+        raise RuntimeError(
+            f"{relative_path} must contain one canonical AIQ_PACKAGES list"
+        )
     start = declarations[0]
     package_lines: list[str] = []
     for line in lines[start + 1 :]:
@@ -50,16 +53,113 @@ def check_arch_packages() -> None:
             break
         package_lines.append(line)
     if not package_lines:
-        raise RuntimeError("ARCH_PACKAGES must not be empty")
+        raise RuntimeError(f"{relative_path}: AIQ_PACKAGES must not be empty")
     packages: list[str] = []
     for index, line in enumerate(package_lines):
         suffix = r" \\" if index < len(package_lines) - 1 else ""
         match = re.fullmatch(r"  ([a-z0-9][a-z0-9@._+-]*)" + suffix, line)
         if not match:
-            raise RuntimeError("list each Arch package on its own line")
+            raise RuntimeError(
+                f"{relative_path}: list each package on its own line"
+            )
         packages.append(match.group(1))
     if packages != sorted(set(packages)):
-        raise RuntimeError("Arch packages must be sorted and unique")
+        raise RuntimeError(f"{relative_path}: packages must be sorted and unique")
+    return packages
+
+
+def check_platform_packages() -> None:
+    makefile_lines = (REPO_ROOT / "Makefile").read_text().splitlines()
+    if makefile_lines.count("include make/platform.mk") != 1:
+        raise RuntimeError("Makefile must include make/platform.mk exactly once")
+    makefile = "\n".join(makefile_lines)
+    forbidden_root_policy = ("AIQ_PACKAGES", "brew install", "pacman -S")
+    offenders = [value for value in forbidden_root_policy if value in makefile]
+    if offenders:
+        raise RuntimeError(
+            f"Makefile contains platform-specific policy: {', '.join(offenders)}"
+        )
+
+    platform_directory = REPO_ROOT / "make" / "platforms"
+    expected_fragments = {
+        "arch": "pacman",
+        "macos": "brew",
+    }
+    for platform, installer in expected_fragments.items():
+        fragment = platform_directory / f"{platform}.mk"
+        read_package_list(fragment)
+        output = run(
+            [
+                "make",
+                "--no-print-directory",
+                "--dry-run",
+                "install-packages",
+                f"AIQ_PLATFORM={platform}",
+            ]
+        )
+        if installer not in output:
+            raise RuntimeError(
+                f"{fragment.relative_to(REPO_ROOT)} does not select {installer}"
+            )
+
+    unsupported_platform = "not-a-platform"
+    unsupported_fragment = platform_directory / f"{unsupported_platform}.mk"
+    if unsupported_fragment.exists():
+        raise RuntimeError(
+            f"reserved test platform exists: {unsupported_fragment.relative_to(REPO_ROOT)}"
+        )
+    unsupported_command = [
+        "make",
+        "--no-print-directory",
+        "install-packages",
+        f"AIQ_PLATFORM={unsupported_platform}",
+    ]
+    unsupported = run(
+        [*unsupported_command[:2], "--dry-run", *unsupported_command[2:]]
+    )
+    if "Unsupported" not in unsupported or "AIQ_PLATFORM" not in unsupported:
+        raise RuntimeError(
+            "unsupported platform must report the platform and AIQ_PLATFORM override"
+        )
+    forbidden_commands = ("brew ", "pacman ", "sudo ")
+    selected_installers = [
+        command for command in forbidden_commands if command in unsupported
+    ]
+    if selected_installers:
+        raise RuntimeError(
+            "unsupported platform selected a package manager: "
+            f"{', '.join(selected_installers)}"
+        )
+    traversal = run(
+        [
+            "make",
+            "--no-print-directory",
+            "--dry-run",
+            "install-packages",
+            "AIQ_PLATFORM=../platform",
+        ]
+    )
+    if "Unsupported" not in traversal or any(
+        command in traversal for command in forbidden_commands
+    ):
+        raise RuntimeError("AIQ_PLATFORM must select only whitelisted platforms")
+    result = subprocess.run(
+        unsupported_command,
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if result.returncode != 2:
+        raise RuntimeError(
+            "unsupported platform must exit 2; "
+            f"found {result.returncode}: {result.stdout.strip()}"
+        )
+    if "Unsupported" not in result.stdout or "AIQ_PLATFORM" not in result.stdout:
+        raise RuntimeError(
+            "unsupported platform execution must report the platform and "
+            "AIQ_PLATFORM override"
+        )
 
 
 def check_tool_syntax() -> None:
@@ -145,9 +245,7 @@ def check_build() -> None:
         output = temporary_root / "dist"
         run(
             [
-                sys.executable,
-                "-m",
-                "build",
+                "pyproject-build",
                 "--no-isolation",
                 "--outdir",
                 str(output),
@@ -171,7 +269,7 @@ def check_build() -> None:
 
 def main() -> int:
     checks = (
-        check_arch_packages,
+        check_platform_packages,
         check_tool_syntax,
         check_bootstrap,
         check_public_paths,

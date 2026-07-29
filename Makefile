@@ -1,17 +1,8 @@
+include make/platform.mk
+
 SHELL := /bin/sh
 
-ARCH_PACKAGES := \
-  git \
-  gitleaks \
-  make \
-  python \
-  python-build \
-  python-pipx
-
 .PHONY: install-packages sanity-check test verify public-audit build
-
-install-packages:
-	sudo pacman -S --needed -- $(ARCH_PACKAGES)
 
 sanity-check:
 	./tools/sanity-check
@@ -26,4 +17,4 @@ public-audit:
 	./tools/public-audit
 
 build:
-	PYTHONDONTWRITEBYTECODE=1 python3 -m build --no-isolation
+	PYTHONDONTWRITEBYTECODE=1 pyproject-build --no-isolation

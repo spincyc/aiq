@@ -144,7 +144,12 @@ class LifecycleLockTest(unittest.TestCase):
             )
             self.assertEqual(
                 moved_lock_path,
-                moved_repository / ".git" / "aiq" / "lifecycle.lock",
+                (
+                    moved_repository
+                    / ".git"
+                    / "aiq"
+                    / "lifecycle.lock"
+                ).resolve(),
             )
             self.assertTrue(moved_lock_path.is_file())
             self.assertFalse(original_lock_path.exists())
