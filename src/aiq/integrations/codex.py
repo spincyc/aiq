@@ -104,8 +104,14 @@ def _inline_configuration_status(codex_home: Path) -> dict[str, bool]:
     hooks = document.get("hooks")
     features = document.get("features")
     disabled = isinstance(features, dict) and features.get("hooks") is False
+    # Codex records hook trust decisions under [hooks.state]; only other
+    # keys define inline hooks that conflict with the managed hooks.json.
+    inline_definitions = (
+        isinstance(hooks, dict)
+        and bool(set(hooks) - {"state"})
+    )
     return {
-        "hooks": isinstance(hooks, dict) and bool(hooks),
+        "hooks": inline_definitions,
         "disabled": disabled,
     }
 

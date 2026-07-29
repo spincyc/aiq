@@ -64,6 +64,9 @@ effects documents, capability contracts, and integration manifests.
 
 ### Fixed
 
+- Codex `[hooks.state]` trust records in `config.toml` no longer block the
+  integration lifecycle as inline-hook conflicts.
+
 - Hook-integration manifests survive hook-template changes, integration-id
   markers match as exact command tokens, and explicit repair adopts a hook
   left unmanaged by an interrupted install.

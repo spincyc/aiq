@@ -163,4 +163,6 @@ absolute `cwd`, and deduplicates a repeated identical event.
 If capture is missing, run `integration check`, inspect `journal path` from the
 target repository, and verify that Codex hooks are enabled. Inline hooks in
 `config.toml` conflict with the managed `hooks.json` representation; use
-`integration print` when configuration is externally owned.
+`integration print` when configuration is externally owned. Codex's own
+`[hooks.state]` trust records do not conflict, and a repair that changes the
+owned hook requires re-trusting it in `/hooks`.

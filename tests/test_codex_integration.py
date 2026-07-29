@@ -386,11 +386,21 @@ class CodexIntegrationTest(unittest.TestCase):
             empty = plan_integration(launcher=launcher, environment=environment)
             config.write_text("[hooks]\n[[hooks.Stop]]\n")
             inline = plan_integration(launcher=launcher, environment=environment)
+            config.write_text(
+                '[hooks.state]\n'
+                '[hooks.state."/x/hooks.json:user_prompt_submit:0:0"]\n'
+                'trusted_hash = "sha256:abc"\n'
+            )
+            trust_only = plan_integration(
+                launcher=launcher,
+                environment=environment,
+            )
             config.write_text("[features]\nhooks = false\n")
             disabled = plan_integration(launcher=launcher, environment=environment)
 
             self.assertEqual(empty["action"], "install")
             self.assertEqual(inline["status"], "conflict")
+            self.assertEqual(trust_only["action"], "install")
             self.assertEqual(disabled["status"], "disabled")
 
     def test_drift_requires_explicit_repair(self) -> None:
