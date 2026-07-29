@@ -135,20 +135,20 @@ class ReconcileCliTests(unittest.TestCase):
         stale_python = str(self.root / "old-runtime" / "python3")
         manifest_path = self.manifest_path()
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        group = manifest["managed_group"]
-        command = group["hooks"][0]["command"]
-        _, _, suffix = command.partition(" -I -m aiq")
-        group["hooks"][0]["command"] = (
-            f"{shlex.quote(stale_python)} -I -m aiq{suffix}"
-        )
-        manifest["python_executable"] = stale_python
-        manifest["managed_group_sha256"] = hashlib.sha256(
-            json.dumps(group, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-
+        groups = manifest["managed_group"]
         hooks_path = self.codex_home / "hooks.json"
         document = json.loads(hooks_path.read_text(encoding="utf-8"))
-        document["hooks"]["UserPromptSubmit"] = [group]
+        for event, group in groups.items():
+            command = group["hooks"][0]["command"]
+            _, _, suffix = command.partition(" -I -m aiq")
+            group["hooks"][0]["command"] = (
+                f"{shlex.quote(stale_python)} -I -m aiq{suffix}"
+            )
+            document["hooks"][event] = [group]
+        manifest["python_executable"] = stale_python
+        manifest["managed_group_sha256"] = hashlib.sha256(
+            json.dumps(groups, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         hooks_data = (
             json.dumps(document, ensure_ascii=False, indent=2) + "\n"
         ).encode()

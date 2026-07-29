@@ -1,11 +1,12 @@
 # Claude Code integration
 
 The Claude Code integration captures each `UserPromptSubmit` event before the
-model receives it.
+model receives it and gates each `Stop` event on remaining runnable work.
 
 | Property | Alpha status |
 |---|---|
 | Event ingestion | Installed hook calls AIQ's Claude Code adapter |
+| Completion gate | The same command under `Stop` blocks stopping while runnable work remains |
 | Hook configuration | `$CLAUDE_CONFIG_DIR/settings.json`, or `~/.claude/settings.json` |
 | Hook runtime | Recorded absolute Python and Git executables |
 | Python isolation | `-I -m aiq` from the invoked AIQ installation |
@@ -38,10 +39,11 @@ git_executable="$(command -v git)"
   --git-executable "$git_executable"
 ```
 
-`plan` is read-only. Install minimally appends one owned `UserPromptSubmit`
-group inside the `hooks` object of the user-level `settings.json`, preserves
-every unrelated setting and hook, and records a private manifest and backups
-below
+`plan` is read-only. Install minimally appends one owned group under each of
+`UserPromptSubmit` and `Stop` inside the `hooks` object of the user-level
+`settings.json` — both containing the same command, managed under one
+manifest and one integration id — preserves every unrelated setting and
+hook, and records a private manifest and backups below
 `${XDG_STATE_HOME:-$HOME/.local/state}/aiq/integrations/claude/<target-id>/`.
 
 AIQ records the launcher identity, its Python runtime, and Git. The hook
@@ -66,6 +68,35 @@ The adapter's idempotency identity covers `session_id`, the per-prompt
 `prompt_id`, the working directory, and the exact content: a byte-identical
 re-delivered event deduplicates, and any difference is captured as a new
 message.
+
+## Completion gate
+
+The installed command is also registered under the `Stop` event. When Claude
+Code is about to finish a turn, the hook resolves the AIQ scope from the
+event's absolute `cwd` and takes one read-only journal snapshot. If ready
+tasks, unexpired active claims, or unapplied (`received` or `needs_input`)
+messages remain, it exits 2 with a single stderr line such as
+`AIQ: runnable work remains: 2 ready tasks, 1 active claim — run aiq status`.
+Claude Code feeds that line back to the model and continues the turn, so the
+model can run the remaining work before declaring completion.
+
+The gate honors the host loop guard: when the `Stop` payload carries a truthy
+`stop_hook_active` — Claude Code sets it while already continuing because of
+a stop hook — the gate exits 0 silently instead of blocking again, so it can
+never loop the session. It also exits 0 silently when nothing is runnable or
+no journal exists for the scope; it never creates storage.
+
+The gate fails open, the inverse of capture's fail-visible rule: any error on
+the gate path (invalid payload, unresolvable scope, locked or unreadable
+journal) exits 0 with one stderr diagnostic, because an AIQ defect must never
+block Claude Code from stopping. The normative dispatch and exit semantics
+are defined in the [CLI contract](../contracts/cli-v1.md#integrations).
+
+An installation from before the completion gate has no `Stop` group;
+`integration check` reports it as ordinary drift, and
+`integration install claude --user --repair` adds the missing group and
+upgrades the manifest in place. Claude Code snapshots hook configuration at
+session start, so restart the session after the repair.
 
 ## Externally managed setup
 

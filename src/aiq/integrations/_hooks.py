@@ -1,9 +1,16 @@
-"""Shared engine for reversible user-level prompt-hook integrations.
+"""Shared engine for reversible user-level hook integrations.
 
-Each adapter owns one marked hook group inside one JSON configuration file.
-The engine provides the filesystem safety, manifest ownership, drift
-detection, and lifecycle mechanics; adapters supply the target file, hook
-group definition, and payload validation.
+Each adapter owns one marked hook group per managed event inside one JSON
+configuration file. The engine provides the filesystem safety, manifest
+ownership, drift detection, and lifecycle mechanics; adapters supply the
+target file, the ordered event-to-group definition, and payload validation.
+
+The receive boundary dispatches on the delivered ``hook_event_name``:
+``UserPromptSubmit`` events are captured into the journal, and ``Stop``
+events run a read-only completion gate that blocks stopping (exit 2) while
+runnable work remains. The gate fails open: any gate-path error exits 0
+with a single stderr diagnostic, because an AIQ defect must never block
+the host from stopping.
 """
 
 from __future__ import annotations
@@ -27,7 +34,8 @@ from aiq.journal import JournalError, ingest_message, resolve_scope
 
 HOOK_INPUT_MAX_BYTES = 1_048_576
 TARGET_MAX_BYTES = 1_048_576
-_EVENT = "UserPromptSubmit"
+PROMPT_EVENT = "UserPromptSubmit"
+STOP_EVENT = "Stop"
 
 
 class HookIntegrationError(JournalError):
@@ -43,16 +51,41 @@ def single_line(value: str) -> str:
     )
 
 
+def _payload_event(payload: bytes) -> str | None:
+    """Best-effort ``hook_event_name`` of one raw payload, or ``None``."""
+
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(document, dict):
+        event = document.get("hook_event_name")
+        if isinstance(event, str):
+            return event
+    return None
+
+
 def run_receive_hook_main(
     receive: Callable[[bytes], Any],
     *,
     error_class: type[JournalError],
     input_label: str,
     failure_exit_code: int,
+    gate: Callable[[bytes], str | None] | None = None,
     input_stream: Any = None,
     error_stream: Any = None,
 ) -> int:
-    """Run a stdout-silent hook boundary around one ``receive`` call."""
+    """Run one stdout-silent hook boundary, dispatched on the event name.
+
+    A ``Stop`` payload runs ``gate`` when one is supplied: a returned block
+    reason exits 2 with that single stderr line (the host feeds it back to
+    the model and continues), ``None`` exits 0 silently, and any gate error
+    exits 0 with a single stderr diagnostic so an AIQ defect never blocks
+    stopping. Every other payload runs ``receive``; a capture failure exits
+    ``failure_exit_code`` with a single stderr diagnostic. A payload that
+    cannot be read or parsed enough to identify its event follows the
+    capture failure path, which also never blocks stopping.
+    """
 
     source = sys.stdin.buffer if input_stream is None else input_stream
     errors = sys.stderr if error_stream is None else error_stream
@@ -62,6 +95,25 @@ def run_receive_hook_main(
             raise error_class(
                 f"{input_label} exceeds {HOOK_INPUT_MAX_BYTES} bytes"
             )
+    except Exception as error:
+        errors.write(f"AIQ prompt capture failed: {single_line(str(error))}\n")
+        errors.flush()
+        return failure_exit_code
+    if gate is not None and _payload_event(payload) == STOP_EVENT:
+        try:
+            reason = gate(payload)
+        except Exception as error:
+            errors.write(
+                f"AIQ completion gate skipped: {single_line(str(error))}\n"
+            )
+            errors.flush()
+            return 0
+        if reason is None:
+            return 0
+        errors.write(f"{single_line(reason)}\n")
+        errors.flush()
+        return 2
+    try:
         receive(payload)
         return 0
     except Exception as error:
@@ -84,7 +136,13 @@ class ReceivePayloadSpec:
 
 @dataclass(frozen=True)
 class HookIntegrationSpec:
-    """Everything adapter-specific the shared engine needs."""
+    """Everything adapter-specific the shared engine needs.
+
+    ``events`` is the ordered tuple of managed hook event names and
+    ``hook_groups`` returns the owned group for each of them, keyed by
+    event name in the same order. Both the target configuration and the
+    manifest manage one owned group per event under one integration id.
+    """
 
     integration: str
     integration_id: str
@@ -93,7 +151,8 @@ class HookIntegrationSpec:
     target_label: str
     state_subdirectory: str
     target_path: Callable[[Mapping[str, str]], Path]
-    hook_group: Callable[[Path, Path], dict[str, Any]]
+    hook_groups: Callable[[Path, Path], dict[str, dict[str, Any]]]
+    events: tuple[str, ...] = (PROMPT_EVENT,)
     created_file_preamble: dict[str, Any] = field(default_factory=dict)
     preflight: Callable[
         [Mapping[str, str], Path, dict[str, Any]],
@@ -429,6 +488,46 @@ def marker_count(group: Any, *, integration_id: str) -> int:
     )
 
 
+def _valid_owned_group(group: Any, *, integration_id: str) -> bool:
+    handlers = group.get("hooks") if isinstance(group, dict) else None
+    return (
+        isinstance(group, dict)
+        and isinstance(handlers, list)
+        and all(isinstance(handler, dict) for handler in handlers)
+        and marker_count(group, integration_id=integration_id) == 1
+    )
+
+
+def _manifest_group_mapping(
+    spec: HookIntegrationSpec,
+    managed_group: Any,
+) -> dict[str, dict[str, Any]] | None:
+    """Normalize a manifest ``managed_group`` to an event-keyed mapping.
+
+    Manifests written before multi-event support store one bare group
+    object; it owns the first (prompt) event. Newer manifests store an
+    ordered mapping of event name to owned group. Returns ``None`` when
+    neither shape validates.
+    """
+
+    if not isinstance(managed_group, dict) or not managed_group:
+        return None
+    if isinstance(managed_group.get("hooks"), list):
+        mapping: dict[str, Any] = {spec.events[0]: managed_group}
+    else:
+        mapping = managed_group
+    if not set(mapping).issubset(set(spec.events)):
+        return None
+    if not all(
+        _valid_owned_group(group, integration_id=spec.integration_id)
+        for group in mapping.values()
+    ):
+        return None
+    return {
+        event: mapping[event] for event in spec.events if event in mapping
+    }
+
+
 def object_without_duplicates_hook(
     error_class: type[JournalError],
 ) -> Callable[[list[tuple[str, Any]]], dict[str, Any]]:
@@ -472,11 +571,12 @@ def _decode_hooks(
             f"{spec.display_name} hooks field must be a JSON object"
         )
     if isinstance(hooks, dict):
-        groups = hooks.get(_EVENT)
-        if groups is not None and not isinstance(groups, list):
-            raise spec.error_class(
-                f"{spec.display_name} {_EVENT} hooks must be a JSON array"
-            )
+        for event in spec.events:
+            groups = hooks.get(event)
+            if groups is not None and not isinstance(groups, list):
+                raise spec.error_class(
+                    f"{spec.display_name} {event} hooks must be a JSON array"
+                )
     return document
 
 
@@ -559,19 +659,13 @@ def _validate_manifest(
         not isinstance(containers, list)
         or not all(isinstance(item, str) for item in containers)
         or len(containers) != len(set(containers))
-        or not set(containers).issubset({"hooks", _EVENT})
+        or not set(containers).issubset({"hooks", *spec.events})
     ):
         raise spec.error_class(
             "integration manifest created containers are invalid"
         )
     group = manifest["managed_group"]
-    handlers = group.get("hooks") if isinstance(group, dict) else None
-    if (
-        not isinstance(group, dict)
-        or not isinstance(handlers, list)
-        or not all(isinstance(handler, dict) for handler in handlers)
-        or marker_count(group, integration_id=spec.integration_id) != 1
-    ):
+    if _manifest_group_mapping(spec, group) is None:
         raise spec.error_class("integration manifest owned hook is invalid")
     group_digest = sha256_or_none(
         json.dumps(group, sort_keys=True, separators=(",", ":")).encode()
@@ -704,27 +798,29 @@ def _assert_target_unchanged(
         raise spec.error_class(f"{spec.target_label} changed before mutation")
 
 
-def _groups(document: dict[str, Any]) -> list[Any]:
+def _groups(document: dict[str, Any], event: str) -> list[Any]:
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         return []
-    groups = hooks.get(_EVENT)
+    groups = hooks.get(event)
     return groups if isinstance(groups, list) else []
 
 
 def _managed_groups(
     spec: HookIntegrationSpec,
     document: dict[str, Any],
+    event: str,
 ) -> list[Any]:
     return [
         group
-        for group in _groups(document)
+        for group in _groups(document, event)
         if marker_count(group, integration_id=spec.integration_id)
     ]
 
 
 def _append_group(
     document: dict[str, Any],
+    event: str,
     group: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
     result = json.loads(json.dumps(document))
@@ -734,38 +830,40 @@ def _append_group(
         hooks = {}
         result["hooks"] = hooks
         created.append("hooks")
-    groups = hooks.get(_EVENT)
+    groups = hooks.get(event)
     if groups is None:
         groups = []
-        hooks[_EVENT] = groups
-        created.append(_EVENT)
+        hooks[event] = groups
+        created.append(event)
     groups.append(group)
     return result, created
 
 
 def _repair_missing_group(
     document: dict[str, Any],
+    event: str,
     manifest_group: dict[str, Any],
     desired_group: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], bool]:
     """Replace the manifest-recorded group in place; append only when absent."""
 
-    for index, group in enumerate(_groups(document)):
+    for index, group in enumerate(_groups(document, event)):
         if group == manifest_group:
             result = json.loads(json.dumps(document))
-            result["hooks"][_EVENT][index] = desired_group
+            result["hooks"][event][index] = desired_group
             return result, [], True
-    after_document, created = _append_group(document, desired_group)
+    after_document, created = _append_group(document, event, desired_group)
     return after_document, created, False
 
 
 def _replace_managed_group(
     spec: HookIntegrationSpec,
     document: dict[str, Any],
+    event: str,
     replacement: dict[str, Any],
 ) -> dict[str, Any]:
     result = json.loads(json.dumps(document))
-    groups = result["hooks"][_EVENT]
+    groups = result["hooks"][event]
     indexes = [
         index
         for index, group in enumerate(groups)
@@ -805,11 +903,13 @@ def render_fragment(
         python_executable,
         error_class=spec.error_class,
     )
-    group = spec.hook_group(
+    groups = spec.hook_groups(
         resolved_python_executable,
         resolved_git_executable,
     )
-    return _encode_hooks({"hooks": {_EVENT: [group]}}).decode("utf-8")
+    return _encode_hooks(
+        {"hooks": {event: [group] for event, group in groups.items()}}
+    ).decode("utf-8")
 
 
 def _build_plan(
@@ -872,13 +972,13 @@ def _build_plan(
         result["blocked_reason"] = str(error)
         return result
 
-    desired_group = spec.hook_group(
+    desired_groups = spec.hook_groups(
         resolved_python_executable,
         resolved_git_executable,
     )
     result.update(
         {
-            "desired_group": desired_group,
+            "desired_group": desired_groups,
             "before_sha256": sha256_or_none(before),
             "_launcher": os.fspath(resolved_launcher),
             "_git_executable": os.fspath(resolved_git_executable),
@@ -893,12 +993,20 @@ def _build_plan(
         result["blocked_reason"] = blocked["blocked_reason"]
         return result
 
-    managed = _managed_groups(spec, document)
-    marker_total = sum(
-        marker_count(group, integration_id=spec.integration_id)
-        for group in _groups(document)
+    managed = {
+        event: _managed_groups(spec, document, event)
+        for event in spec.events
+    }
+    conflict = any(
+        len(managed[event]) > 1
+        or sum(
+            marker_count(group, integration_id=spec.integration_id)
+            for group in _groups(document, event)
+        )
+        > 1
+        for event in spec.events
     )
-    if len(managed) > 1 or marker_total > 1:
+    if conflict:
         result["status"] = "conflict"
         result["blocked_reason"] = (
             f"multiple AIQ {spec.display_name} hooks are configured"
@@ -911,10 +1019,14 @@ def _build_plan(
         and manifest.get("target") == os.fspath(target)
         and manifest.get("integration_id") == spec.integration_id
     )
-    manifest_group_mismatch = bool(
-        manifest_active
-        and managed
-        and manifest.get("managed_group") != managed[0]
+    manifest_groups = (
+        _manifest_group_mapping(spec, manifest["managed_group"]) or {}
+        if manifest_active
+        else {}
+    )
+    manifest_group_mismatch = manifest_active and any(
+        managed[event] and manifest_groups.get(event) != managed[event][0]
+        for event in spec.events
     )
     if manifest_group_mismatch and not repair:
         result["status"] = "drifted"
@@ -923,8 +1035,9 @@ def _build_plan(
             f"{spec.display_name} hook"
         )
         return result
+    any_managed = any(managed[event] for event in spec.events)
     adopt = False
-    if managed and not manifest_active:
+    if any_managed and not manifest_active:
         if not repair:
             result["status"] = "unmanaged"
             result["blocked_reason"] = (
@@ -934,62 +1047,101 @@ def _build_plan(
             return result
         adopt = True
 
+    missing_events = [
+        event for event in spec.events if not managed[event]
+    ]
+    mismatched_events = [
+        event
+        for event in spec.events
+        if managed[event] and managed[event][0] != desired_groups[event]
+    ]
+
     created: list[str] = []
     created_file = before is None
-    if not managed:
-        if manifest_active and not repair:
+    appended_events: set[str] = set()
+    if any_managed or manifest_active:
+        if missing_events and manifest_active and not repair:
             result["status"] = "drifted"
             result["blocked_reason"] = (
                 f"the manifest-owned {spec.display_name} hook is missing"
             )
             return result
-        if manifest_active:
-            after_document, created, replaced = _repair_missing_group(
-                document,
-                manifest["managed_group"],
-                desired_group,
-            )
-            if replaced:
-                created_file = manifest["created_file"]
-                created = list(manifest["created_containers"])
-            action = "repair"
-        else:
-            after_document, created = _append_group(document, desired_group)
-            action = "install"
-    elif managed[0] != desired_group:
-        if not repair:
+        if mismatched_events and not repair:
             result["status"] = "drifted"
             result["blocked_reason"] = (
                 f"the manifest-owned {spec.display_name} hook differs from "
                 "the desired definition"
             )
             return result
-        after_document = _replace_managed_group(spec, document, desired_group)
+        if (
+            not missing_events
+            and not mismatched_events
+            and not manifest_group_mismatch
+            and not adopt
+        ):
+            result.update(
+                {
+                    "status": "installed",
+                    "action": "none",
+                    "after_sha256": sha256_or_none(before),
+                    "plan_token": hashlib.sha256(
+                        f"{target}\0{sha256_or_none(before)}\0"
+                        f"{sha256_or_none(before)}".encode()
+                    ).hexdigest(),
+                }
+            )
+            return result
         action = "repair"
         if manifest_active:
             created_file = manifest["created_file"]
             created = list(manifest["created_containers"])
-    elif adopt:
-        after_document = _replace_managed_group(spec, document, desired_group)
-        action = "repair"
-    elif manifest_group_mismatch:
         after_document = document
-        action = "repair"
-        created_file = manifest["created_file"]
-        created = list(manifest["created_containers"])
+        for event in spec.events:
+            desired_group = desired_groups[event]
+            if managed[event]:
+                if managed[event][0] != desired_group or adopt:
+                    after_document = _replace_managed_group(
+                        spec,
+                        after_document,
+                        event,
+                        desired_group,
+                    )
+                continue
+            manifest_group = manifest_groups.get(event)
+            if manifest_group is not None:
+                after_document, event_created, replaced = (
+                    _repair_missing_group(
+                        after_document,
+                        event,
+                        manifest_group,
+                        desired_group,
+                    )
+                )
+                if not replaced:
+                    appended_events.add(event)
+            else:
+                after_document, event_created = _append_group(
+                    after_document,
+                    event,
+                    desired_group,
+                )
+                appended_events.add(event)
+            for container in event_created:
+                if container not in created:
+                    created.append(container)
     else:
-        result.update(
-            {
-                "status": "installed",
-                "action": "none",
-                "after_sha256": sha256_or_none(before),
-                "plan_token": hashlib.sha256(
-                    f"{target}\0{sha256_or_none(before)}\0"
-                    f"{sha256_or_none(before)}".encode()
-                ).hexdigest(),
-            }
-        )
-        return result
+        action = "install"
+        after_document = document
+        for event in spec.events:
+            after_document, event_created = _append_group(
+                after_document,
+                event,
+                desired_groups[event],
+            )
+            appended_events.add(event)
+            for container in event_created:
+                if container not in created:
+                    created.append(container)
 
     if created_file and spec.created_file_preamble:
         after_document = {
@@ -1017,10 +1169,13 @@ def _build_plan(
             ).hexdigest(),
             "changes": [
                 {
-                    "op": "add" if action == "install" else "replace",
-                    "path": f"/hooks/{_EVENT}/aiq-owned-group",
-                    "value": desired_group,
+                    "op": (
+                        "add" if event in appended_events else "replace"
+                    ),
+                    "path": f"/hooks/{event}/aiq-owned-group",
+                    "value": desired_groups[event],
                 }
+                for event in spec.events
             ],
             "_after": after,
         }
@@ -1193,38 +1348,45 @@ def check_integration(
     return result
 
 
-def _remove_managed_group(
+def _remove_managed_groups(
     spec: HookIntegrationSpec,
     document: dict[str, Any],
     manifest: dict[str, Any],
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool, list[str]]:
+    mapping = _manifest_group_mapping(spec, manifest.get("managed_group"))
+    if mapping is None:
+        raise spec.error_class("integration manifest owned hook is invalid")
     result = json.loads(json.dumps(document))
     hooks = result.get("hooks")
-    groups = hooks.get(_EVENT) if isinstance(hooks, dict) else None
-    if not isinstance(groups, list):
-        raise spec.error_class(
-            f"the manifest-owned {spec.display_name} hook is missing"
-        )
-    indexes = [
-        index
-        for index, group in enumerate(groups)
-        if marker_count(group, integration_id=spec.integration_id)
-    ]
-    if len(indexes) != 1:
-        raise spec.error_class(
-            f"expected exactly one AIQ {spec.display_name} hook"
-        )
-    index = indexes[0]
-    if groups[index] != manifest.get("managed_group"):
-        raise spec.error_class(
-            f"the manifest-owned {spec.display_name} hook has drifted; "
-            "refusing uninstall"
-        )
-    del groups[index]
+    removed_events: list[str] = []
+    for event, owned_group in mapping.items():
+        groups = hooks.get(event) if isinstance(hooks, dict) else None
+        if not isinstance(groups, list):
+            raise spec.error_class(
+                f"the manifest-owned {spec.display_name} hook is missing"
+            )
+        indexes = [
+            index
+            for index, group in enumerate(groups)
+            if marker_count(group, integration_id=spec.integration_id)
+        ]
+        if len(indexes) != 1:
+            raise spec.error_class(
+                f"expected exactly one AIQ {spec.display_name} hook"
+            )
+        index = indexes[0]
+        if groups[index] != owned_group:
+            raise spec.error_class(
+                f"the manifest-owned {spec.display_name} hook has drifted; "
+                "refusing uninstall"
+            )
+        del groups[index]
+        removed_events.append(event)
 
     created = set(manifest.get("created_containers", []))
-    if not groups and _EVENT in created:
-        del hooks[_EVENT]
+    for event in mapping:
+        if not hooks[event] and event in created:
+            del hooks[event]
     if not hooks and "hooks" in created:
         del result["hooks"]
 
@@ -1235,7 +1397,7 @@ def _remove_managed_group(
             if remaining.get(key) == value:
                 del remaining[key]
         delete_file = not remaining
-    return result, delete_file
+    return result, delete_file, removed_events
 
 
 def uninstall_integration(
@@ -1281,7 +1443,7 @@ def uninstall_integration(
             raise spec.error_class(
                 f"the manifest-owned {spec.target_label} file is missing"
             )
-        after_document, delete_file = _remove_managed_group(
+        after_document, delete_file, removed_events = _remove_managed_groups(
             spec,
             document,
             manifest,
@@ -1331,9 +1493,10 @@ def uninstall_integration(
             "changes": [
                 {
                     "op": "remove",
-                    "path": f"/hooks/{_EVENT}/aiq-owned-group",
+                    "path": f"/hooks/{event}/aiq-owned-group",
                     "integration_id": spec.integration_id,
                 }
+                for event in removed_events
             ],
         }
 
@@ -1474,3 +1637,102 @@ def receive_hook(
         cwd=resolved_cwd,
     )
     return result.to_dict()
+
+
+def _count_noun(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def gate_stop_hook(
+    spec: HookIntegrationSpec,
+    payload: str | bytes,
+    *,
+    integration_id: str,
+    git_executable: str | Path | None = None,
+    agent_root: Path | None = None,
+) -> str | None:
+    """Evaluate one ``Stop`` completion gate payload.
+
+    Returns the single-line block reason while runnable work remains in
+    the scope resolved from the payload working directory, or ``None``
+    when stopping is allowed: the host's ``stop_hook_active`` loop guard
+    is set, or no ready task, unexpired active claim, or unapplied
+    message remains. The check is one read-only snapshot; a missing
+    journal counts as nothing runnable and never creates storage. Errors
+    raise; the boundary in :func:`run_receive_hook_main` fails open on
+    them (exit 0) so an AIQ defect never blocks stopping.
+    """
+
+    if integration_id != spec.integration_id:
+        raise spec.error_class(
+            f"unsupported {spec.display_name} integration id"
+        )
+    if git_executable is None:
+        raise spec.error_class(
+            f"{spec.display_name} hook requires an absolute Git executable"
+        )
+    resolved_git_executable = git_executable_path(
+        git_executable,
+        error_class=spec.error_class,
+    )
+    raw = payload.encode() if isinstance(payload, str) else payload
+    if len(raw) > HOOK_INPUT_MAX_BYTES:
+        raise spec.error_class(
+            f"{spec.display_name} hook input exceeds "
+            f"{HOOK_INPUT_MAX_BYTES} bytes"
+        )
+    try:
+        document = json.loads(
+            raw,
+            object_pairs_hook=object_without_duplicates_hook(spec.error_class),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise spec.error_class(
+            f"{spec.display_name} hook input is invalid JSON"
+        ) from error
+    if not isinstance(document, dict):
+        raise spec.error_class(
+            f"{spec.display_name} hook input must be a JSON object"
+        )
+    if document.get("hook_event_name") != STOP_EVENT:
+        raise spec.error_class(
+            f"{spec.display_name} hook is not a {STOP_EVENT} event"
+        )
+    if document.get("stop_hook_active"):
+        return None
+    cwd_value = document.get("cwd")
+    if not isinstance(cwd_value, str) or not cwd_value:
+        raise spec.error_class(
+            f"{spec.display_name} hook cwd must be a non-empty string"
+        )
+    cwd = Path(cwd_value)
+    if not cwd.is_absolute() or not cwd.is_dir():
+        raise spec.error_class(
+            f"{spec.display_name} hook working directory is invalid"
+        )
+    scope = resolve_scope(
+        "auto",
+        cwd=cwd,
+        agent_root=agent_root,
+        git_executable=resolved_git_executable,
+    )
+    from aiq.queue import read_status
+
+    status = read_status(scope)
+    ready_tasks = int(status["tasks"].get("ready", 0))
+    active_claims = int(status["claims"].get("active", 0))
+    unapplied_messages = int(status["messages"].get("received", 0)) + int(
+        status["messages"].get("needs_input", 0)
+    )
+    if not (ready_tasks or active_claims or unapplied_messages):
+        return None
+    parts = []
+    if ready_tasks:
+        parts.append(_count_noun(ready_tasks, "ready task"))
+    if active_claims:
+        parts.append(_count_noun(active_claims, "active claim"))
+    if unapplied_messages:
+        parts.append(_count_noun(unapplied_messages, "unapplied message"))
+    return (
+        f"AIQ: runnable work remains: {', '.join(parts)} — run aiq status"
+    )

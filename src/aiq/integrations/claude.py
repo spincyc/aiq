@@ -1,12 +1,20 @@
-"""Reversible Claude Code ``UserPromptSubmit`` integration.
+"""Reversible Claude Code ``UserPromptSubmit`` and ``Stop`` integration.
 
 Claude Code stores user-level hooks inside ``settings.json`` next to
 unrelated settings, delivers ``prompt_id`` instead of ``turn_id``, and
-treats hook exit code 2 as a blocking error that erases the user's
-prompt. The adapter therefore preserves unrelated settings keys, derives
-idempotency from ``prompt_id`` when it is delivered (without one each
-event is captured, with no deduplication), and fails with exit code 1 so
-a capture failure never blocks the prompt.
+treats hook exit code 2 from ``UserPromptSubmit`` as a blocking error
+that erases the user's prompt. The adapter therefore preserves unrelated
+settings keys, derives idempotency from ``prompt_id`` when it is
+delivered (without one each event is captured, with no deduplication),
+and fails capture with exit code 1 so a capture failure never blocks the
+prompt.
+
+The same installed command is also registered under the ``Stop`` event
+as a completion gate: while runnable AIQ work remains and the payload's
+``stop_hook_active`` loop guard is falsy, it exits 2 with one stderr
+line, which Claude Code feeds back to the model and continues the turn.
+The gate fails open — any gate error exits 0 with a diagnostic — so an
+AIQ defect never blocks stopping.
 """
 
 from __future__ import annotations
@@ -22,7 +30,10 @@ from aiq.integrations._hooks import HookIntegrationError
 
 CONTRACT_VERSION = 1
 INTEGRATION_ID = "aiq-workqueue.claude.user-prompt.v1"
-PURPOSE = "Capture Claude Code UserPromptSubmit events."
+PURPOSE = (
+    "Capture Claude Code UserPromptSubmit events and gate Stop events on "
+    "runnable work."
+)
 HOOK_INPUT_MAX_BYTES = _hooks.HOOK_INPUT_MAX_BYTES
 
 
@@ -49,10 +60,12 @@ def _target_path(environment: Mapping[str, str]) -> Path:
     return _claude_config_directory(environment) / "settings.json"
 
 
-def _hook_group(
+def _hook_groups(
     python_executable: Path,
     git_executable: Path,
-) -> dict[str, Any]:
+) -> dict[str, dict[str, Any]]:
+    """Ordered owned groups: the same command under both managed events."""
+
     command = (
         f"{shlex.quote(os.fspath(python_executable))} -I -m aiq "
         "integration receive claude "
@@ -60,14 +73,26 @@ def _hook_group(
         f"--git-executable {shlex.quote(os.fspath(git_executable))}"
     )
     return {
-        "hooks": [
-            {
-                "type": "command",
-                "command": command,
-                "timeout": 10,
-                "statusMessage": "AIQ: capturing message",
-            }
-        ]
+        _hooks.PROMPT_EVENT: {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": 10,
+                    "statusMessage": "AIQ: capturing message",
+                }
+            ]
+        },
+        _hooks.STOP_EVENT: {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": 10,
+                    "statusMessage": "AIQ: checking for runnable work",
+                }
+            ]
+        },
     }
 
 
@@ -95,7 +120,8 @@ SPEC = _hooks.HookIntegrationSpec(
     target_label="Claude Code settings",
     state_subdirectory="claude",
     target_path=_target_path,
-    hook_group=_hook_group,
+    hook_groups=_hook_groups,
+    events=(_hooks.PROMPT_EVENT, _hooks.STOP_EVENT),
     preflight=_preflight,
     receive=_hooks.ReceivePayloadSpec(
         source="claude",
@@ -239,6 +265,28 @@ def receive_hook(
     )
 
 
+def gate_hook(
+    payload: str | bytes,
+    *,
+    integration_id: str = INTEGRATION_ID,
+    git_executable: str | Path | None = None,
+    agent_root: Path | None = None,
+) -> str | None:
+    """Evaluate one Claude Code ``Stop`` completion-gate payload.
+
+    Returns the single-line block reason, or ``None`` when stopping is
+    allowed (loop guard set, or nothing runnable in scope).
+    """
+
+    return _hooks.gate_stop_hook(
+        SPEC,
+        payload,
+        integration_id=integration_id,
+        git_executable=git_executable,
+        agent_root=agent_root,
+    )
+
+
 def receive_hook_main(
     *,
     input_stream: BinaryIO | None = None,
@@ -249,9 +297,13 @@ def receive_hook_main(
 ) -> int:
     """Run the stdout-silent Claude Code hook boundary.
 
-    Failure exits 1, never 2: Claude Code treats exit 2 from a
-    ``UserPromptSubmit`` hook as a blocking error that erases the
-    prompt, and a capture failure must never block the user's prompt.
+    A ``UserPromptSubmit`` payload is captured; a capture failure exits
+    1, never 2, because Claude Code treats exit 2 from that event as a
+    blocking error that erases the prompt. A ``Stop`` payload runs the
+    completion gate instead: exit 2 with one stderr line blocks stopping
+    while runnable work remains and ``stop_hook_active`` is falsy, exit
+    0 is silent otherwise, and any gate failure exits 0 with a single
+    diagnostic so an AIQ defect never blocks stopping.
     """
 
     return _hooks.run_receive_hook_main(
@@ -264,6 +316,12 @@ def receive_hook_main(
         error_class=ClaudeIntegrationError,
         input_label="Claude Code hook input",
         failure_exit_code=1,
+        gate=lambda payload: gate_hook(
+            payload,
+            integration_id=integration_id,
+            git_executable=git_executable,
+            agent_root=agent_root,
+        ),
         input_stream=input_stream,
         error_stream=error_stream,
     )

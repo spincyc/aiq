@@ -71,7 +71,9 @@ class HooksEngineTest(unittest.TestCase):
             document["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] = 11
             target.write_text(json.dumps(document))
             manifest = json.loads(manifest_path.read_text())
-            manifest["managed_group"]["hooks"][0]["timeout"] = 11
+            manifest["managed_group"]["UserPromptSubmit"]["hooks"][0][
+                "timeout"
+            ] = 11
             manifest["managed_group_sha256"] = _canonical_digest(
                 manifest["managed_group"]
             )
@@ -102,7 +104,9 @@ class HooksEngineTest(unittest.TestCase):
             )
             manifest_path = Path(installed["state_directory"]) / "manifest.json"
             manifest = json.loads(manifest_path.read_text())
-            manifest["managed_group"]["hooks"][0]["timeout"] = 11
+            manifest["managed_group"]["UserPromptSubmit"]["hooks"][0][
+                "timeout"
+            ] = 11
             manifest_path.write_text(json.dumps(manifest))
 
             with self.assertRaisesRegex(CodexIntegrationError, "digest"):
@@ -113,13 +117,17 @@ class HooksEngineTest(unittest.TestCase):
             _group_with_command(f"x --integration-id {INTEGRATION_ID} -y z"),
             integration_id=INTEGRATION_ID,
         )
-        template = hooks_engine.marker_count(
-            codex_module._hook_group(
-                Path("/usr/bin/python3"),
-                self.git_executable(),
-            ),
-            integration_id=INTEGRATION_ID,
+        template_groups = codex_module._hook_groups(
+            Path("/usr/bin/python3"),
+            self.git_executable(),
         )
+        template_counts = {
+            event: hooks_engine.marker_count(
+                group,
+                integration_id=INTEGRATION_ID,
+            )
+            for event, group in template_groups.items()
+        }
         longer_id = hooks_engine.marker_count(
             _group_with_command(f"x --integration-id {INTEGRATION_ID}x -y z"),
             integration_id=INTEGRATION_ID,
@@ -144,7 +152,10 @@ class HooksEngineTest(unittest.TestCase):
         )
 
         self.assertEqual(counted, 1)
-        self.assertEqual(template, 1)
+        self.assertEqual(
+            template_counts,
+            {"UserPromptSubmit": 1, "Stop": 1},
+        )
         self.assertEqual(longer_id, 0)
         self.assertEqual(embedded, 0)
         self.assertEqual(glued, 0)
@@ -185,11 +196,17 @@ class HooksEngineTest(unittest.TestCase):
         document = {"hooks": {"UserPromptSubmit": [unrelated, recorded]}}
 
         replaced_document, replaced_created, replaced = (
-            hooks_engine._repair_missing_group(document, recorded, desired)
+            hooks_engine._repair_missing_group(
+                document,
+                "UserPromptSubmit",
+                recorded,
+                desired,
+            )
         )
         appended_document, appended_created, appended = (
             hooks_engine._repair_missing_group(
                 {"hooks": {"UserPromptSubmit": [unrelated]}},
+                "UserPromptSubmit",
                 recorded,
                 desired,
             )
@@ -231,6 +248,129 @@ class HooksEngineTest(unittest.TestCase):
 
             self.assertEqual(repaired["status"], "installed")
             self.assertEqual(len(groups), 1)
+
+    def test_multi_event_install_and_uninstall_are_symmetric(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            target = Path(environment["CODEX_HOME"]) / "hooks.json"
+            target.parent.mkdir(parents=True)
+            original = {
+                "description": "mine",
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {"hooks": [{"type": "command", "command": "prompt"}]}
+                    ],
+                    "Stop": [
+                        {"hooks": [{"type": "command", "command": "stop"}]}
+                    ],
+                },
+            }
+            target.write_text(json.dumps(original))
+
+            installed = install_integration(
+                launcher=launcher,
+                environment=environment,
+            )
+            document = json.loads(target.read_text())
+            manifest = json.loads(
+                (
+                    Path(installed["state_directory"]) / "manifest.json"
+                ).read_text()
+            )
+
+            # One owned group is appended under each managed event and the
+            # manifest records both under one integration id.
+            self.assertEqual(installed["status"], "installed")
+            for event in ("UserPromptSubmit", "Stop"):
+                groups = document["hooks"][event]
+                self.assertEqual(len(groups), 2)
+                self.assertEqual(
+                    groups[0],
+                    original["hooks"][event][0],
+                )
+                self.assertIn(
+                    f"--integration-id {INTEGRATION_ID}",
+                    groups[1]["hooks"][0]["command"],
+                )
+            self.assertEqual(
+                set(manifest["managed_group"]),
+                {"UserPromptSubmit", "Stop"},
+            )
+            self.assertEqual(manifest["integration_id"], INTEGRATION_ID)
+
+            removed = uninstall_integration(environment=environment)
+
+            self.assertEqual(removed["status"], "uninstalled")
+            self.assertEqual(
+                {change["path"] for change in removed["changes"]},
+                {
+                    "/hooks/UserPromptSubmit/aiq-owned-group",
+                    "/hooks/Stop/aiq-owned-group",
+                },
+            )
+            self.assertEqual(json.loads(target.read_text()), original)
+
+    def test_single_event_manifest_upgrades_to_stop_group_via_repair(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            installed = install_integration(
+                launcher=launcher,
+                environment=environment,
+            )
+            target = Path(environment["CODEX_HOME"]) / "hooks.json"
+            manifest_path = Path(installed["state_directory"]) / "manifest.json"
+
+            # Rewrite the install as an older single-event one: the target
+            # has only the UserPromptSubmit group and the manifest stores
+            # one bare owned group (the pre-multi-event manifest form).
+            document = json.loads(target.read_text())
+            del document["hooks"]["Stop"]
+            target.write_text(json.dumps(document))
+            manifest = json.loads(manifest_path.read_text())
+            legacy_group = manifest["managed_group"]["UserPromptSubmit"]
+            manifest["managed_group"] = legacy_group
+            manifest["managed_group_sha256"] = _canonical_digest(legacy_group)
+            manifest["created_containers"] = ["hooks", "UserPromptSubmit"]
+            manifest_path.write_text(json.dumps(manifest))
+
+            # The old manifest still loads; the absent Stop group is
+            # ordinary drift repaired by the existing repair flow.
+            plan = plan_integration(launcher=launcher, environment=environment)
+            self.assertEqual(plan["status"], "drifted")
+            self.assertIn("missing", plan["blocked_reason"])
+
+            repaired = install_integration(
+                launcher=launcher,
+                environment=environment,
+                repair=True,
+            )
+            document = json.loads(target.read_text())
+            upgraded = json.loads(manifest_path.read_text())
+            checked = check_integration(
+                launcher=launcher,
+                environment=environment,
+            )
+
+            self.assertEqual(repaired["status"], "installed")
+            self.assertEqual(len(document["hooks"]["UserPromptSubmit"]), 1)
+            self.assertEqual(len(document["hooks"]["Stop"]), 1)
+            self.assertEqual(
+                set(upgraded["managed_group"]),
+                {"UserPromptSubmit", "Stop"},
+            )
+            self.assertEqual(
+                upgraded["created_containers"],
+                ["hooks", "UserPromptSubmit", "Stop"],
+            )
+            self.assertTrue(checked["ok"])
+
+            result = uninstall_integration(environment=environment)
+            self.assertEqual(result["status"], "uninstalled")
+            self.assertFalse(target.exists())
 
     def test_interrupted_install_is_recoverable_with_explicit_repair(
         self,

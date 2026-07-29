@@ -1,4 +1,12 @@
-"""Reversible Codex ``UserPromptSubmit`` integration."""
+"""Reversible Codex ``UserPromptSubmit`` and ``Stop`` integration.
+
+The installed command captures ``UserPromptSubmit`` events and is also
+registered under the ``Stop`` event as a completion gate: while runnable
+AIQ work remains and the payload's ``stop_hook_active`` loop guard is
+falsy, it exits 2 with one stderr line, which Codex feeds back to the
+model and continues the turn. The gate fails open — any gate error exits
+0 with a diagnostic — so an AIQ defect never blocks stopping.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +22,10 @@ from aiq.integrations._hooks import HookIntegrationError
 
 CONTRACT_VERSION = 1
 INTEGRATION_ID = "aiq-workqueue.codex.user-prompt.v1"
-PURPOSE = "Capture Codex UserPromptSubmit events."
+PURPOSE = (
+    "Capture Codex UserPromptSubmit events and gate Stop events on "
+    "runnable work."
+)
 HOOK_INPUT_MAX_BYTES = _hooks.HOOK_INPUT_MAX_BYTES
 HOOK_DESCRIPTION = "AIQ local work-journal integration."
 
@@ -40,10 +51,12 @@ def _target_path(environment: Mapping[str, str]) -> Path:
     return _codex_home(environment) / "hooks.json"
 
 
-def _hook_group(
+def _hook_groups(
     python_executable: Path,
     git_executable: Path,
-) -> dict[str, Any]:
+) -> dict[str, dict[str, Any]]:
+    """Ordered owned groups: the same command under both managed events."""
+
     command = (
         f"{shlex.quote(os.fspath(python_executable))} -I -m aiq "
         "integration receive codex "
@@ -51,14 +64,26 @@ def _hook_group(
         f"--git-executable {shlex.quote(os.fspath(git_executable))}"
     )
     return {
-        "hooks": [
-            {
-                "type": "command",
-                "command": command,
-                "timeout": 10,
-                "statusMessage": "AIQ: capturing message",
-            }
-        ]
+        _hooks.PROMPT_EVENT: {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": 10,
+                    "statusMessage": "AIQ: capturing message",
+                }
+            ]
+        },
+        _hooks.STOP_EVENT: {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": 10,
+                    "statusMessage": "AIQ: checking for runnable work",
+                }
+            ]
+        },
     }
 
 
@@ -115,7 +140,8 @@ SPEC = _hooks.HookIntegrationSpec(
     target_label="Codex hooks",
     state_subdirectory="codex",
     target_path=_target_path,
-    hook_group=_hook_group,
+    hook_groups=_hook_groups,
+    events=(_hooks.PROMPT_EVENT, _hooks.STOP_EVENT),
     created_file_preamble={"description": HOOK_DESCRIPTION},
     preflight=_preflight,
     receive=_hooks.ReceivePayloadSpec(
@@ -260,6 +286,28 @@ def receive_hook(
     )
 
 
+def gate_hook(
+    payload: str | bytes,
+    *,
+    integration_id: str = INTEGRATION_ID,
+    git_executable: str | Path | None = None,
+    agent_root: Path | None = None,
+) -> str | None:
+    """Evaluate one Codex ``Stop`` completion-gate payload.
+
+    Returns the single-line block reason, or ``None`` when stopping is
+    allowed (loop guard set, or nothing runnable in scope).
+    """
+
+    return _hooks.gate_stop_hook(
+        SPEC,
+        payload,
+        integration_id=integration_id,
+        git_executable=git_executable,
+        agent_root=agent_root,
+    )
+
+
 def receive_hook_main(
     *,
     input_stream: BinaryIO | None = None,
@@ -270,10 +318,14 @@ def receive_hook_main(
 ) -> int:
     """Run the stdout-silent Codex hook boundary.
 
-    Failure exits 1, never 2: Codex treats a non-zero blocking exit
-    code from a ``UserPromptSubmit`` hook as denying the prompt, and a
-    capture failure must never block the user's prompt. The failure is
-    still visible as a one-line stderr diagnostic.
+    A ``UserPromptSubmit`` payload is captured; a capture failure exits
+    1, never 2, because Codex treats a blocking exit code from that
+    event as denying the prompt, and a capture failure must never block
+    the user's prompt. A ``Stop`` payload runs the completion gate
+    instead: exit 2 with one stderr line blocks stopping while runnable
+    work remains and ``stop_hook_active`` is falsy, exit 0 is silent
+    otherwise, and any gate failure exits 0 with a single diagnostic so
+    an AIQ defect never blocks stopping.
     """
 
     return _hooks.run_receive_hook_main(
@@ -286,6 +338,12 @@ def receive_hook_main(
         error_class=CodexIntegrationError,
         input_label="Codex hook input",
         failure_exit_code=1,
+        gate=lambda payload: gate_hook(
+            payload,
+            integration_id=integration_id,
+            git_executable=git_executable,
+            agent_root=agent_root,
+        ),
         input_stream=input_stream,
         error_stream=error_stream,
     )

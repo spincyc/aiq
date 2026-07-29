@@ -20,6 +20,7 @@ from aiq.integrations.codex import (
     CodexIntegrationError,
     INTEGRATION_ID,
     check_integration,
+    gate_hook,
     install_integration,
     plan_integration,
     print_integration,
@@ -311,7 +312,14 @@ class CodexIntegrationTest(unittest.TestCase):
             self.assertEqual(result["status"], "installed")
             self.assertEqual(installed["description"], "mine")
             self.assertEqual(installed["unknown"], {"keep": True})
-            self.assertEqual(installed["hooks"]["Stop"], original["hooks"]["Stop"])
+            self.assertEqual(
+                installed["hooks"]["Stop"][0], original["hooks"]["Stop"][0]
+            )
+            self.assertEqual(len(installed["hooks"]["Stop"]), 2)
+            self.assertIn(
+                f"--integration-id {INTEGRATION_ID}",
+                installed["hooks"]["Stop"][1]["hooks"][0]["command"],
+            )
             self.assertEqual(len(installed["hooks"]["UserPromptSubmit"]), 2)
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
 
@@ -462,9 +470,9 @@ class CodexIntegrationTest(unittest.TestCase):
             install_integration(launcher=launcher, environment=environment)
             target = Path(environment["CODEX_HOME"]) / "hooks.json"
             document = json.loads(target.read_text())
-            document["hooks"]["Stop"] = [
+            document["hooks"]["Stop"].append(
                 {"hooks": [{"type": "command", "command": "later"}]}
-            ]
+            )
             target.write_text(json.dumps(document))
 
             first = uninstall_integration(environment=environment)
@@ -476,7 +484,10 @@ class CodexIntegrationTest(unittest.TestCase):
             self.assertFalse(first["deleted_file"])
             self.assertEqual(second["action"], "none")
             self.assertEqual(second["integration_id"], INTEGRATION_ID)
-            self.assertIn("Stop", remaining["hooks"])
+            self.assertEqual(
+                remaining["hooks"]["Stop"],
+                [{"hooks": [{"type": "command", "command": "later"}]}],
+            )
             self.assertNotIn("UserPromptSubmit", remaining["hooks"])
 
     def test_uninstall_removes_file_created_by_aiq_and_retains_backups(self) -> None:
@@ -761,6 +772,92 @@ class CodexIntegrationTest(unittest.TestCase):
             self.assertEqual(success, 0)
             self.assertEqual(failure, 1)
             self.assertIn("capture failed", errors.getvalue())
+
+    def test_stop_gate_blocks_once_then_respects_loop_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(
+                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
+                check=True,
+            )
+            receive_hook(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "session",
+                        "turn_id": "turn",
+                        "cwd": str(repository),
+                        "prompt": "unapplied work",
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
+            stop_payload = {
+                "hook_event_name": "Stop",
+                "session_id": "session",
+                "cwd": str(repository),
+            }
+            blocked_errors = io.StringIO()
+            guarded_errors = io.StringIO()
+
+            blocked = receive_hook_main(
+                input_stream=io.BytesIO(json.dumps(stop_payload).encode()),
+                error_stream=blocked_errors,
+                git_executable=self.git_executable(),
+            )
+            guarded = receive_hook_main(
+                input_stream=io.BytesIO(
+                    json.dumps(
+                        {**stop_payload, "stop_hook_active": True}
+                    ).encode()
+                ),
+                error_stream=guarded_errors,
+                git_executable=self.git_executable(),
+            )
+
+            self.assertEqual(blocked, 2)
+            lines = blocked_errors.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("AIQ: runnable work remains:", lines[0])
+            self.assertIn("1 unapplied message", lines[0])
+            self.assertIn("run aiq status", lines[0])
+            self.assertEqual(guarded, 0)
+            self.assertEqual(guarded_errors.getvalue(), "")
+
+    def test_stop_gate_reports_ready_tasks_and_active_claims(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(
+                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
+                check=True,
+            )
+            status = {
+                "messages": {"received": 0, "needs_input": 0},
+                "tasks": {"ready": 2},
+                "claims": {"active": 1},
+            }
+
+            with patch("aiq.queue.read_status", return_value=status):
+                reason = gate_hook(
+                    json.dumps(
+                        {
+                            "hook_event_name": "Stop",
+                            "session_id": "session",
+                            "cwd": str(repository),
+                        }
+                    ),
+                    git_executable=self.git_executable(),
+                )
+
+            self.assertEqual(
+                reason,
+                "AIQ: runnable work remains: 2 ready tasks, 1 active claim "
+                "— run aiq status",
+            )
 
     def test_receive_hook_uses_reviewed_git_with_hostile_empty_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -221,7 +221,14 @@ class IntegrationCliTests(unittest.TestCase):
         installed = json.loads(target.read_text(encoding="utf-8"))
         self.assertEqual(installed["description"], original["description"])
         self.assertEqual(installed["unknown"], original["unknown"])
-        self.assertEqual(installed["hooks"]["Stop"], original["hooks"]["Stop"])
+        self.assertEqual(
+            installed["hooks"]["Stop"][0], original["hooks"]["Stop"][0]
+        )
+        self.assertEqual(len(installed["hooks"]["Stop"]), 2)
+        self.assertIn(
+            "integration receive codex",
+            installed["hooks"]["Stop"][1]["hooks"][0]["command"],
+        )
         self.assertEqual(
             installed["hooks"]["UserPromptSubmit"][0],
             original["hooks"]["UserPromptSubmit"][0],
@@ -323,7 +330,13 @@ class IntegrationCliTests(unittest.TestCase):
                 "--json",
             )
         )
-        planned_command = plan["desired_group"]["hooks"][0]["command"]
+        planned_command = plan["desired_group"]["UserPromptSubmit"]["hooks"][
+            0
+        ]["command"]
+        self.assertEqual(
+            plan["desired_group"]["Stop"]["hooks"][0]["command"],
+            planned_command,
+        )
         planned_argv = shlex.split(planned_command)
         self.assertEqual(
             planned_argv[:4],
@@ -511,6 +524,69 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertEqual(rejected.stdout, "")
         self.assertEqual(len(rejected.stderr.splitlines()), 1)
         self.assertIn("AIQ prompt capture failed:", rejected.stderr)
+
+    def receive_stop(self, payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
+        return self.run_aiq(
+            "integration",
+            "receive",
+            "codex",
+            "--integration-id",
+            "aiq-workqueue.codex.user-prompt.v1",
+            "--git-executable",
+            str(self.git_executable),
+            input_text=json.dumps(payload),
+        )
+
+    def test_receive_stop_runs_completion_gate(self) -> None:
+        stop_payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session",
+            "cwd": str(self.repository),
+        }
+
+        # No journal exists yet: nothing is runnable, allow silently.
+        empty = self.receive_stop(stop_payload)
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertEqual(empty.stdout, "")
+        self.assertEqual(empty.stderr, "")
+
+        captured = self.run_aiq(
+            "integration",
+            "receive",
+            "codex",
+            "--integration-id",
+            "aiq-workqueue.codex.user-prompt.v1",
+            "--git-executable",
+            str(self.git_executable),
+            input_text=json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "turn_id": "turn",
+                    "cwd": str(self.repository),
+                    "prompt": "runnable work",
+                }
+            ),
+        )
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+
+        # The unapplied message blocks stopping with one stderr line.
+        blocked = self.receive_stop(stop_payload)
+        self.assertEqual(blocked.returncode, 2)
+        self.assertEqual(blocked.stdout, "")
+        lines = blocked.stderr.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("AIQ: runnable work remains:", lines[0])
+        self.assertIn("1 unapplied message", lines[0])
+        self.assertIn("run aiq status", lines[0])
+
+        # The host's loop guard allows the next stop attempt.
+        guarded = self.receive_stop(
+            {**stop_payload, "stop_hook_active": True}
+        )
+        self.assertEqual(guarded.returncode, 0, guarded.stderr)
+        self.assertEqual(guarded.stdout, "")
+        self.assertEqual(guarded.stderr, "")
 
 
 if __name__ == "__main__":

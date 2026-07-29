@@ -23,11 +23,11 @@ operations do not infer ownership from mutable user configuration.
 | `launcher` | Lexical absolute AIQ console shim retained from install or repair as installation identity |
 | `python_executable` | Absolute Python runtime used by the owned hook |
 | `git_executable` | Lexical absolute Git executable embedded in the hook |
-| `managed_group` | Exact owned `UserPromptSubmit` hook group |
-| `managed_group_sha256` | Canonical digest of that group |
+| `managed_group` | Ordered mapping of managed event name (`UserPromptSubmit`, `Stop`) to the exact owned hook group; a manifest from a single-event install may instead store one bare `UserPromptSubmit` group |
+| `managed_group_sha256` | Canonical digest of the stored `managed_group` value |
 | `config_sha256` | Digest of the target configuration after the operation |
 | `created_file` | Whether AIQ created the target file |
-| `created_containers` | JSON containers AIQ added |
+| `created_containers` | JSON containers AIQ added, from the whitelist `hooks`, `UserPromptSubmit`, and `Stop` |
 | `backups` | Private pre-change copies and their digests |
 
 The target-specific state directory includes a digest of the absolute target
@@ -68,8 +68,8 @@ from the host agent's process environment.
 
 ## Safety semantics
 
-`check` compares the manifest-owned group with current configuration.
-`uninstall` removes that group only when ownership and content still match.
+`check` compares every manifest-owned group with current configuration.
+`uninstall` removes those groups only when ownership and content still match.
 Unrelated groups and top-level fields are preserved.
 
 A newly selected Python runtime or Git executable differs from the
@@ -86,13 +86,23 @@ invalid required field fails closed without mutation. Unknown additional
 fields are preserved verbatim across operations so a newer AIQ can extend the
 manifest without invalidating it for v1 readers.
 
-`managed_group` is validated structurally — a hook group object whose `hooks`
-list contains exactly one AIQ-marked command and whose canonical digest
-matches `managed_group_sha256` — not by equality with the hook template of
-the running AIQ version. A manifest written by an older AIQ therefore remains
-valid after hook-template changes; the difference between the owned group and
-the currently desired definition surfaces as drift at plan or check time and
-is resolved by explicit repair.
+`managed_group` is validated structurally — each owned group is an object
+whose `hooks` list contains exactly one AIQ-marked command, mapping keys are
+limited to the adapter's managed events, and the canonical digest of the
+stored value matches `managed_group_sha256` — not by equality with the hook
+template of the running AIQ version. A manifest written by an older AIQ
+therefore remains valid after hook-template changes; the difference between
+the owned groups and the currently desired definition surfaces as drift at
+plan or check time and is resolved by explicit repair.
+
+Both manifest shapes load under one `integration_id`: the bare single-group
+shape written before multi-event support owns only the `UserPromptSubmit`
+event, and the mapping shape owns one group per managed event. For an
+installation recorded by a single-event manifest, the absent `Stop` group is
+ordinary drift — `plan` and `check` report `drifted`, and `install --repair`
+appends the missing `Stop` group, records any newly created `Stop` container,
+and rewrites the manifest in the mapping shape. This is the supported upgrade
+path from pre-gate installs; no manifest migration step exists or is needed.
 
 If an AIQ-marked hook group exists in the target but no manifest records it
 as installed (for example after an install interrupted between writing the

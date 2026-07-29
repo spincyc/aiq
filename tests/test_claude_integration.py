@@ -9,10 +9,13 @@ import subprocess
 import tempfile
 import unittest
 
+from unittest.mock import patch
+
 from aiq.integrations.claude import (
     ClaudeIntegrationError,
     INTEGRATION_ID,
     check_integration,
+    gate_hook,
     install_integration,
     plan_integration,
     print_integration,
@@ -20,7 +23,7 @@ from aiq.integrations.claude import (
     receive_hook_main,
     uninstall_integration,
 )
-from aiq.journal import check_journal, resolve_scope
+from aiq.journal import JournalError, check_journal, resolve_scope
 
 
 class ClaudeIntegrationTest(unittest.TestCase):
@@ -62,6 +65,13 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertEqual(handler["type"], "command")
             self.assertIn("integration receive claude", handler["command"])
             self.assertIn(f"--integration-id {INTEGRATION_ID}", handler["command"])
+            stop_groups = document["hooks"]["Stop"]
+            self.assertEqual(len(stop_groups), 1)
+            self.assertNotIn("matcher", stop_groups[0])
+            self.assertEqual(
+                stop_groups[0]["hooks"][0]["command"],
+                handler["command"],
+            )
 
     def test_relative_claude_config_dir_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -111,8 +121,12 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertEqual(
                 document["permissions"], {"allow": ["Bash(ls:*)"]}
             )
-            self.assertEqual(
-                document["hooks"]["Stop"], existing["hooks"]["Stop"]
+            stop_groups = document["hooks"]["Stop"]
+            self.assertEqual(len(stop_groups), 2)
+            self.assertEqual(stop_groups[0], existing["hooks"]["Stop"][0])
+            self.assertIn(
+                f"--integration-id {INTEGRATION_ID}",
+                stop_groups[1]["hooks"][0]["command"],
             )
             groups = document["hooks"]["UserPromptSubmit"]
             self.assertEqual(len(groups), 2)
@@ -428,6 +442,161 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertEqual(success, 0)
             self.assertEqual(failure, 1)
             self.assertIn("capture failed", errors.getvalue())
+
+    def _initialized_repository(self, root: Path) -> Path:
+        repository = root / "repository"
+        repository.mkdir()
+        subprocess.run(
+            ["git", "-C", str(repository), "init", "-q", "-b", "main"],
+            check=True,
+        )
+        return repository
+
+    def test_stop_gate_blocks_once_then_respects_loop_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._initialized_repository(
+                Path(temporary_directory)
+            )
+            receive_hook(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "session",
+                        "cwd": str(repository),
+                        "prompt": "unapplied work",
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
+            stop_payload = {
+                "hook_event_name": "Stop",
+                "session_id": "session",
+                "cwd": str(repository),
+                "stop_hook_active": False,
+            }
+            blocked_errors = io.StringIO()
+            guarded_errors = io.StringIO()
+
+            blocked = receive_hook_main(
+                input_stream=io.BytesIO(json.dumps(stop_payload).encode()),
+                error_stream=blocked_errors,
+                git_executable=self.git_executable(),
+            )
+            guarded = receive_hook_main(
+                input_stream=io.BytesIO(
+                    json.dumps(
+                        {**stop_payload, "stop_hook_active": True}
+                    ).encode()
+                ),
+                error_stream=guarded_errors,
+                git_executable=self.git_executable(),
+            )
+
+            self.assertEqual(blocked, 2)
+            lines = blocked_errors.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("AIQ: runnable work remains:", lines[0])
+            self.assertIn("1 unapplied message", lines[0])
+            self.assertIn("run aiq status", lines[0])
+            self.assertEqual(guarded, 0)
+            self.assertEqual(guarded_errors.getvalue(), "")
+
+    def test_stop_gate_allows_silently_without_runnable_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._initialized_repository(
+                Path(temporary_directory)
+            )
+            errors = io.StringIO()
+
+            # No journal exists for the scope: nothing is runnable and
+            # the gate creates no storage.
+            status = receive_hook_main(
+                input_stream=io.BytesIO(
+                    json.dumps(
+                        {
+                            "hook_event_name": "Stop",
+                            "session_id": "session",
+                            "cwd": str(repository),
+                        }
+                    ).encode()
+                ),
+                error_stream=errors,
+                git_executable=self.git_executable(),
+            )
+            scope = resolve_scope("repo", cwd=repository)
+
+            self.assertEqual(status, 0)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertFalse(scope.journal_path.exists())
+
+    def test_stop_gate_fails_open_on_gate_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._initialized_repository(
+                Path(temporary_directory)
+            )
+            receive_hook(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "session",
+                        "cwd": str(repository),
+                        "prompt": "unapplied work",
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
+            stop_payload = {
+                "hook_event_name": "Stop",
+                "session_id": "session",
+                "cwd": str(repository),
+            }
+
+            # An invalid payload never blocks stopping.
+            bad_payload_errors = io.StringIO()
+            bad_payload = receive_hook_main(
+                input_stream=io.BytesIO(
+                    json.dumps(
+                        {**stop_payload, "cwd": "relative/path"}
+                    ).encode()
+                ),
+                error_stream=bad_payload_errors,
+                git_executable=self.git_executable(),
+            )
+
+            # A locked journal never blocks stopping.
+            locked_errors = io.StringIO()
+            with patch(
+                "aiq.queue.read_status",
+                side_effect=JournalError("the journal is locked"),
+            ):
+                locked = receive_hook_main(
+                    input_stream=io.BytesIO(
+                        json.dumps(stop_payload).encode()
+                    ),
+                    error_stream=locked_errors,
+                    git_executable=self.git_executable(),
+                )
+
+            # An unreadable journal never blocks stopping.
+            scope = resolve_scope("repo", cwd=repository)
+            scope.journal_path.write_bytes(b"not a sqlite database")
+            unreadable_errors = io.StringIO()
+            unreadable = receive_hook_main(
+                input_stream=io.BytesIO(json.dumps(stop_payload).encode()),
+                error_stream=unreadable_errors,
+                git_executable=self.git_executable(),
+            )
+
+            for status, errors in (
+                (bad_payload, bad_payload_errors),
+                (locked, locked_errors),
+                (unreadable, unreadable_errors),
+            ):
+                self.assertEqual(status, 0)
+                lines = errors.getvalue().splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertIn("AIQ completion gate skipped:", lines[0])
+            self.assertIn("locked", locked_errors.getvalue())
 
 
 if __name__ == "__main__":
