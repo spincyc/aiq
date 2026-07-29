@@ -22,6 +22,7 @@ EXPECTED_CHECKS = (
     "journal.deep",
     "integration.claude",
     "integration.codex",
+    "report",
 )
 
 
@@ -78,11 +79,15 @@ class DoctorCliTests(unittest.TestCase):
     def run_aiq(
         self,
         *arguments: str,
+        extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        environment = self.environment()
+        if extra_environment:
+            environment.update(extra_environment)
         return subprocess.run(
             [sys.executable, "-m", "aiq", *arguments],
             cwd=self.repository,
-            env=self.environment(),
+            env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -122,6 +127,65 @@ class DoctorCliTests(unittest.TestCase):
         self.assertEqual(checks["journal.deep"]["status"], "skipped")
         self.assertIn("journal check", checks["journal.deep"]["detail"])
         self.assertEqual(checks["integration.codex"]["status"], "skipped")
+        self.assertEqual(checks["report"]["status"], "skipped")
+        self.assertEqual(
+            checks["report"]["detail"],
+            "dev_report_repo not configured",
+        )
+
+    def test_doctor_report_check_warns_on_unusable_target(self) -> None:
+        missing = self.root / "absent"
+        completed = self.run_aiq(
+            "doctor", "--scope", "repo", "--json",
+            extra_environment={"AIQ_DEV_REPORT_REPO": str(missing)},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        payload, checks = self.doctor_payload(completed)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(checks["report"]["status"], "warn")
+        self.assertIn("does not exist", checks["report"]["detail"])
+        self.assertIn(str(missing), checks["report"]["detail"])
+
+        uninitialized = self.root / "uninitialized"
+        uninitialized.mkdir()
+        subprocess.run(
+            ["git", "init", "--quiet", str(uninitialized)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        completed = self.run_aiq(
+            "doctor", "--scope", "repo", "--json",
+            extra_environment={"AIQ_DEV_REPORT_REPO": str(uninitialized)},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        payload, checks = self.doctor_payload(completed)
+        self.assertEqual(checks["report"]["status"], "warn")
+        self.assertEqual(
+            checks["report"]["detail"],
+            "target journal not initialized: "
+            f"run aiq journal init in {uninitialized}",
+        )
+        self.assertFalse(
+            (uninitialized / ".git" / "aiq" / "journal.sqlite3").exists()
+        )
+
+    def test_doctor_report_check_ok_for_initialized_target(self) -> None:
+        initialized = self.run_aiq(
+            "journal", "init", "--scope", "repo", "--json"
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+
+        completed = self.run_aiq(
+            "doctor", "--scope", "repo", "--json",
+            extra_environment={"AIQ_DEV_REPORT_REPO": str(self.repository)},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload, checks = self.doctor_payload(completed)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(checks["report"]["status"], "ok")
+        self.assertIn(str(self.repository), checks["report"]["detail"])
 
     def test_doctor_skips_missing_journal_without_creating_it(self) -> None:
         journal_path = self.state_home / "aiq" / "journal.sqlite3"

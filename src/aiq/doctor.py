@@ -186,6 +186,44 @@ def _integration_check(
     return _check(name, "warn", detail)
 
 
+def _report_check(config: Config | None) -> dict[str, str]:
+    """Read-only health check for the ``aiq report`` target.
+
+    Never creates directories or journals; reports ``skipped`` when no
+    dev report target is configured, ``warn`` when the configured target
+    cannot accept reports, and ``ok`` when a report would reach an
+    initialized repo journal.
+    """
+
+    configured = config.dev_report_repo if config is not None else None
+    if configured is None:
+        return _check("report", "skipped", "dev_report_repo not configured")
+    target = Path(configured)
+    if not target.is_absolute():
+        return _check(
+            "report",
+            "warn",
+            f"dev report target is not an absolute path: {target}",
+        )
+    if not target.is_dir():
+        return _check(
+            "report",
+            "warn",
+            f"dev report target does not exist: {target}",
+        )
+    try:
+        scope = resolve_scope("repo", cwd=target)
+    except JournalError as error:
+        return _check("report", "warn", str(error))
+    if not scope.journal_path.is_file():
+        return _check(
+            "report",
+            "warn",
+            f"target journal not initialized: run aiq journal init in {target}",
+        )
+    return _check("report", "ok", f"target {target}")
+
+
 def run_doctor(
     *,
     requested_scope: str | None,
@@ -196,7 +234,12 @@ def run_doctor(
     python_executable: str | Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> DoctorReport:
-    """Run every cheap read-only diagnostic and never mutate local state."""
+    """Run every cheap read-only diagnostic and never mutate local state.
+
+    Stable check order: python, sqlite, config, git, scope, journal,
+    journal.deep, one ``integration.<id>`` row per known integration
+    (sorted by id), then report.
+    """
 
     checks: list[dict[str, str]] = [_python_check(), _sqlite_check()]
 
@@ -263,6 +306,7 @@ def run_doctor(
                 environment=environment,
             )
         )
+    checks.append(_report_check(config))
 
     failed = any(check["status"] == "fail" for check in checks)
     return DoctorReport(

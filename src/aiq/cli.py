@@ -846,7 +846,7 @@ def _report_target(arguments: argparse.Namespace) -> Path:
     configured = arguments.effective_config.dev_report_repo
     if configured is None:
         raise ConfigError(
-            "dev_report_repo is not configured; set it in user "
+            "no dev report target: set dev_report_repo in the user "
             "configuration or AIQ_DEV_REPORT_REPO, or pass --to PATH"
         )
     return Path(configured)

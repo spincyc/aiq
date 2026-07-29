@@ -179,7 +179,11 @@ class ReportCliTest(unittest.TestCase):
         )
 
     def test_unset_dev_report_repo_is_invalid_config(self) -> None:
-        self.assert_error(self.report(to=False), 2, "invalid_config")
+        result = self.report(to=False)
+        self.assert_error(result, 2, "invalid_config")
+        message = json.loads(result[2])["error"]
+        for remedy in ("dev_report_repo", "AIQ_DEV_REPORT_REPO", "--to PATH"):
+            self.assertIn(remedy, message)
         self.assertEqual(self.target_tasks(), [])
 
     def test_environment_variable_selects_target(self) -> None:
