@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aiq — a deterministic, local-first work ledger</title>
+<meta name="description" content="aiq records requests, derives versioned tasks, and leases ready work — locally, deterministically, without a server.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%231c6b47'/><text x='8' y='12' font-family='monospace' font-size='10' fill='white' text-anchor='middle'>aq</text></svg>">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="wordmark" href="./">aiq<span class="cursor">▮</span></a>
+    <nav class="site">
+      <a href="blog/">Blog</a>
+      <a href="https://github.com/spincyc/aiq">GitHub</a>
+      <a href="https://github.com/spincyc/aiq/tree/main/docs">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<div class="ruled">
+  <div class="wrap hero">
+    <span class="alpha">Alpha</span>
+    <h1>message <span class="op">→</span> claim <span class="op">→</span> effects <span class="op">→</span> tasks <span class="op">→</span> queue <span class="op">→</span> lease</h1>
+    <p class="lede">A deterministic, local-first work ledger for humans, tools,
+    and agents. It records requests, derives versioned tasks, and leases ready
+    work — without a remote service.</p>
+    <div class="cta">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn ghost" href="blog/from-committed-journal-to-aiq.html">Read the origin story</a>
+    </div>
+  </div>
+</div>
+
+<main>
+  <section class="wrap">
+    <h2>What it does — and refuses to do</h2>
+    <div class="tablewrap">
+      <table>
+        <tr><th>aiq does</th><th>aiq does not</th></tr>
+        <tr><td>Keep an append-only local journal</td><td>Call models or execute task work</td></tr>
+        <tr><td>Turn messages into atomic task changes</td><td>Sync state between machines</td></tr>
+        <tr><td>Derive readiness from dependencies</td><td>Require a server or account</td></tr>
+        <tr><td>Fence concurrent work with leases</td><td>Put runtime state in Git</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section class="wrap" id="install">
+    <h2>Install</h2>
+    <p>Python 3.11–3.14 on Linux or macOS; runtime dependencies come from the
+    standard library alone.</p>
+<pre><code>pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'
+aiq --version</code></pre>
+    <p>aiq never updates itself. Refresh explicitly with
+    <code>pipx install --force</code>, then run <code>aiq reconcile --user</code>
+    to confirm hooks and journal state still match the installation.</p>
+  </section>
+
+  <section class="wrap">
+    <h2>Sixty seconds of ledger</h2>
+    <p>Inside any Git repository:</p>
+<pre><code>aiq ingest --message "Create the first reusable task"
+aiq inbox list            # exact content stays private until claimed
+aiq queue peek            # read-only preview of ready work
+aiq queue next --owner me # lease the highest-priority ready task
+aiq status                # bounded snapshot: messages, tasks, claims
+aiq journal check         # verify storage and semantic history</code></pre>
+    <p>Discovery is part of the contract: <code>aiq capability list</code> names
+    every operation in one compact table, and
+    <code>aiq capability show &lt;id&gt;</code> loads a single versioned
+    contract — an agent never carries the full manual in context.</p>
+  </section>
+
+  <section class="wrap">
+    <h2>Blog</h2>
+    <div class="post-card">
+      <span class="date">2026-07-29</span>
+      <h3><a href="blog/from-committed-journal-to-aiq.html">From a committed .journal to aiq</a></h3>
+      <p>Before aiq was a tool, it was a 367-line protocol document asking
+      language models to be perfect clerks. What a Markdown ledger taught us,
+      and why the second system is a SQLite file with a contract.</p>
+    </div>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span>Apache-2.0 · no server, no telemetry, no sync</span>
+    <a href="https://github.com/spincyc/aiq">github.com/spincyc/aiq</a>
+  </div>
+</footer>
+
+</body>
+</html>

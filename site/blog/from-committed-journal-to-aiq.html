@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>From a committed .journal to aiq</title>
+<meta name="description" content="What a Markdown agent-ledger inside a curriculum project taught us, and why the second system is a SQLite file with a contract.">
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%231c6b47'/><text x='8' y='12' font-family='monospace' font-size='10' fill='white' text-anchor='middle'>aq</text></svg>">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="wordmark" href="../">aiq<span class="cursor">▮</span></a>
+    <nav class="site">
+      <a href="./">Blog</a>
+      <a href="https://github.com/spincyc/aiq">GitHub</a>
+      <a href="https://github.com/spincyc/aiq/tree/main/docs">Docs</a>
+    </nav>
+  </div>
+</header>
+
+<article class="post">
+  <div class="wrap">
+    <span class="date">2026-07-29 · origin story</span>
+    <h1>From a committed .journal to aiq</h1>
+    <p class="standfirst">Before aiq was a tool, it was a protocol document —
+    367 lines of prose asking language models to be perfect clerks. This is
+    what a Markdown ledger inside an Arduino curriculum project taught us, and
+    why the second system is a SQLite file with a contract.</p>
+
+    <div class="content">
+
+    <h2>Chat is a cache</h2>
+    <p>AI coding agents forget. Every session starts cold; every compaction
+    throws away the middle of the story; every parallel sub-agent knows only
+    what its prompt carried in. If you use agents for sustained work on a real
+    project, the question is not whether to give them durable memory but where
+    that memory lives and who gets to write it.</p>
+    <p>Our first serious answer grew inside an unlikely host: a private
+    Arduino curriculum project with dozens of hardware lessons, strict
+    verification gates, and more concurrent agent work than any one context
+    window could hold. The project needed agents that could stop mid-task,
+    hand off, recover, and not drop a single obligation across weeks of
+    sessions. So it got a committed <code>.journal/</code> directory — every
+    agent's operational memory, tracked in Git alongside the code.</p>
+
+    <h2>The first system: a ledger made of prose</h2>
+    <p>The <code>.journal/</code> protocol was earnest and thorough. Every
+    user message became an immutable event, classified into one of six kinds.
+    Every task got a UUID-named subtree with its own state file, event log,
+    and decision log. A lock directory with an <code>owner.json</code> —
+    lock UUID, agent UUID, PID, hostname, boot ID — coordinated writers.
+    Leases were committed files. Defect reports about the journal itself went
+    through a feedback subsystem with immutable reports, scheduled reviews,
+    and superseding dispositions. Before an agent was allowed to stop, a
+    <code>yield-check</code> guard re-read every ledger and demanded a
+    reconciliation of live agents, capacity, and unassigned lanes.</p>
+    <p>It worked. Multi-agent sessions shipped review after review; the work
+    queue held; recovery from a cold start was a documented loop rather than
+    an improvisation. And the whole time, the protocol was teaching us —
+    mostly by what it cost.</p>
+
+    <h2>What the prose ledger taught us</h2>
+    <p><strong>State in the worktree pollutes the work.</strong> A committed
+    journal rides in every diff, merge, and branch. Agent bookkeeping and
+    user code fought over the same commits, and "never capture, stash, or
+    rewrite pre-existing user changes" had to be legislated because the
+    layout made it possible to violate.</p>
+    <p><strong>A prose protocol grows without bound.</strong> Every edge case
+    became another paragraph an agent must re-read at every boundary. The
+    protocol document reached 367 dense lines — a real context tax per
+    session, paid before any useful work began — and it was still
+    incomplete, because prose always is.</p>
+    <p><strong>Discipline you cannot check is discipline you do not
+    have.</strong> The yield guard required agents to supply their own
+    capacity counts, and the document admitted the flaw out loud:</p>
+    <blockquote>These capacity arguments are a procedural attestation, not
+    machine-derived proof… The consistency checks catch omissions and
+    impossible totals but do not authenticate self-reported values.</blockquote>
+    <p>A probabilistic reader following a prose contract will eventually
+    misfile an event, skip a re-read, or hold a lock through an operation the
+    protocol forbade. None of that is malice; it is what happens when the
+    ledger's invariants live in the reader instead of the medium.</p>
+    <p><strong>Liveness heuristics are quicksand.</strong> "PID alone does
+    not prove liveness. Check environment, process-start identity, runtime
+    ownership, and Git/journal progress." Every word of that is correct, and
+    every word is a symptom: the storage had no transactions, so the protocol
+    had to reinvent them socially.</p>
+
+    <h2>The second system inverts the decisions</h2>
+    <p>aiq is the same set of motives — never spend a scarce resource twice;
+    codified answers repeat, re-derived ones drift — rebuilt with the
+    opposite design choices at every point the first system hurt.</p>
+    <div class="tablewrap">
+      <table class="compare">
+        <tr><th>The .journal protocol</th><th>aiq</th></tr>
+        <tr><td>Committed Markdown tree in the worktree</td>
+            <td>Private SQLite journal beside Git's metadata (<code>.git/aiq/</code>), never committed</td></tr>
+        <tr><td>367 lines of prose re-read at every boundary</td>
+            <td>Versioned capability contracts, loaded one at a time on demand</td></tr>
+        <tr><td>Messages classified into six kinds at capture</td>
+            <td>Exact capture first; interpretation deferred until a worker claims the message once</td></tr>
+        <tr><td>Lock directory plus PID-liveness heuristics</td>
+            <td>Time-bounded leases with owner and fence; an expired claim authorizes nothing</td></tr>
+        <tr><td>Rebuildable <code>queue.md</code>, "never authoritative"</td>
+            <td>Readiness derived from the dependency graph; there is nothing to rebuild</td></tr>
+        <tr><td>Task edits as prose state files</td>
+            <td>One atomic effects document per message, with expected revisions — stale writes fail whole</td></tr>
+        <tr><td>Yield-check fed by self-attested counts</td>
+            <td>A Stop-gate hook that counts ready tasks, live claims, and unapplied messages mechanically</td></tr>
+        <tr><td>An in-repo <code>journal.py</code> helper</td>
+            <td>An installed, installer-neutral CLI with stdlib-only runtime</td></tr>
+      </table>
+    </div>
+    <p>The through-line: move every invariant out of the reader and into the
+    medium. An agent cannot misfile an event it never classifies, cannot
+    corrupt a queue that is derived rather than maintained, and cannot
+    complete stale work when the storage refuses the write.</p>
+
+    <h2>What the ledger looks like now</h2>
+    <p class="pipeline">message → claim → atomic effects → versioned tasks → ready queue → lease</p>
+    <p>A message is captured exactly and hidden from casual listing; reading
+    content is a deliberate act tied to a claim. Applying a message produces
+    one all-or-nothing effects document; identical retries replay the stored
+    result, conflicting retries fail. Tasks are projections of immutable
+    revisions; dependencies drive readiness; leases fence concurrent workers
+    and expire on their own.</p>
+    <p>The recent work has been about closing the loop with the agents
+    themselves:</p>
+    <ul>
+      <li><strong>Hook integrations</strong> for Claude Code and Codex
+      capture every user prompt into the journal before work begins, and gate
+      session stop on runnable work — the yield-check idea, reborn as
+      something the machine verifies. The installers are reversible,
+      ownership-recorded, and drift-checked; hooks run Python with
+      <code>-I</code> so no environment variable can redirect them.</li>
+      <li><strong>Health as a contract:</strong> <code>aiq doctor</code>
+      summarizes configuration, journal, scope, and integration state
+      read-only, and names the remedy next to each finding;
+      <code>aiq reconcile --user</code> re-verifies everything after an
+      upgrade.</li>
+      <li><strong>Self-reporting:</strong> <code>aiq report</code> files a
+      defect from any repository as a deduplicated bug-fix task in aiq's own
+      development queue — the tool's issues are tracked by the tool.</li>
+      <li><strong>Introspection without content:</strong>
+      <code>aiq status</code>, <code>task explain</code>,
+      <code>task history</code>, and <code>claim list</code> answer the
+      questions agents actually ask at scheduling boundaries, in bounded
+      deterministic output.</li>
+    </ul>
+    <p>One detail we are fond of: this post was itself queued, leased, and
+    completed through the ledger it describes, with the Stop gate refusing to
+    let the session end while the work was still open.</p>
+
+    <h2>What aiq refuses to do</h2>
+    <p>No server, no account, no telemetry, no cross-machine sync, no model
+    calls, no execution of the work it tracks. Those are not roadmap gaps;
+    they are the boundary that keeps a work ledger trustworthy. State lives
+    on your machine, beside your repository, in a format you can snapshot,
+    export, and verify.</p>
+    <p>aiq is alpha. The human-facing surfaces may still move; the machine
+    contracts — CLI JSON envelopes, effects documents, capability
+    descriptors, integration manifests — carry their own explicit versions
+    precisely so agents can depend on them while everything else improves.</p>
+
+    <h2>Try it</h2>
+<pre><code>pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'
+aiq journal init --scope repo
+aiq ingest --message "Queue this work"</code></pre>
+    <p>The <a href="https://github.com/spincyc/aiq">repository</a> has the
+    full documentation: concepts, configuration, privacy, recovery, and the
+    integration contracts.</p>
+
+    </div>
+  </div>
+</article>
+
+<footer class="site">
+  <div class="wrap">
+    <span>Apache-2.0 · no server, no telemetry, no sync</span>
+    <a href="https://github.com/spincyc/aiq">github.com/spincyc/aiq</a>
+  </div>
+</footer>
+
+</body>
+</html>
