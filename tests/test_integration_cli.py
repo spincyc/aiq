@@ -175,6 +175,38 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertFalse(self.codex_home.exists())
         self.assertFalse((self.state_home / "aiq").exists())
 
+    def test_missing_user_selector_names_the_corrected_invocation(
+        self,
+    ) -> None:
+        for integration_id in ("claude", "codex"):
+            for operation in ("plan", "install", "check", "uninstall"):
+                result = self.run_aiq(
+                    "integration", operation, integration_id, "--json"
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                payload = json.loads(result.stderr)
+                self.assertEqual(payload["code"], "invalid_argument")
+                self.assertEqual(
+                    payload["error"],
+                    f"the {integration_id} integration requires --user: "
+                    f"run aiq integration {operation} {integration_id} "
+                    "--user",
+                )
+
+        with_target = self.run_aiq(
+            "integration", "check", "codex",
+            "--target", str(self.root / "guidance.md"), "--json",
+        )
+        self.assertEqual(with_target.returncode, 2, with_target.stderr)
+        payload = json.loads(with_target.stderr)
+        self.assertEqual(payload["code"], "invalid_argument")
+        self.assertEqual(
+            payload["error"],
+            "the codex integration uses --user, not --target: "
+            "run aiq integration check codex --user",
+        )
+
     def test_codex_lifecycle_preserves_unrelated_hooks_and_is_idempotent(
         self,
     ) -> None:

@@ -126,7 +126,14 @@ class DoctorCliTests(unittest.TestCase):
             self.assertEqual(checks[name]["status"], "ok", checks[name])
         self.assertEqual(checks["journal.deep"]["status"], "skipped")
         self.assertIn("journal check", checks["journal.deep"]["detail"])
-        self.assertEqual(checks["integration.codex"]["status"], "skipped")
+        for integration_id in ("claude", "codex"):
+            check = checks[f"integration.{integration_id}"]
+            self.assertEqual(check["status"], "skipped")
+            self.assertEqual(
+                check["detail"],
+                "not installed: run aiq integration install "
+                f"{integration_id} --user",
+            )
         self.assertEqual(checks["report"]["status"], "skipped")
         self.assertEqual(
             checks["report"]["detail"],

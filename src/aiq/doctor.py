@@ -166,9 +166,14 @@ def _integration_check(
     python_executable: str | Path | None,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
+    integration_id = name.partition(".")[2]
+    absent = (
+        "not installed: run aiq integration install "
+        f"{integration_id} --user"
+    )
     try:
         if not module.integration_present(environment=environment):
-            return _check(name, "skipped", "not installed")
+            return _check(name, "skipped", absent)
         result = module.check_integration(
             invoked_launcher=invoked_launcher,
             python_executable=python_executable,
@@ -179,7 +184,7 @@ def _integration_check(
     if result.get("ok"):
         return _check(name, "ok", f"installed at {result['target']}")
     if result.get("status") == "absent":
-        return _check(name, "skipped", "not installed")
+        return _check(name, "skipped", absent)
     detail = f"status={result.get('status')}"
     if result.get("blocked_reason"):
         detail = f"{detail}: {result['blocked_reason']}"

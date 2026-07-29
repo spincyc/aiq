@@ -1095,16 +1095,21 @@ def _guidance_target(arguments: argparse.Namespace) -> Path:
     return arguments.target
 
 
-def _require_user_selector(arguments: argparse.Namespace) -> None:
+def _require_user_selector(
+    arguments: argparse.Namespace,
+    operation: str,
+) -> None:
     integration_id = arguments.integration_id
     error_class = HOOK_INTEGRATIONS[integration_id].module.SPEC.error_class
+    corrected = f"run aiq integration {operation} {integration_id} --user"
     if getattr(arguments, "target", None) is not None:
         raise error_class(
-            f"the {integration_id} integration uses --user, not --target"
+            f"the {integration_id} integration uses --user, not --target: "
+            f"{corrected}"
         )
     if not arguments.user:
         raise error_class(
-            f"the {integration_id} integration requires --user"
+            f"the {integration_id} integration requires --user: {corrected}"
         )
 
 
@@ -1112,7 +1117,7 @@ def _hook_lifecycle_kwargs(
     arguments: argparse.Namespace,
     operation: str,
 ) -> dict[str, Any]:
-    _require_user_selector(arguments)
+    _require_user_selector(arguments, operation)
     if operation == "uninstall":
         return {}
     return {
