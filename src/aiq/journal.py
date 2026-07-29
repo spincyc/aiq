@@ -1124,7 +1124,7 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
             ).fetchone()[0]
             if object_count == 0:
                 _enable_wal(connection)
-                connection.execute("BEGIN IMMEDIATE")
+                _begin_immediate(connection)
                 try:
                     _execute_script_statements(connection, SCHEMA_SQL)
                     _create_v2_schema(connection)
@@ -1190,7 +1190,7 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                 )
                 _enable_wal(connection)
                 if version == 1:
-                    connection.execute("BEGIN IMMEDIATE")
+                    _begin_immediate(connection)
                     try:
                         current_version = _metadata(connection).get("schema_version")
                         if current_version != "1":
@@ -1254,7 +1254,7 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                             != expected_scope["scope_id"]
                         )
                     ):
-                        connection.execute("BEGIN IMMEDIATE")
+                        _begin_immediate(connection)
                         try:
                             _validate_metadata(
                                 connection,
@@ -1350,6 +1350,13 @@ def _connect(scope: JournalScope) -> sqlite3.Connection:
         raise
 
 
+def _begin_immediate(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as error:
+        raise JournalError(f"journal write contention: {error}") from error
+
+
 def ingest_message(
     scope: JournalScope,
     content: str,
@@ -1398,7 +1405,7 @@ def ingest_message(
 
     connection = _connect(scope)
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         if effective_key:
             existing = connection.execute(
                 """
@@ -1431,6 +1438,8 @@ def ingest_message(
                   ON e.message_id = m.message_id
                  AND e.event_type = 'message.received'
                 WHERE m.idempotency_key = ?
+                ORDER BY e.sequence ASC
+                LIMIT 1
                 """,
                 (effective_key,),
             ).fetchone()
@@ -1514,6 +1523,12 @@ def ingest_message(
             created=True,
             scope=scope,
         )
+    except sqlite3.IntegrityError as error:
+        connection.rollback()
+        raise JournalError(f"journal integrity violation: {error}") from error
+    except sqlite3.OperationalError as error:
+        connection.rollback()
+        raise JournalError(f"journal write contention: {error}") from error
     except Exception:
         connection.rollback()
         raise
@@ -1661,7 +1676,7 @@ def create_snapshot(
         )
         removed: list[str] = []
         for expired_snapshot in snapshots[keep:]:
-            expired_snapshot.unlink()
+            expired_snapshot.unlink(missing_ok=True)
             removed.append(str(expired_snapshot))
 
     return {

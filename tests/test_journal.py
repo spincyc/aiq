@@ -331,6 +331,85 @@ class JournalTest(unittest.TestCase):
                     cwd=str(root),
                 )
 
+    def test_replay_returns_original_event_despite_recovery_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scope = self.agent_scope(root)
+            first = ingest_message(
+                scope,
+                "replay me",
+                session_id="session",
+                turn_id="turn",
+                cwd=str(root),
+            )
+
+            connection = sqlite3.connect(scope.journal_path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO events(
+                      event_id,
+                      occurred_at,
+                      event_type,
+                      message_id,
+                      payload_json
+                    ) VALUES (
+                      'evt_recovery',
+                      '2026-07-29T00:00:00+00:00',
+                      'message.received',
+                      ?,
+                      '{"recovered_claim_id": "clm_expired"}'
+                    )
+                    """,
+                    (first.message_id,),
+                )
+                connection.commit()
+                received_count = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM events
+                    WHERE message_id = ? AND event_type = 'message.received'
+                    """,
+                    (first.message_id,),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(received_count, 2)
+
+            replayed = ingest_message(
+                scope,
+                "replay me",
+                session_id="session",
+                turn_id="turn",
+                cwd=str(root),
+            )
+
+            self.assertFalse(replayed.created)
+            self.assertEqual(replayed.event_id, first.event_id)
+            self.assertEqual(replayed.sequence, first.sequence)
+
+    def test_write_contention_raises_journal_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scope = self.agent_scope(root)
+            ingest_message(scope, "initialize", cwd=str(root))
+
+            original_connect = journal_module._connect
+
+            def impatient_connect(target_scope):
+                connection = original_connect(target_scope)
+                connection.execute("PRAGMA busy_timeout = 50")
+                return connection
+
+            blocker = sqlite3.connect(scope.journal_path)
+            try:
+                blocker.execute("BEGIN IMMEDIATE")
+                with patch.object(journal_module, "_connect", impatient_connect):
+                    with self.assertRaisesRegex(JournalError, "locked|busy"):
+                        ingest_message(scope, "contended", cwd=str(root))
+            finally:
+                blocker.close()
+
     def test_inbox_hides_content_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -446,6 +525,29 @@ class JournalTest(unittest.TestCase):
             self.assertEqual(len(snapshots), 2)
             self.assertEqual(result["retained"], 2)
             self.assertEqual(len(result["removed"]), 1)
+
+    def test_snapshot_prune_tolerates_concurrent_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scope = self.agent_scope(root)
+            ingest_message(scope, "snapshot race", cwd=str(root))
+            create_snapshot(scope, keep=1)
+            create_snapshot(scope, keep=1)
+
+            original_glob = Path.glob
+
+            def glob_with_concurrent_prune(path, pattern):
+                results = sorted(original_glob(path, pattern), reverse=True)
+                if pattern == "journal-*.sqlite3":
+                    for candidate in results[1:]:
+                        candidate.unlink()
+                return iter(results)
+
+            with patch.object(Path, "glob", glob_with_concurrent_prune):
+                result = create_snapshot(scope, keep=1)
+
+            self.assertEqual(len(result["removed"]), 1)
+            self.assertEqual(result["retained"], 1)
 
     def test_schema_v1_migrates_with_message_and_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
