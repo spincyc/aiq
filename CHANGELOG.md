@@ -24,5 +24,35 @@ effects documents, capability contracts, and integration manifests.
 - Shared reversible hook-integration engine parameterizing the Claude Code and
   Codex adapters.
 - Fail-closed automatic scope selection when Git is unavailable or fails.
+- Read-only `aiq status` dashboard reporting bounded message, task, and claim
+  counts plus the next five ready tasks.
+- Read-only `aiq task explain`, `aiq task history`, and `aiq claim list`
+  introspection with bounded deterministic output and no message content.
+- Read-only `aiq doctor` summarizing configuration, dependency, journal,
+  scope, and integration health; deep integrity stays explicit via
+  `aiq journal check`.
+- Installer-neutral `aiq reconcile --user` reporting and, with `--apply`,
+  repairing AIQ-owned integration drift and validating the selected journal
+  after an external upgrade.
+- Guidance integration lifecycle managing one reversible AIQ-owned marked
+  block of the packaged bootstrap in an explicitly selected file.
+- A `make ci` CI-parity target; gitleaks pinned by checksum in CI;
+  `tools/verify` runs sanity-check directly; SQLite sidecar suffixes denied by
+  the public audit.
+
+### Fixed
+
+- Hook-integration manifests survive hook-template changes, integration-id
+  markers match as exact command tokens, and explicit repair adopts a hook
+  left unmanaged by an interrupted install.
+- Deterministic idempotent-replay event selection after claim recovery;
+  SQLite contention and integrity failures translate to `JournalError`; a
+  snapshot-prune race no longer raises.
+- Unknown effects aliases raise `JournalError` instead of `KeyError`; task
+  read paths use one WAL snapshot; `document.v` requires exact integer `1`;
+  `apply_effects` enforces the canonical byte cap on pre-parsed documents.
+- Machine-readable `JournalError` codes classify export-path and
+  effects-alias errors as exit 2; the JSON envelope version invariant is
+  pinned; capability and integration commands honor `AIQ_OUTPUT=json`.
 
 [Unreleased]: https://github.com/spincyc/aiq/commits/main
