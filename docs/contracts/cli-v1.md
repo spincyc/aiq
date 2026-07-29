@@ -112,7 +112,7 @@ The tables list fields in addition to top-level `v`.
 | `integration list --json` | sorted `integrations`, each with `id`, `version`, and `purpose` |
 | `integration print agents --json` | `artifact: "agents"`, `content` |
 | `integration print codex --json` | `integration: "codex"`, `fragment` |
-| Codex lifecycle command with `--json` | integration status, action, target, changes, and operation-specific fields |
+| Codex or guidance lifecycle command with `--json` | integration status, action, target, changes, and operation-specific fields |
 
 `inbox claim` returns exact message content only in its separate `message`
 object. `queue next` does not duplicate a claim inside the task. Event IDs and
@@ -229,6 +229,26 @@ aiq integration check codex --user [--launcher PATH]
 aiq integration uninstall codex --user
 ```
 
+The guidance lifecycle manages one AIQ-owned marked block containing the
+packaged `AGENTS.md` bootstrap inside an explicitly selected file:
+
+```text
+aiq integration plan guidance --target PATH [--repair]
+aiq integration install guidance --target PATH [--repair]
+                                 [--plan-token TOKEN]
+aiq integration check guidance --target PATH
+aiq integration uninstall guidance --target PATH
+```
+
+`--target` is required and must be absolute; AIQ never infers a Codex home, a
+repository root, or a dotfiles location. Install appends the block between
+`aiq-guidance-v1` marker lines, creates the file only when absent, and
+preserves unrelated bytes exactly. Markers without an AIQ manifest are
+unmanaged and block every operation; an edited owned block is drift and
+requires explicit `--repair`. Uninstall removes only the unchanged owned block
+and deletes the file only when AIQ created it and nothing else remains. See
+[`integrations/guidance.md`](../integrations/guidance.md).
+
 Launcher selection is deterministic:
 
 | Precedence | Candidate |
@@ -265,7 +285,8 @@ The selected path must name an executable regular file and is not resolved
 through symlinks. The hook command embeds the absolute Python and Git paths, so
 capture never searches Codex's `PATH` for AIQ, Python, or Git.
 
-Omitting `--user` is invalid. `plan` and `check` are read-only. Lifecycle
+Omitting `--user` for `codex`, or `--target` for `guidance`, is invalid.
+`plan` and `check` are read-only. Lifecycle
 results identify `integration`, `target`, `status`, and `action`; they add
 `integration_id`, `changes`, digests, plan token, backup, trust, or ownership
 metadata when relevant. `plan_token` lets install reject a stale reviewed

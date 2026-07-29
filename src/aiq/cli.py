@@ -14,6 +14,7 @@ from aiq import __version__
 from aiq.capabilities import list_capabilities, show_capability
 from aiq.config import Config, ConfigError, resolve_config
 from aiq.events import EVENT_JSON_MAX_BYTES, EventError, parse_event_json
+from aiq.integrations import guidance
 from aiq.integrations.codex import (
     INTEGRATION_ID,
     CodexIntegrationError,
@@ -706,6 +707,11 @@ def _integration_list(arguments: argparse.Namespace) -> int:
             "purpose": "Ingest canonical provider-neutral event JSON.",
             "version": 1,
         },
+        {
+            "id": "guidance",
+            "purpose": "Manage one AIQ-owned block in a chosen guidance file.",
+            "version": 1,
+        },
     ]
     if arguments.json:
         _emit({"integrations": integrations}, as_json=True)
@@ -729,7 +735,40 @@ def _invoked_python_executable() -> Path:
     return Path(os.path.abspath(sys.executable))
 
 
+def _guidance_target(arguments: argparse.Namespace) -> Path:
+    if arguments.user:
+        raise guidance.GuidanceIntegrationError(
+            "the guidance integration uses --target, not --user"
+        )
+    for option in ("launcher", "git_executable"):
+        if getattr(arguments, option, None) is not None:
+            raise guidance.GuidanceIntegrationError(
+                "the guidance integration does not accept "
+                f"--{option.replace('_', '-')}"
+            )
+    return arguments.target
+
+
+def _codex_selector(arguments: argparse.Namespace) -> None:
+    if getattr(arguments, "target", None) is not None:
+        raise CodexIntegrationError(
+            "the codex integration uses --user, not --target"
+        )
+    if not arguments.user:
+        raise CodexIntegrationError("the codex integration requires --user")
+
+
 def _integration_plan(arguments: argparse.Namespace) -> int:
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.plan_integration(
+                target=_guidance_target(arguments),
+                repair=arguments.repair,
+            ),
+            as_json=arguments.json,
+        )
+        return 0
+    _codex_selector(arguments)
     _emit(
         plan_integration(
             launcher=arguments.launcher,
@@ -744,6 +783,17 @@ def _integration_plan(arguments: argparse.Namespace) -> int:
 
 
 def _integration_install(arguments: argparse.Namespace) -> int:
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.install_integration(
+                target=_guidance_target(arguments),
+                repair=arguments.repair,
+                plan_token=arguments.plan_token,
+            ),
+            as_json=arguments.json,
+        )
+        return 0
+    _codex_selector(arguments)
     _emit(
         install_integration(
             launcher=arguments.launcher,
@@ -759,6 +809,13 @@ def _integration_install(arguments: argparse.Namespace) -> int:
 
 
 def _integration_check(arguments: argparse.Namespace) -> int:
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.check_integration(target=_guidance_target(arguments)),
+            as_json=arguments.json,
+        )
+        return 0
+    _codex_selector(arguments)
     _emit(
         check_integration(
             launcher=arguments.launcher,
@@ -772,6 +829,15 @@ def _integration_check(arguments: argparse.Namespace) -> int:
 
 
 def _integration_uninstall(arguments: argparse.Namespace) -> int:
+    if arguments.integration_id == "guidance":
+        _emit(
+            guidance.uninstall_integration(
+                target=_guidance_target(arguments),
+            ),
+            as_json=arguments.json,
+        )
+        return 0
+    _codex_selector(arguments)
     _emit(uninstall_integration(), as_json=arguments.json)
     return 0
 
@@ -828,16 +894,21 @@ def _scope_parser(
     return parser
 
 
-def _add_user_selector(
-    parser: argparse.ArgumentParser,
-    *,
-    required: bool = False,
-) -> None:
+def _add_user_selector(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--user",
         action="store_true",
-        required=required,
         help="operate on the supported user-level integration",
+    )
+
+
+def _add_lifecycle_selectors(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("integration_id", choices=("codex", "guidance"))
+    _add_user_selector(parser)
+    parser.add_argument(
+        "--target",
+        type=Path,
+        help="absolute guidance file managed by the guidance integration",
     )
 
 
@@ -973,16 +1044,14 @@ def build_parser() -> argparse.ArgumentParser:
     integration_list.add_argument("--json", action="store_true")
     integration_list.set_defaults(handler=_integration_list)
     integration_plan = integration_commands.add_parser("plan")
-    integration_plan.add_argument("integration_id", choices=("codex",))
-    _add_user_selector(integration_plan, required=True)
+    _add_lifecycle_selectors(integration_plan)
     integration_plan.add_argument("--launcher", type=Path)
     integration_plan.add_argument("--git-executable", type=Path)
     integration_plan.add_argument("--repair", action="store_true")
     integration_plan.add_argument("--json", action="store_true")
     integration_plan.set_defaults(handler=_integration_plan)
     integration_install = integration_commands.add_parser("install")
-    integration_install.add_argument("integration_id", choices=("codex",))
-    _add_user_selector(integration_install, required=True)
+    _add_lifecycle_selectors(integration_install)
     integration_install.add_argument("--launcher", type=Path)
     integration_install.add_argument("--git-executable", type=Path)
     integration_install.add_argument("--repair", action="store_true")
@@ -990,15 +1059,13 @@ def build_parser() -> argparse.ArgumentParser:
     integration_install.add_argument("--json", action="store_true")
     integration_install.set_defaults(handler=_integration_install)
     integration_check = integration_commands.add_parser("check")
-    integration_check.add_argument("integration_id", choices=("codex",))
-    _add_user_selector(integration_check, required=True)
+    _add_lifecycle_selectors(integration_check)
     integration_check.add_argument("--launcher", type=Path)
     integration_check.add_argument("--git-executable", type=Path)
     integration_check.add_argument("--json", action="store_true")
     integration_check.set_defaults(handler=_integration_check)
     integration_uninstall = integration_commands.add_parser("uninstall")
-    integration_uninstall.add_argument("integration_id", choices=("codex",))
-    _add_user_selector(integration_uninstall, required=True)
+    _add_lifecycle_selectors(integration_uninstall)
     integration_uninstall.add_argument("--json", action="store_true")
     integration_uninstall.set_defaults(handler=_integration_uninstall)
     integration_print = integration_commands.add_parser("print")
@@ -1112,8 +1179,21 @@ def _classify_error(error: Exception) -> tuple[str, int]:
         return "invalid_config", 2
     if isinstance(error, EventError):
         return "invalid_document", 2
+    if isinstance(error, guidance.GuidanceIntegrationError):
+        message = str(error).lower()
+        if (
+            "--target" in message
+            or "--user" in message
+            or "--launcher" in message
+            or "--git-executable" in message
+            or "control characters" in message
+        ):
+            return "invalid_argument", 2
+        return "integration_drift", 6
     if isinstance(error, CodexIntegrationError):
         message = str(error).lower()
+        if "requires --user" in message or "not --target" in message:
+            return "invalid_argument", 2
         if "launcher must be an absolute path" in message:
             return "invalid_argument", 2
         if (

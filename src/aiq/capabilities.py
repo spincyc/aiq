@@ -149,20 +149,22 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="safe retry for the same claim and outcome",
     ),
     "integration.check": _capability(
-        "Detect whether the user-level Codex integration is installed or drifted.",
+        "Detect whether a managed Codex or guidance integration is installed "
+        "or drifted.",
         (
-            "aiq integration check codex --user [--launcher PATH] "
-            "[--git-executable PATH] [--json]"
+            "aiq integration check (codex --user [--launcher PATH] "
+            "[--git-executable PATH] | guidance --target PATH) [--json]"
         ),
         mutates=False,
         idempotency="read-only",
         version=2,
     ),
     "integration.install": _capability(
-        "Install or explicitly repair the user-level Codex integration.",
+        "Install or explicitly repair a managed Codex or guidance integration.",
         (
-            "aiq integration install codex --user "
+            "aiq integration install (codex --user "
             "[--launcher PATH] [--git-executable PATH] "
+            "| guidance --target PATH) "
             "[--plan-token TOKEN] [--repair] [--json]"
         ),
         mutates=True,
@@ -176,10 +178,11 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="read-only",
     ),
     "integration.plan": _capability(
-        "Preview a sanitized user-level Codex integration change.",
+        "Preview a sanitized managed Codex or guidance integration change.",
         (
-            "aiq integration plan codex --user "
-            "[--launcher PATH] [--git-executable PATH] [--repair] [--json]"
+            "aiq integration plan (codex --user "
+            "[--launcher PATH] [--git-executable PATH] "
+            "| guidance --target PATH) [--repair] [--json]"
         ),
         mutates=False,
         idempotency="read-only",
@@ -196,8 +199,11 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         version=2,
     ),
     "integration.uninstall": _capability(
-        "Remove unchanged AIQ-owned Codex integration material.",
-        "aiq integration uninstall codex --user [--json]",
+        "Remove unchanged AIQ-owned Codex or guidance integration material.",
+        (
+            "aiq integration uninstall "
+            "(codex --user | guidance --target PATH) [--json]"
+        ),
         mutates=True,
         idempotency="safe retry when no owned material remains",
     ),
