@@ -186,6 +186,19 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(first["aliases"], second["aliases"])
         self.assertEqual(len(list_tasks(self.scope)), 1)
 
+        before_rejected_replay = list_tasks(self.scope)
+        with self.assertRaisesRegex(
+            JournalError,
+            "replay claim does not match the original claim",
+        ):
+            apply_effects(
+                self.scope,
+                message.message_id,
+                document,
+                claim_id="clm_" + "0" * 32,
+            )
+        self.assertEqual(list_tasks(self.scope), before_rejected_replay)
+
         with self.assertRaisesRegex(
             JournalError,
             "different effects application",
@@ -722,6 +735,59 @@ class QueueTest(unittest.TestCase):
             connection.close()
 
         with self.assertRaisesRegex(JournalError, "creation revision mismatch"):
+            check_journal(self.scope)
+
+    def test_audit_detects_sealed_effect_without_task_revision(self) -> None:
+        create_message = self.ingest("Create auditable work")
+        created = self.apply(
+            create_message.message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$work", {"title": "Original"}]],
+            },
+        )
+        task_id = created["aliases"]["$work"]
+        update_message = self.ingest("Revise auditable work")
+        self.apply(
+            update_message.message_id,
+            {
+                "v": 1,
+                "expect": {task_id: 1},
+                "effects": [["update", task_id, {"title": "Revised"}]],
+            },
+        )
+        connection = sqlite3.connect(self.scope.journal_path)
+        try:
+            connection.executescript(
+                """
+                DROP TRIGGER task_revisions_no_delete;
+                """
+            )
+            connection.execute(
+                """
+                DELETE FROM task_revisions
+                WHERE task_id = ? AND revision = 2
+                """,
+                (task_id,),
+            )
+            connection.executescript(
+                """
+                CREATE TRIGGER task_revisions_no_delete
+                BEFORE DELETE ON task_revisions
+                BEGIN
+                  SELECT RAISE(ABORT, 'task_revisions are append-only');
+                END;
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaisesRegex(
+            JournalError,
+            "sealed task effect has no task revision",
+        ):
             check_journal(self.scope)
 
     def test_message_claim_race_has_one_winner(self) -> None:

@@ -26,9 +26,13 @@ the Python standard library.
 
 ```sh
 git clone https://github.com/spincyc/aiq.git
+make -C ./aiq install-packages  # Arch Linux
 pipx install ./aiq
 aiq --version
 ```
+
+On other systems, provide Git, Python, and pipx with the platform package
+manager before running `pipx install`.
 
 Update an existing source installation:
 

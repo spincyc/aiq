@@ -2051,7 +2051,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                     f"{row['task_id']}:r{revision['revision']}"
                 )
             operation = effect["operation"]
-            context = effect_context.get(revision["event_sequence"])
+            context = effect_context.pop(revision["event_sequence"], None)
             if context is None or context[0] != document_effect:
                 raise JournalError(
                     f"task effect has no application context: "
@@ -2245,6 +2245,25 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                         f"invalid task operation after creation: {operation}"
                     )
             previous = revision
+
+    if effect_context:
+        event_sequence = min(effect_context)
+        effect = connection.execute(
+            """
+            SELECT message_id, effect_index
+            FROM task_effects
+            WHERE event_sequence = ?
+            """,
+            (event_sequence,),
+        ).fetchone()
+        if effect is None:
+            raise JournalError(
+                f"sealed task effect is missing: event {event_sequence}"
+            )
+        raise JournalError(
+            f"sealed task effect has no task revision: "
+            f"{effect['message_id']}:{effect['effect_index']}"
+        )
 
     tasks = _load_current_tasks(connection)
     _validate_graph(tasks)
