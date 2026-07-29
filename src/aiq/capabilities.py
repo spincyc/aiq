@@ -47,6 +47,15 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=False,
         idempotency="read-only",
     ),
+    "claim.list": _capability(
+        "List bounded unreleased message and task leases with expiry status.",
+        (
+            "aiq claim list [--owner OWNER] [--resource message|task] "
+            "[--status active|expired] [--limit N] [--json]"
+        ),
+        mutates=False,
+        idempotency="read-only",
+    ),
     "claim.release": _capability(
         "Release a message or task lease without completing its work.",
         "aiq claim release CLAIM_ID [--json]",
@@ -262,6 +271,18 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     "task.list": _capability(
         "List bounded compact current task state.",
         "aiq task list [--state STATE] [--limit N] [--json]",
+        mutates=False,
+        idempotency="read-only",
+    ),
+    "task.explain": _capability(
+        "Explain deterministically why one task is or is not eligible.",
+        "aiq task explain TASK_ID [--json]",
+        mutates=False,
+        idempotency="read-only",
+    ),
+    "task.history": _capability(
+        "Read one task's bounded recorded event lineage, newest first.",
+        "aiq task history TASK_ID [--limit N] [--json]",
         mutates=False,
         idempotency="read-only",
     ),

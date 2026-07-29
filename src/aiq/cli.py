@@ -45,11 +45,14 @@ from aiq.queue import (
     claim_message,
     claim_next_tasks,
     dispose_message,
+    explain_task,
+    list_claims,
     list_tasks,
     next_tasks,
     parse_effect_document,
     release_claim,
     show_task,
+    task_history,
 )
 
 
@@ -587,6 +590,26 @@ def _claim_release(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _claim_list(arguments: argparse.Namespace) -> int:
+    claims = list_claims(
+        _scope(arguments),
+        owner_id=arguments.owner,
+        resource_kind=arguments.resource,
+        status=arguments.status,
+        limit=arguments.limit,
+    )
+    if arguments.json:
+        _emit({"claims": claims}, as_json=True)
+        return 0
+    for claim in claims:
+        print(
+            f"{claim['claim_id']}\t{claim['resource_kind']}\t"
+            f"{claim['resource_id']}\t{_single_line(claim['owner_id'])}\t"
+            f"{claim['status']}\t{claim['expires_at']}"
+        )
+    return 0
+
+
 def _task_list(arguments: argparse.Namespace) -> int:
     tasks = [
         _task_summary(task)
@@ -611,6 +634,63 @@ def _task_list(arguments: argparse.Namespace) -> int:
 def _task_show(arguments: argparse.Namespace) -> int:
     detail = _task_detail(show_task(_scope(arguments), arguments.task_id))
     _emit({"task": detail}, as_json=arguments.json)
+    return 0
+
+
+def _task_explain(arguments: argparse.Namespace) -> int:
+    explained = explain_task(_scope(arguments), arguments.task_id)
+    if arguments.json:
+        _emit({"explain": explained}, as_json=True)
+        return 0
+    print(
+        f"{explained['task_id']}\t{explained['state']}\t"
+        f"r{explained['revision']}\t{_single_line(explained['explanation'])}"
+    )
+    for prerequisite in explained["prerequisites"]:
+        met = "met" if prerequisite["satisfied"] else "unmet"
+        print(
+            f"requires\t{prerequisite['task_id']}\t"
+            f"{prerequisite['state']}\t{met}"
+        )
+    return 0
+
+
+def _history_compact(entry: Mapping[str, Any]) -> str:
+    event_type = entry["type"]
+    detail = entry["detail"]
+    if event_type == "task.created":
+        return f"r{detail['revision']} {detail['state']}"
+    if event_type == "task.revised":
+        return f"r{detail['revision']} {','.join(detail['fields'])}"
+    if event_type == "task.state_changed":
+        compact = f"r{detail['revision']} {detail['state']}"
+        if detail["superseded_by_task_id"] is not None:
+            compact += f" by={detail['superseded_by_task_id']}"
+        return compact
+    if event_type in {"task.dependency_added", "task.dependency_removed"}:
+        sign = "+" if event_type.endswith("added") else "-"
+        return f"r{detail['revision']} {sign}{detail['dependency']}"
+    if event_type == "claim.acquired":
+        return f"{detail['claim_id']} {detail['owner_id']}"
+    if event_type.startswith("claim."):
+        return f"{detail['claim_id']} {detail['disposition']}"
+    return ""
+
+
+def _task_history(arguments: argparse.Namespace) -> int:
+    events = task_history(
+        _scope(arguments),
+        arguments.task_id,
+        limit=arguments.limit,
+    )
+    if arguments.json:
+        _emit({"task_id": arguments.task_id, "events": events}, as_json=True)
+        return 0
+    for entry in events:
+        print(
+            f"{entry['occurred_at']}\t{entry['type']}\t"
+            f"{_single_line(_history_compact(entry))}"
+        )
     return 0
 
 
@@ -933,6 +1013,13 @@ def build_parser() -> argparse.ArgumentParser:
     task_show = _scope_parser(task_commands, "show")
     task_show.add_argument("task_id")
     task_show.set_defaults(handler=_task_show)
+    task_explain = _scope_parser(task_commands, "explain")
+    task_explain.add_argument("task_id")
+    task_explain.set_defaults(handler=_task_explain)
+    task_history = _scope_parser(task_commands, "history")
+    task_history.add_argument("task_id")
+    task_history.add_argument("--limit", type=int, default=50)
+    task_history.set_defaults(handler=_task_history)
 
     queue = commands.add_parser("queue")
     queue_commands = queue.add_subparsers(dest="queue_command", required=True)
@@ -947,6 +1034,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     claim = commands.add_parser("claim")
     claim_commands = claim.add_subparsers(dest="claim_command", required=True)
+    claim_list = _scope_parser(claim_commands, "list")
+    claim_list.add_argument("--owner")
+    claim_list.add_argument("--resource", choices=("message", "task"))
+    claim_list.add_argument("--status", choices=("active", "expired"))
+    claim_list.add_argument("--limit", type=int, default=100)
+    claim_list.set_defaults(handler=_claim_list)
     claim_release = _scope_parser(claim_commands, "release")
     claim_release.add_argument("claim_id")
     claim_release.set_defaults(handler=_claim_release)
@@ -1061,6 +1154,7 @@ def _classify_journal_error(error: JournalError) -> tuple[str, int]:
             "limit must",
             "limit must be",
             "must be positive",
+            "unsupported claim",
             "unsupported task state",
         )
     ):

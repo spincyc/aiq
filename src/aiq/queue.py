@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -1043,6 +1044,320 @@ def next_tasks(
     if limit < 1 or limit > 64:
         raise JournalError("queue limit must be between 1 and 64")
     return list_tasks(scope, states={"ready"}, limit=limit)
+
+
+def _us_timestamp(value: int) -> str:
+    return (
+        datetime.fromtimestamp(value / 1_000_000, tz=timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _explanation(
+    task: dict[str, Any],
+    state: str,
+    lease: dict[str, Any] | None,
+    blocked_by: list[str],
+    waiting_on: list[str],
+) -> str:
+    if state == "active":
+        return (
+            f"active: leased by {lease['owner_id']} "
+            f"until {lease['expires_at']}"
+        )
+    if state == "ready":
+        if task["dependencies"]:
+            return "ready: all prerequisites are done"
+        return "ready: no prerequisites"
+    if state == "queued":
+        return f"queued: waiting on {', '.join(waiting_on)}"
+    if state == "blocked":
+        if task["state"] == "blocked":
+            return f"blocked: {task['reason']}"
+        return f"blocked: failed prerequisites {', '.join(blocked_by)}"
+    if state == "canceled":
+        return f"canceled: {task['reason']}"
+    if state == "superseded":
+        return (
+            f"superseded by {task['superseded_by_task_id']}: {task['reason']}"
+        )
+    return "done"
+
+
+def explain_task(scope: JournalScope, task_id: str) -> dict[str, Any]:
+    """Explain one task's effective queue state from a single snapshot."""
+
+    if not TASK_ID_PATTERN.fullmatch(task_id):
+        raise JournalError(f"invalid task ID: {task_id}")
+    connection = _connect(scope)
+    try:
+        connection.execute("BEGIN")
+        tasks = _load_current_tasks(connection)
+        if task_id not in tasks:
+            raise JournalError(f"task not found: {task_id}")
+        states = _effective_states(tasks)
+        task = tasks[task_id]
+        state = states[task_id]
+        prerequisites = [
+            {
+                "task_id": dependency,
+                "state": states[dependency],
+                "satisfied": states[dependency] == "done",
+            }
+            for dependency in sorted(task["dependencies"])
+        ]
+        blocked_by = [
+            prerequisite["task_id"]
+            for prerequisite in prerequisites
+            if prerequisite["state"] in FAILURE_STATES
+        ]
+        waiting_on = [
+            prerequisite["task_id"]
+            for prerequisite in prerequisites
+            if prerequisite["state"] not in {"done", *FAILURE_STATES}
+        ]
+        claim = task.get("claim")
+        lease = (
+            {
+                "claim_id": claim["claim_id"],
+                "owner_id": claim["owner_id"],
+                "expires_at": _us_timestamp(claim["expires_at_us"]),
+            }
+            if claim is not None
+            else None
+        )
+        return {
+            "task_id": task_id,
+            "revision": task["revision"],
+            "state": state,
+            "recorded_state": task["state"],
+            "prerequisites": prerequisites,
+            "blocked_by": blocked_by,
+            "waiting_on": waiting_on,
+            "claim": lease,
+            "reason": task["reason"],
+            "superseded_by_task_id": task["superseded_by_task_id"],
+            "explanation": _explanation(
+                task,
+                state,
+                lease,
+                blocked_by,
+                waiting_on,
+            ),
+        }
+    finally:
+        connection.close()
+
+
+_HISTORY_TASK_EVENTS = {
+    "task.created",
+    "task.revised",
+    "task.state_changed",
+    "task.dependency_added",
+    "task.dependency_removed",
+}
+
+
+def _history_detail(
+    connection: sqlite3.Connection,
+    task_id: str,
+    row: sqlite3.Row,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    event_type = row["event_type"]
+    if event_type == "claim.acquired":
+        expires_at_us = payload.get("expires_at_us")
+        return {
+            "claim_id": payload.get("claim_id"),
+            "owner_id": payload.get("owner_id"),
+            "expires_at": (
+                _us_timestamp(expires_at_us)
+                if isinstance(expires_at_us, int)
+                and not isinstance(expires_at_us, bool)
+                else None
+            ),
+        }
+    if event_type.startswith("claim."):
+        return {
+            "claim_id": payload.get("claim_id"),
+            "disposition": payload.get("disposition"),
+        }
+    if event_type not in _HISTORY_TASK_EVENTS:
+        return {}
+    revision = connection.execute(
+        """
+        SELECT revision, state, reason, superseded_by_task_id,
+               dependencies_json
+        FROM task_revisions
+        WHERE task_id = ? AND event_sequence = ?
+        """,
+        (task_id, row["sequence"]),
+    ).fetchone()
+    if revision is None:
+        raise JournalError(f"task event has no revision: {task_id}")
+    detail: dict[str, Any] = {"revision": revision["revision"]}
+    if event_type == "task.created":
+        detail["state"] = revision["state"]
+    elif event_type == "task.revised":
+        effect = payload.get("effect")
+        patch = (
+            effect[2]
+            if isinstance(effect, list)
+            and len(effect) == 3
+            and isinstance(effect[2], dict)
+            else {}
+        )
+        detail["fields"] = sorted(patch)
+    elif event_type == "task.state_changed":
+        detail["state"] = revision["state"]
+        detail["reason"] = revision["reason"]
+        detail["superseded_by_task_id"] = revision["superseded_by_task_id"]
+    else:
+        previous = connection.execute(
+            """
+            SELECT dependencies_json
+            FROM task_revisions
+            WHERE task_id = ? AND revision = ?
+            """,
+            (task_id, revision["revision"] - 1),
+        ).fetchone()
+        before = (
+            set(json.loads(previous["dependencies_json"]))
+            if previous is not None
+            else set()
+        )
+        after = set(json.loads(revision["dependencies_json"]))
+        changed = sorted(after ^ before)
+        detail["dependency"] = changed[0] if changed else None
+    return detail
+
+
+def task_history(
+    scope: JournalScope,
+    task_id: str,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return one task's recorded events, newest first, from one snapshot."""
+
+    if not TASK_ID_PATTERN.fullmatch(task_id):
+        raise JournalError(f"invalid task ID: {task_id}")
+    if limit < 1 or limit > 1000:
+        raise JournalError("history limit must be between 1 and 1000")
+    connection = _connect(scope)
+    try:
+        connection.execute("BEGIN")
+        exists = connection.execute(
+            "SELECT 1 FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if not exists:
+            raise JournalError(f"task not found: {task_id}")
+        rows = connection.execute(
+            """
+            SELECT sequence, occurred_at, event_type, payload_json
+            FROM events
+            WHERE task_id = ?
+            ORDER BY sequence DESC
+            LIMIT ?
+            """,
+            (task_id, limit),
+        ).fetchall()
+        return [
+            {
+                "occurred_at": row["occurred_at"],
+                "type": row["event_type"],
+                "detail": _history_detail(
+                    connection,
+                    task_id,
+                    row,
+                    json.loads(row["payload_json"]),
+                ),
+            }
+            for row in rows
+        ]
+    finally:
+        connection.close()
+
+
+def list_claims(
+    scope: JournalScope,
+    *,
+    owner_id: str | None = None,
+    resource_kind: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    now_us: int | None = None,
+) -> list[dict[str, Any]]:
+    """List unreleased claims in acquisition order, bounded by limit."""
+
+    if limit < 1 or limit > 1000:
+        raise JournalError("claim limit must be between 1 and 1000")
+    if resource_kind is not None and resource_kind not in {"message", "task"}:
+        raise JournalError(
+            f"unsupported claim resource filter: {resource_kind}"
+        )
+    if status is not None and status not in {"active", "expired"}:
+        raise JournalError(f"unsupported claim status filter: {status}")
+    owner = (
+        None
+        if owner_id is None
+        else _text(owner_id, path="owner_id", minimum=1, maximum=200)
+    )
+    effective_now = _now_us() if now_us is None else now_us
+    conditions = ["release.claim_id IS NULL"]
+    parameters: list[Any] = []
+    if owner is not None:
+        conditions.append("claim.owner_id = ?")
+        parameters.append(owner)
+    if resource_kind is not None:
+        conditions.append("claim.resource_kind = ?")
+        parameters.append(resource_kind)
+    if status == "active":
+        conditions.append("claim.expires_at_us > ?")
+        parameters.append(effective_now)
+    elif status == "expired":
+        conditions.append("claim.expires_at_us <= ?")
+        parameters.append(effective_now)
+    connection = _connect(scope)
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT
+              claim.claim_id,
+              claim.resource_kind,
+              claim.resource_id,
+              claim.owner_id,
+              claim.basis_revision,
+              claim.expires_at_us
+            FROM claims AS claim
+            LEFT JOIN claim_releases AS release
+              ON release.claim_id = claim.claim_id
+            WHERE {" AND ".join(conditions)}
+            ORDER BY claim.fence
+            LIMIT ?
+            """,
+            (*parameters, limit),
+        ).fetchall()
+        return [
+            {
+                "claim_id": row["claim_id"],
+                "resource_kind": row["resource_kind"],
+                "resource_id": row["resource_id"],
+                "owner_id": row["owner_id"],
+                "basis_revision": row["basis_revision"],
+                "expires_at": _us_timestamp(row["expires_at_us"]),
+                "status": (
+                    "active"
+                    if row["expires_at_us"] > effective_now
+                    else "expired"
+                ),
+            }
+            for row in rows
+        ]
+    finally:
+        connection.close()
 
 
 def _resolve(reference: str, aliases: dict[str, str]) -> str:

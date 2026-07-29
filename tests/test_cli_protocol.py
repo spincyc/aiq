@@ -17,12 +17,13 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 JSON_COMMAND_PATHS = {
     tuple(name.split("."))
     for name in """
-        capability.list capability.show claim.release config.check config.show
-        inbox.apply inbox.claim inbox.fail inbox.list inbox.needs-input ingest
-        integration.check integration.install integration.list integration.plan
-        integration.print integration.uninstall journal.check journal.destroy
-        journal.export journal.init journal.path journal.snapshot queue.next
-        queue.peek task.list task.show
+        capability.list capability.show claim.list claim.release config.check
+        config.show inbox.apply inbox.claim inbox.fail inbox.list
+        inbox.needs-input ingest integration.check integration.install
+        integration.list integration.plan integration.print
+        integration.uninstall journal.check journal.destroy journal.export
+        journal.init journal.path journal.snapshot queue.next queue.peek
+        task.explain task.history task.list task.show
     """.split()
 }
 
@@ -221,6 +222,15 @@ class CliProtocolTests(unittest.TestCase):
         self.ok("task", "list", *self.scope)
         task = self.ok("task", "show", task_id, *self.scope)
         self.assertEqual(set(task), {"task", "v"})
+        explained = self.ok("task", "explain", task_id, *self.scope)
+        self.assertEqual(set(explained), {"explain", "v"})
+        self.assertEqual(explained["explain"]["state"], "ready")
+        history = self.ok("task", "history", task_id, *self.scope)
+        self.assertEqual(set(history), {"events", "task_id", "v"})
+        self.assertEqual(
+            history["events"][-1]["type"],
+            "task.created",
+        )
         self.ok("queue", "peek", *self.scope)
         next_result = self.ok(
             "queue", "next", "--owner", "protocol-test", *self.scope,
@@ -230,6 +240,13 @@ class CliProtocolTests(unittest.TestCase):
         item = next_result["items"][0]
         self.assertEqual(set(item), {"claim", "task"})
         self.assertNotIn("claim", item["task"])
+        claims = self.ok("claim", "list", *self.scope)
+        self.assertEqual(set(claims), {"claims", "v"})
+        self.assertEqual(
+            [claim["claim_id"] for claim in claims["claims"]],
+            [item["claim"]["claim_id"]],
+        )
+        self.assertEqual(claims["claims"][0]["status"], "active")
         self.ok("claim", "release", item["claim"]["claim_id"], *self.scope)
 
         for command, status in (("needs-input", "needs_input"), ("fail", "failed")):
