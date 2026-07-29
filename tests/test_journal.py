@@ -71,7 +71,7 @@ class JournalTest(unittest.TestCase):
             self.assertEqual(primary_scope.journal_path, worktree_scope.journal_path)
             self.assertEqual(
                 primary_scope.journal_path,
-                repository / ".git" / "aiq" / "journal.sqlite3",
+                (repository / ".git" / "aiq" / "journal.sqlite3").resolve(),
             )
 
     def test_repo_journal_survives_move_and_normalizes_legacy_metadata(self) -> None:
@@ -149,7 +149,7 @@ class JournalTest(unittest.TestCase):
             ):
                 scope = resolve_scope("repo", cwd=repository)
 
-            self.assertEqual(scope.root, repository / ".git")
+            self.assertEqual(scope.root, (repository / ".git").resolve())
 
     def test_missing_git_falls_back_to_stable_user_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

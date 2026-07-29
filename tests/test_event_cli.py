@@ -267,7 +267,7 @@ class EventCliTest(unittest.TestCase):
         self.assertEqual(self.list_messages(command_repository), [])
         messages = self.list_messages(event_repository)
         self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0]["cwd"], str(event_repository))
+        self.assertEqual(messages[0]["cwd"], str(event_repository.resolve()))
 
     def test_cli_cwd_is_used_when_event_cwd_is_omitted(self) -> None:
         repository = self.repository("repository")
@@ -282,7 +282,7 @@ class EventCliTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         messages = self.list_messages(repository)
         self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0]["cwd"], str(repository))
+        self.assertEqual(messages[0]["cwd"], str(repository.resolve()))
 
 
 if __name__ == "__main__":

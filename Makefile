@@ -6,7 +6,8 @@ ARCH_PACKAGES := \
   make \
   python \
   python-build \
-  python-pipx
+  python-pipx \
+  python-setuptools
 
 .PHONY: install-packages sanity-check test verify public-audit build
 
