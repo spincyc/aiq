@@ -200,15 +200,33 @@ def _integration_lock(state_directory: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
-def _launcher_path(launcher: str | Path | None) -> Path:
-    if launcher is None:
-        discovered = shutil.which("aiq")
+def _launcher_path(
+    launcher: str | Path | None,
+    *,
+    invoked_launcher: str | Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> Path:
+    candidate = launcher
+    if candidate is None:
+        candidate = invoked_launcher
+    if candidate is None:
+        search_path = (
+            os.environ.get("PATH", "")
+            if environment is None
+            else environment.get("PATH", "")
+        )
+        discovered = (
+            None
+            if search_path == ""
+            else shutil.which("aiq", path=search_path)
+        )
         if discovered is None:
             raise CodexIntegrationError(
-                "cannot find aiq on PATH; provide an absolute launcher path"
+                "cannot determine the AIQ launcher; provide an absolute "
+                "--launcher path"
             )
-        launcher = discovered
-    path = Path(os.path.abspath(os.fspath(launcher)))
+        candidate = Path(discovered).absolute()
+    path = Path(candidate)
     if not path.is_absolute():
         raise CodexIntegrationError("AIQ launcher must be an absolute path")
     if any(character in os.fspath(path) for character in ("\0", "\r", "\n")):
@@ -222,10 +240,84 @@ def _launcher_path(launcher: str | Path | None) -> Path:
     return path
 
 
-def _hook_group(launcher: Path) -> dict[str, Any]:
+def _git_executable_path(
+    git_executable: str | Path | None,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> Path:
+    candidate = git_executable
+    if candidate is None:
+        search_path = (
+            os.environ.get("PATH", "")
+            if environment is None
+            else environment.get("PATH", "")
+        )
+        discovered = (
+            None
+            if search_path == ""
+            else shutil.which("git", path=search_path)
+        )
+        if discovered is None:
+            raise CodexIntegrationError(
+                "cannot determine the Git executable; provide an absolute "
+                "--git-executable path"
+            )
+        candidate = Path(discovered).absolute()
+    path = Path(candidate)
+    if not path.is_absolute():
+        raise CodexIntegrationError("Git executable must be an absolute path")
+    if any(character in os.fspath(path) for character in ("\0", "\r", "\n")):
+        raise CodexIntegrationError(
+            "Git executable path contains control characters"
+        )
+    try:
+        status = path.stat()
+    except OSError as error:
+        raise CodexIntegrationError(
+            f"Git executable is unavailable: {path}"
+        ) from error
+    if not stat.S_ISREG(status.st_mode) or not os.access(path, os.X_OK):
+        raise CodexIntegrationError(
+            f"Git executable is not executable: {path}"
+        )
+    return path
+
+
+def _python_executable_path(
+    python_executable: str | Path | None,
+) -> Path:
+    candidate = sys.executable if python_executable is None else python_executable
+    path = Path(candidate)
+    if not path.is_absolute():
+        raise CodexIntegrationError(
+            "Python executable must be an absolute path"
+        )
+    if any(character in os.fspath(path) for character in ("\0", "\r", "\n")):
+        raise CodexIntegrationError(
+            "Python executable path contains control characters"
+        )
+    try:
+        status = path.stat()
+    except OSError as error:
+        raise CodexIntegrationError(
+            f"Python executable is unavailable: {path}"
+        ) from error
+    if not stat.S_ISREG(status.st_mode) or not os.access(path, os.X_OK):
+        raise CodexIntegrationError(
+            f"Python executable is not executable: {path}"
+        )
+    return path
+
+
+def _hook_group(
+    python_executable: Path,
+    git_executable: Path,
+) -> dict[str, Any]:
     command = (
-        f"{shlex.quote(os.fspath(launcher))} integration receive codex "
-        f"--integration-id {INTEGRATION_ID}"
+        f"{shlex.quote(os.fspath(python_executable))} -I -m aiq "
+        "integration receive codex "
+        f"--integration-id {INTEGRATION_ID} "
+        f"--git-executable {shlex.quote(os.fspath(git_executable))}"
     )
     return {
         "hooks": [
@@ -326,9 +418,11 @@ def _validate_manifest(
         "created_file",
         "integration",
         "integration_id",
+        "git_executable",
         "launcher",
         "managed_group",
         "managed_group_sha256",
+        "python_executable",
         "status",
         "target",
         "v",
@@ -353,6 +447,30 @@ def _validate_manifest(
         or any(character in launcher for character in ("\0", "\r", "\n"))
     ):
         raise CodexIntegrationError("integration manifest launcher is invalid")
+    git_executable = manifest["git_executable"]
+    if (
+        not isinstance(git_executable, str)
+        or not Path(git_executable).is_absolute()
+        or any(
+            character in git_executable
+            for character in ("\0", "\r", "\n")
+        )
+    ):
+        raise CodexIntegrationError(
+            "integration manifest Git executable is invalid"
+        )
+    python_executable = manifest["python_executable"]
+    if (
+        not isinstance(python_executable, str)
+        or not Path(python_executable).is_absolute()
+        or any(
+            character in python_executable
+            for character in ("\0", "\r", "\n")
+        )
+    ):
+        raise CodexIntegrationError(
+            "integration manifest Python executable is invalid"
+        )
     containers = manifest["created_containers"]
     if (
         not isinstance(containers, list)
@@ -366,7 +484,11 @@ def _validate_manifest(
     group = manifest["managed_group"]
     if (
         not isinstance(group, dict)
-        or group != _hook_group(Path(launcher))
+        or group
+        != _hook_group(
+            Path(python_executable),
+            Path(git_executable),
+        )
         or _marker_count(group) != 1
     ):
         raise CodexIntegrationError("integration manifest owned hook is invalid")
@@ -543,10 +665,27 @@ def _replace_managed_group(
 def print_integration(
     *,
     launcher: str | Path | None = None,
+    git_executable: str | Path | None = None,
+    python_executable: str | Path | None = None,
+    invoked_launcher: str | Path | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> str:
     """Render an externally managed ``hooks.json`` fragment."""
 
-    group = _hook_group(_launcher_path(launcher))
+    _launcher_path(
+        launcher,
+        invoked_launcher=invoked_launcher,
+        environment=environment,
+    )
+    resolved_git_executable = _git_executable_path(
+        git_executable,
+        environment=environment,
+    )
+    resolved_python_executable = _python_executable_path(python_executable)
+    group = _hook_group(
+        resolved_python_executable,
+        resolved_git_executable,
+    )
     return _encode_hooks(
         {"hooks": {"UserPromptSubmit": [group]}}
     ).decode("utf-8")
@@ -555,6 +694,9 @@ def print_integration(
 def _build_plan(
     *,
     launcher: str | Path | None = None,
+    git_executable: str | Path | None = None,
+    python_executable: str | Path | None = None,
+    invoked_launcher: str | Path | None = None,
     environment: Mapping[str, str] | None = None,
     repair: bool = False,
 ) -> dict[str, Any]:
@@ -563,7 +705,20 @@ def _build_plan(
     effective_environment = os.environ if environment is None else environment
     target = _target_path(effective_environment)
     state_directory = _integration_state_directory(effective_environment, target)
-    desired_group = _hook_group(_launcher_path(launcher))
+    resolved_launcher = _launcher_path(
+        launcher,
+        invoked_launcher=invoked_launcher,
+        environment=effective_environment,
+    )
+    resolved_git_executable = _git_executable_path(
+        git_executable,
+        environment=effective_environment,
+    )
+    resolved_python_executable = _python_executable_path(python_executable)
+    desired_group = _hook_group(
+        resolved_python_executable,
+        resolved_git_executable,
+    )
     result: dict[str, Any] = {
         "v": CONTRACT_VERSION,
         "integration": "codex",
@@ -575,6 +730,9 @@ def _build_plan(
         "action": "block",
         "blocked_reason": None,
         "changes": [],
+        "_launcher": os.fspath(resolved_launcher),
+        "_git_executable": os.fspath(resolved_git_executable),
+        "_python_executable": os.fspath(resolved_python_executable),
     }
     try:
         inline = _inline_configuration_status(target.parent)
@@ -706,6 +864,9 @@ def _public_plan(plan: dict[str, Any]) -> dict[str, Any]:
 def plan_integration(
     *,
     launcher: str | Path | None = None,
+    git_executable: str | Path | None = None,
+    python_executable: str | Path | None = None,
+    invoked_launcher: str | Path | None = None,
     environment: Mapping[str, str] | None = None,
     repair: bool = False,
 ) -> dict[str, Any]:
@@ -714,6 +875,9 @@ def plan_integration(
     return _public_plan(
         _build_plan(
             launcher=launcher,
+            git_executable=git_executable,
+            python_executable=python_executable,
+            invoked_launcher=invoked_launcher,
             environment=environment,
             repair=repair,
         )
@@ -738,6 +902,9 @@ def _backup(
 def install_integration(
     *,
     launcher: str | Path | None = None,
+    git_executable: str | Path | None = None,
+    python_executable: str | Path | None = None,
+    invoked_launcher: str | Path | None = None,
     environment: Mapping[str, str] | None = None,
     repair: bool = False,
     plan_token: str | None = None,
@@ -750,6 +917,9 @@ def install_integration(
     with _integration_lock(state_directory):
         plan = _build_plan(
             launcher=launcher,
+            git_executable=git_executable,
+            python_executable=python_executable,
+            invoked_launcher=invoked_launcher,
             environment=effective_environment,
             repair=repair,
         )
@@ -792,7 +962,9 @@ def install_integration(
             "integration": "codex",
             "integration_id": INTEGRATION_ID,
             "target": os.fspath(target),
-            "launcher": os.fspath(_launcher_path(launcher)),
+            "launcher": plan["_launcher"],
+            "git_executable": plan["_git_executable"],
+            "python_executable": plan["_python_executable"],
             "managed_group": plan["desired_group"],
             "managed_group_sha256": _sha256(
                 json.dumps(
@@ -816,6 +988,9 @@ def install_integration(
 def check_integration(
     *,
     launcher: str | Path | None = None,
+    git_executable: str | Path | None = None,
+    python_executable: str | Path | None = None,
+    invoked_launcher: str | Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Inspect integration ownership, drift, and executable availability."""
@@ -823,6 +998,9 @@ def check_integration(
     effective_environment = os.environ if environment is None else environment
     plan = _build_plan(
         launcher=launcher,
+        git_executable=git_executable,
+        python_executable=python_executable,
+        invoked_launcher=invoked_launcher,
         environment=effective_environment,
     )
     result = _public_plan(plan)
@@ -953,12 +1131,18 @@ def receive_hook(
     payload: str | bytes,
     *,
     integration_id: str = INTEGRATION_ID,
+    git_executable: str | Path | None = None,
     agent_root: Path | None = None,
 ) -> dict[str, Any]:
     """Validate and durably ingest one Codex ``UserPromptSubmit`` payload."""
 
     if integration_id != INTEGRATION_ID:
         raise CodexIntegrationError("unsupported Codex integration id")
+    if git_executable is None:
+        raise CodexIntegrationError(
+            "Codex hook requires an absolute Git executable"
+        )
+    resolved_git_executable = _git_executable_path(git_executable)
     if isinstance(payload, str):
         raw = payload.encode()
     else:
@@ -990,7 +1174,12 @@ def receive_hook(
     if not cwd.is_absolute() or not cwd.is_dir():
         raise CodexIntegrationError("Codex hook working directory is invalid")
 
-    scope = resolve_scope("auto", cwd=cwd, agent_root=agent_root)
+    scope = resolve_scope(
+        "auto",
+        cwd=cwd,
+        agent_root=agent_root,
+        git_executable=resolved_git_executable,
+    )
     result = ingest_message(
         scope,
         prompt,
@@ -1016,6 +1205,7 @@ def receive_hook_main(
     input_stream: BinaryIO | None = None,
     error_stream: TextIO | None = None,
     integration_id: str = INTEGRATION_ID,
+    git_executable: str | Path | None = None,
     agent_root: Path | None = None,
 ) -> int:
     """Run the fail-closed, stdout-silent Codex hook boundary."""
@@ -1031,6 +1221,7 @@ def receive_hook_main(
         receive_hook(
             payload,
             integration_id=integration_id,
+            git_executable=git_executable,
             agent_root=agent_root,
         )
         return 0

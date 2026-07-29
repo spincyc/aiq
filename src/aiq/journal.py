@@ -25,6 +25,10 @@ class JournalError(RuntimeError):
     """Journal operation failed."""
 
 
+class _NotGitRepository(JournalError):
+    """Git confirmed that a path is outside a repository."""
+
+
 def _ensure_private_directory(path: Path) -> None:
     try:
         path.mkdir(mode=0o700, parents=True)
@@ -689,26 +693,61 @@ def _path_id(path: Path) -> str:
     return f"{name or 'root'}-{digest}"
 
 
-def _git_path(cwd: Path, argument: str) -> Path:
+def _git_path(
+    cwd: Path,
+    argument: str,
+    *,
+    git_executable: str | Path | None = None,
+) -> Path:
+    command = "git"
+    if git_executable is not None:
+        raw_executable = os.fspath(git_executable)
+        executable = Path(raw_executable)
+        if not executable.is_absolute():
+            raise JournalError("Git executable must be an absolute path")
+        if any(
+            character in raw_executable
+            for character in ("\0", "\r", "\n")
+        ):
+            raise JournalError("Git executable path contains control characters")
+        try:
+            status = executable.stat()
+        except OSError as error:
+            raise JournalError(
+                f"Git is unavailable: {raw_executable}"
+            ) from error
+        if not stat.S_ISREG(status.st_mode) or not os.access(executable, os.X_OK):
+            raise JournalError(
+                f"Git is unavailable: not an executable regular file: "
+                f"{raw_executable}"
+            )
+        command = raw_executable
+
     environment = {
         name: value
         for name, value in os.environ.items()
         if not name.startswith("GIT_")
     }
+    environment["LC_ALL"] = "C"
     try:
         result = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", argument],
+            [command, "-C", str(cwd), "rev-parse", argument],
             env=environment,
             text=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
     except OSError as error:
         raise JournalError(
             "Git is unavailable; repository scope cannot be resolved"
         ) from error
     if result.returncode:
-        raise JournalError(f"{cwd} is not inside a Git repository")
+        if "not a git repository" in result.stderr.lower():
+            raise _NotGitRepository(f"{cwd} is not inside a Git repository")
+        raise JournalError(
+            "Git could not resolve repository scope "
+            f"(exit status {result.returncode})"
+        )
     raw_path = result.stdout.strip()
     if not raw_path:
         raise JournalError("Git returned an empty repository path")
@@ -733,6 +772,7 @@ def resolve_scope(
     *,
     cwd: Path | None = None,
     agent_root: Path | None = None,
+    git_executable: str | Path | None = None,
 ) -> JournalScope:
     current_directory = (cwd or Path.cwd()).resolve()
     resolved_agent_root = (
@@ -744,8 +784,12 @@ def resolve_scope(
 
     if scope_kind in {"auto", "repo"}:
         try:
-            common_directory = _git_path(current_directory, "--git-common-dir")
-        except JournalError:
+            common_directory = _git_path(
+                current_directory,
+                "--git-common-dir",
+                git_executable=git_executable,
+            )
+        except _NotGitRepository:
             if scope_kind == "repo":
                 raise
         else:

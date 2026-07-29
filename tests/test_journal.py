@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -151,7 +152,66 @@ class JournalTest(unittest.TestCase):
 
             self.assertEqual(scope.root, (repository / ".git").resolve())
 
-    def test_missing_git_falls_back_to_stable_user_scope(self) -> None:
+    def test_explicit_git_ignores_empty_or_hostile_path(self) -> None:
+        discovered_git = shutil.which("git")
+        self.assertIsNotNone(discovered_git)
+        git_executable = Path(discovered_git)
+        self.assertTrue(git_executable.is_absolute())
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            hostile_bin = root / "hostile-bin"
+            repository.mkdir()
+            hostile_bin.mkdir()
+            run_git(repository, "init", "-b", "main")
+            hostile_git = hostile_bin / "git"
+            hostile_git.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'hostile Git was invoked' >&2\n"
+                "exit 99\n",
+            )
+            hostile_git.chmod(0o700)
+
+            for path in ("", str(hostile_bin)):
+                with self.subTest(path=path):
+                    with patch.dict(os.environ, {"PATH": path}):
+                        scope = resolve_scope(
+                            "repo",
+                            cwd=repository,
+                            git_executable=git_executable,
+                        )
+                    self.assertEqual(
+                        scope.root,
+                        (repository / ".git").resolve(),
+                    )
+
+    def test_explicit_git_path_is_validated_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            unavailable = root / "missing-git"
+            non_executable = root / "non-executable-git"
+            non_executable.write_text("#!/bin/sh\nexit 0\n")
+
+            with self.assertRaisesRegex(JournalError, "absolute path"):
+                resolve_scope(
+                    "auto",
+                    cwd=root,
+                    git_executable="git",
+                )
+            for invalid in (unavailable, non_executable, root):
+                with self.subTest(git_executable=invalid):
+                    with self.assertRaisesRegex(
+                        JournalError,
+                        "Git is unavailable",
+                    ):
+                        resolve_scope(
+                            "auto",
+                            cwd=root,
+                            git_executable=invalid,
+                        )
+
+    def test_missing_git_is_fail_closed_for_automatic_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             state_home = root / "state"
@@ -163,9 +223,11 @@ class JournalTest(unittest.TestCase):
                     side_effect=FileNotFoundError("git"),
                 ),
             ):
-                scope = resolve_scope("auto", cwd=root)
+                with self.assertRaisesRegex(JournalError, "Git is unavailable"):
+                    resolve_scope("auto", cwd=root)
                 with self.assertRaisesRegex(JournalError, "Git is unavailable"):
                     resolve_scope("repo", cwd=root)
+                scope = resolve_scope("user", cwd=root)
 
             self.assertEqual(scope.kind, "user")
             self.assertEqual(scope.scope_id, "user")
@@ -173,6 +235,26 @@ class JournalTest(unittest.TestCase):
                 scope.journal_path,
                 state_home / "aiq" / "journal.sqlite3",
             )
+
+    def test_unexpected_git_failure_is_not_treated_as_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            failure = subprocess.CompletedProcess(
+                args=["git"],
+                returncode=128,
+                stdout="",
+                stderr="fatal: detected dubious ownership in repository",
+            )
+            with patch.object(
+                journal_module.subprocess,
+                "run",
+                return_value=failure,
+            ):
+                with self.assertRaisesRegex(
+                    JournalError,
+                    "Git could not resolve repository scope",
+                ):
+                    resolve_scope("auto", cwd=root)
 
     def test_auto_scope_outside_repo_uses_stable_user_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

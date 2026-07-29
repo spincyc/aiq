@@ -5,9 +5,11 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -28,6 +30,11 @@ from aiq.journal import check_journal, resolve_scope
 
 
 class CodexIntegrationTest(unittest.TestCase):
+    def git_executable(self) -> Path:
+        discovered = shutil.which("git")
+        self.assertIsNotNone(discovered)
+        return Path(discovered).absolute()
+
     def fixture(self, root: Path) -> tuple[dict[str, str], Path]:
         home = root / "home"
         state = root / "state"
@@ -40,10 +47,11 @@ class CodexIntegrationTest(unittest.TestCase):
             "HOME": str(home),
             "XDG_STATE_HOME": str(state),
             "CODEX_HOME": str(codex_home),
+            "PATH": str(self.git_executable().parent),
         }
         return environment, launcher
 
-    def test_print_is_stable_fragment_with_quoted_absolute_launcher(self) -> None:
+    def test_print_is_stable_fragment_with_isolated_absolute_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             _, launcher = self.fixture(root)
@@ -57,8 +65,190 @@ class CodexIntegrationTest(unittest.TestCase):
 
             self.assertEqual(first, second)
             self.assertIn(f"--integration-id {INTEGRATION_ID}", command)
-            self.assertTrue(command.startswith(shlex.quote(str(launcher))))
+            self.assertIn(
+                f"--git-executable {shlex.quote(str(self.git_executable()))}",
+                command,
+            )
+            self.assertTrue(
+                command.startswith(
+                    f"{shlex.quote(sys.executable)} -I -m aiq "
+                )
+            )
             self.assertIn(" integration receive codex ", command)
+            self.assertNotIn(str(launcher), command)
+
+    def test_relative_explicit_launcher_is_rejected(self) -> None:
+        with self.assertRaisesRegex(CodexIntegrationError, "absolute"):
+            print_integration(launcher=Path("bin/aiq"))
+
+    def test_relative_explicit_git_executable_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _, launcher = self.fixture(Path(temporary_directory))
+
+            with self.assertRaisesRegex(CodexIntegrationError, "absolute"):
+                print_integration(
+                    launcher=launcher,
+                    git_executable=Path("bin/git"),
+                )
+
+    def test_relative_explicit_python_executable_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            _, launcher = self.fixture(Path(temporary_directory))
+
+            with self.assertRaisesRegex(CodexIntegrationError, "absolute"):
+                print_integration(
+                    launcher=launcher,
+                    python_executable=Path("bin/python"),
+                )
+
+    def test_explicit_absolute_launcher_preserves_symlink_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _, real_launcher = self.fixture(root)
+            launcher_link = root / "bin" / "aiq-link"
+            launcher_link.symlink_to(real_launcher)
+
+            environment, _ = self.fixture(root / "other")
+            installed = install_integration(
+                launcher=launcher_link,
+                environment=environment,
+            )
+            manifest = json.loads(
+                (Path(installed["state_directory"]) / "manifest.json").read_text()
+            )
+
+            self.assertEqual(manifest["launcher"], str(launcher_link))
+            self.assertNotEqual(manifest["launcher"], str(real_launcher))
+
+    def test_invoked_launcher_wins_over_competing_path_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, invoked_launcher = self.fixture(root)
+            competing_launcher = root / "competing" / "aiq"
+            competing_launcher.parent.mkdir()
+            competing_launcher.write_text("#!/bin/sh\nexit 0\n")
+            competing_launcher.chmod(0o755)
+            environment["PATH"] = os.pathsep.join(
+                (str(competing_launcher.parent), environment["PATH"])
+            )
+
+            installed = install_integration(
+                invoked_launcher=invoked_launcher,
+                environment=environment,
+            )
+            document = json.loads(
+                (Path(environment["CODEX_HOME"]) / "hooks.json").read_text()
+            )
+            command = document["hooks"]["UserPromptSubmit"][0]["hooks"][0][
+                "command"
+            ]
+            manifest = json.loads(
+                (Path(installed["state_directory"]) / "manifest.json").read_text()
+            )
+
+            self.assertTrue(
+                command.startswith(
+                    f"{shlex.quote(sys.executable)} -I -m aiq "
+                )
+            )
+            self.assertNotIn(str(invoked_launcher), command)
+            self.assertNotIn(str(competing_launcher), command)
+            self.assertEqual(manifest["launcher"], str(invoked_launcher))
+
+    def test_invoked_launcher_does_not_require_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _, invoked_launcher = self.fixture(root)
+
+            rendered = print_integration(
+                invoked_launcher=invoked_launcher,
+                git_executable=self.git_executable(),
+                environment={},
+            )
+
+            self.assertIn(
+                f"{shlex.quote(sys.executable)} -I -m aiq",
+                rendered,
+            )
+            self.assertNotIn(str(invoked_launcher), rendered)
+            with self.assertRaisesRegex(
+                CodexIntegrationError,
+                "cannot determine",
+            ):
+                print_integration(environment={})
+
+    def test_explicit_git_wins_over_competing_setup_path_and_is_stored(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            reviewed_git = root / "reviewed bin" / "git tool"
+            reviewed_git.parent.mkdir()
+            reviewed_git.write_text("#!/bin/sh\nexit 0\n")
+            reviewed_git.chmod(0o755)
+            competing_git = root / "competing" / "git"
+            competing_git.parent.mkdir()
+            competing_git.write_text("#!/bin/sh\nexit 99\n")
+            competing_git.chmod(0o755)
+            environment["PATH"] = str(competing_git.parent)
+
+            installed = install_integration(
+                launcher=launcher,
+                git_executable=reviewed_git,
+                environment=environment,
+            )
+            target = Path(environment["CODEX_HOME"]) / "hooks.json"
+            command = json.loads(target.read_text())["hooks"][
+                "UserPromptSubmit"
+            ][0]["hooks"][0]["command"]
+            manifest = json.loads(
+                (Path(installed["state_directory"]) / "manifest.json").read_text()
+            )
+
+            self.assertIn(
+                f"--git-executable {shlex.quote(str(reviewed_git))}",
+                command,
+            )
+            self.assertNotIn(str(competing_git), command)
+            self.assertEqual(manifest["git_executable"], str(reviewed_git))
+
+    def test_explicit_python_with_spaces_is_quoted_stored_and_isolated(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            reviewed_python = root / "reviewed runtime" / "python tool"
+            reviewed_python.parent.mkdir()
+            reviewed_python.write_text("#!/bin/sh\nexit 0\n")
+            reviewed_python.chmod(0o755)
+            environment["PYTHONPATH"] = str(root / "hostile modules")
+            environment["PYTHONHOME"] = str(root / "hostile home")
+
+            installed = install_integration(
+                launcher=launcher,
+                python_executable=reviewed_python,
+                environment=environment,
+            )
+            target = Path(environment["CODEX_HOME"]) / "hooks.json"
+            command = json.loads(target.read_text())["hooks"][
+                "UserPromptSubmit"
+            ][0]["hooks"][0]["command"]
+            manifest = json.loads(
+                (Path(installed["state_directory"]) / "manifest.json").read_text()
+            )
+
+            self.assertEqual(
+                shlex.split(command)[:4],
+                [str(reviewed_python), "-I", "-m", "aiq"],
+            )
+            self.assertEqual(
+                manifest["python_executable"],
+                str(reviewed_python),
+            )
+            self.assertNotIn(environment["PYTHONPATH"], command)
+            self.assertNotIn(environment["PYTHONHOME"], command)
 
     def test_plan_and_install_merge_without_replacing_unrelated_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -201,6 +391,46 @@ class CodexIntegrationTest(unittest.TestCase):
             uninstall_integration(environment=environment)
             self.assertFalse(target.exists())
 
+    def test_git_executable_change_is_drift_until_explicit_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            first_git = root / "first" / "git"
+            second_git = root / "second" / "git"
+            for executable in (first_git, second_git):
+                executable.parent.mkdir()
+                executable.write_text("#!/bin/sh\nexit 0\n")
+                executable.chmod(0o755)
+            install_integration(
+                launcher=launcher,
+                git_executable=first_git,
+                environment=environment,
+            )
+
+            checked = check_integration(
+                launcher=launcher,
+                git_executable=second_git,
+                environment=environment,
+            )
+            repaired = install_integration(
+                launcher=launcher,
+                git_executable=second_git,
+                environment=environment,
+                repair=True,
+            )
+            target = Path(environment["CODEX_HOME"]) / "hooks.json"
+            command = json.loads(target.read_text())["hooks"][
+                "UserPromptSubmit"
+            ][0]["hooks"][0]["command"]
+
+            self.assertEqual(checked["status"], "drifted")
+            self.assertFalse(checked["ok"])
+            self.assertEqual(repaired["status"], "installed")
+            self.assertIn(
+                f"--git-executable {shlex.quote(str(second_git))}",
+                command,
+            )
+
     def test_uninstall_preserves_later_unrelated_changes_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -257,6 +487,50 @@ class CodexIntegrationTest(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
 
             with self.assertRaisesRegex(CodexIntegrationError, "ownership"):
+                uninstall_integration(environment=environment)
+
+            self.assertTrue(target.exists())
+
+    def test_manifest_requires_valid_absolute_git_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            installed = install_integration(
+                launcher=launcher,
+                environment=environment,
+            )
+            target = Path(environment["CODEX_HOME"]) / "hooks.json"
+            manifest_path = Path(installed["state_directory"]) / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["git_executable"] = "git"
+            manifest_path.write_text(json.dumps(manifest))
+
+            with self.assertRaisesRegex(
+                CodexIntegrationError,
+                "Git executable is invalid",
+            ):
+                uninstall_integration(environment=environment)
+
+            self.assertTrue(target.exists())
+
+    def test_manifest_requires_valid_absolute_python_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            installed = install_integration(
+                launcher=launcher,
+                environment=environment,
+            )
+            target = Path(environment["CODEX_HOME"]) / "hooks.json"
+            manifest_path = Path(installed["state_directory"]) / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["python_executable"] = "python"
+            manifest_path.write_text(json.dumps(manifest))
+
+            with self.assertRaisesRegex(
+                CodexIntegrationError,
+                "Python executable is invalid",
+            ):
                 uninstall_integration(environment=environment)
 
             self.assertTrue(target.exists())
@@ -334,8 +608,14 @@ class CodexIntegrationTest(unittest.TestCase):
                 }
             )
 
-            first = receive_hook(payload)
-            second = receive_hook(payload)
+            first = receive_hook(
+                payload,
+                git_executable=self.git_executable(),
+            )
+            second = receive_hook(
+                payload,
+                git_executable=self.git_executable(),
+            )
             scope = resolve_scope("repo", cwd=repository)
             checked = check_journal(scope)
 
@@ -376,14 +656,71 @@ class CodexIntegrationTest(unittest.TestCase):
             success = receive_hook_main(
                 input_stream=io.BytesIO(payload),
                 error_stream=errors,
+                git_executable=self.git_executable(),
             )
             failure = receive_hook_main(
                 input_stream=io.BytesIO(b"{}"),
                 error_stream=errors,
+                git_executable=self.git_executable(),
             )
 
             self.assertEqual(success, 0)
             self.assertEqual(failure, 2)
             self.assertIn("capture failed", errors.getvalue())
+
+    def test_receive_hook_uses_reviewed_git_with_hostile_empty_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            repository.mkdir()
+            git_executable = self.git_executable()
+            subprocess.run(
+                [
+                    str(git_executable),
+                    "-C",
+                    str(repository),
+                    "init",
+                    "-q",
+                    "-b",
+                    "main",
+                ],
+                check=True,
+            )
+            hostile_directory = root / "hostile"
+            hostile_directory.mkdir()
+            hostile_git = hostile_directory / "git"
+            hostile_git.write_text("#!/bin/sh\nexit 97\n")
+            hostile_git.chmod(0o755)
+            payload = json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "turn_id": "turn",
+                    "cwd": str(repository),
+                    "prompt": "capture without hook PATH",
+                }
+            ).encode()
+            errors = io.StringIO()
+
+            for hook_path in ("", str(hostile_directory)):
+                with self.subTest(hook_path=hook_path):
+                    with patch.dict(
+                        os.environ,
+                        {"PATH": hook_path},
+                        clear=True,
+                    ):
+                        status = receive_hook_main(
+                            input_stream=io.BytesIO(payload),
+                            error_stream=errors,
+                            git_executable=git_executable,
+                        )
+                    self.assertEqual(status, 0, errors.getvalue())
+
+            scope = resolve_scope(
+                "repo",
+                cwd=repository,
+                git_executable=git_executable,
+            )
+            self.assertTrue(scope.journal_path.is_file())
 if __name__ == "__main__":
     unittest.main()

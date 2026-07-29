@@ -9,7 +9,8 @@ import sys
 import tempfile
 import unittest
 
-from aiq.cli import build_parser
+from aiq.cli import _classify_error, build_parser
+from aiq.integrations.codex import CodexIntegrationError
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -107,11 +108,12 @@ class CliProtocolTests(unittest.TestCase):
         self,
         *arguments: str,
         input_text: str | None = None,
+        environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", "aiq", *arguments],
             cwd=self.repository,
-            env=self.environment,
+            env=self.environment if environment is None else environment,
             input=input_text,
             text=True,
             check=False,
@@ -315,6 +317,108 @@ class CliProtocolTests(unittest.TestCase):
             6,
             "unsupported_environment",
         )
+        self.assert_error(
+            self.run_aiq(
+                "integration", "plan", "codex", "--user",
+                "--launcher", "relative-aiq", "--json",
+            ),
+            2,
+            "invalid_argument",
+        )
+        self.assert_error(
+            self.run_aiq(
+                "integration", "plan", "codex", "--user", "--json",
+                environment={**self.environment, "PATH": ""},
+            ),
+            6,
+            "unsupported_environment",
+        )
+        self.assert_error(
+            self.run_aiq(
+                "integration", "plan", "codex", "--user",
+                "--launcher", str(self.launcher),
+                "--git-executable", "relative-git", "--json",
+            ),
+            2,
+            "invalid_argument",
+        )
+        self.assert_error(
+            self.run_aiq(
+                "integration", "plan", "codex", "--user",
+                "--launcher", str(self.launcher),
+                "--git-executable", str(self.root / "missing-git"), "--json",
+            ),
+            6,
+            "unsupported_environment",
+        )
+        self.assert_error(
+            self.run_aiq(
+                "integration", "plan", "codex", "--user",
+                "--launcher", str(self.launcher), "--json",
+                environment={**self.environment, "PATH": ""},
+            ),
+            6,
+            "unsupported_environment",
+        )
+
+    def test_python_runtime_errors_are_environment_errors(self) -> None:
+        self.assertEqual(
+            _classify_error(
+                CodexIntegrationError("Python executable is unavailable")
+            ),
+            ("unsupported_environment", 6),
+        )
+
+    def test_git_discovery_failures_are_environment_errors(self) -> None:
+        fake_bin = self.root / "failing-git"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'fatal: detected dubious ownership' >&2\n"
+            "exit 128\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o700)
+        environment = {
+            **self.environment,
+            "PATH": str(fake_bin),
+        }
+
+        self.assert_error(
+            self.run_aiq(
+                "journal", "path",
+                "--scope", "repo", "--cwd", str(self.repository), "--json",
+                environment=environment,
+            ),
+            6,
+            "unsupported_environment",
+        )
+
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'fatal: not a git repository' >&2\n"
+            "exit 128\n",
+            encoding="utf-8",
+        )
+        outside = self.root / "outside"
+        outside.mkdir()
+        self.assert_error(
+            self.run_aiq(
+                "journal", "path",
+                "--scope", "repo", "--cwd", str(outside), "--json",
+                environment=environment,
+            ),
+            6,
+            "unsupported_environment",
+        )
+        fallback = self.run_aiq(
+            "journal", "path",
+            "--scope", "auto", "--cwd", str(outside), "--json",
+            environment=environment,
+        )
+        self.assertEqual(fallback.returncode, 0, fallback.stderr)
+        self.assertEqual(json.loads(fallback.stdout)["scope"]["kind"], "user")
 
     def test_human_error_is_terminal_safe(self) -> None:
         event = {

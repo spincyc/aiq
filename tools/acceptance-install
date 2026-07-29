@@ -13,11 +13,34 @@ stage() {
   printf '==> %s\n' "$1"
 }
 
-for command_name in git pipx python3; do
-  if ! command -v "$command_name" >/dev/null 2>&1; then
+for command_name in git pipx python3 sh; do
+  command_path=$(command -v "$command_name" 2>/dev/null || true)
+  if [ -z "$command_path" ] || [ ! -x "$command_path" ]; then
     fail "missing required command: $command_name"
   fi
+  case "$command_path" in
+    /*) ;;
+    *) fail "required command is not an absolute executable: $command_name" ;;
+  esac
+  case "$command_name" in
+    git) git_command=$command_path ;;
+    pipx) pipx_command=$command_path ;;
+    python3) python_command=$command_path ;;
+    sh) sh_command=$command_path ;;
+  esac
 done
+
+unset CODEX_HOME PYTHONHOME PYTHONPATH
+export PYTHONNOUSERSITE=1
+
+"$python_command" -I - <<'PY'
+import sys
+
+if not ((3, 11) <= sys.version_info[:2] < (3, 15)):
+    raise SystemExit(
+        f"Python 3.11-3.14 is required; found {sys.version.split()[0]}"
+    )
+PY
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/aiq-acceptance.XXXXXX")
 case "$test_root" in
@@ -37,11 +60,13 @@ state_home=$test_root/xdg/state
 data_home=$test_root/xdg/data
 cache_home=$test_root/xdg/cache
 pipx_home=$test_root/pipx
-pipx_bin_dir=$test_root/bin
+pipx_bin_dir=$test_root/"launcher path with spaces"
 source_checkout=$test_root/source/aiq
 source_offline=$test_root/source/aiq.offline
 work_repo=$home_dir/work/unrelated
 results_dir=$test_root/results
+poison_python_home=$test_root/"poison python home"
+poison_python_path=$test_root/"poison python path"
 
 mkdir -p \
   "$home_dir" \
@@ -51,7 +76,9 @@ mkdir -p \
   "$cache_home" \
   "$pipx_home" \
   "$pipx_bin_dir" \
-  "$results_dir"
+  "$results_dir" \
+  "$poison_python_home" \
+  "$poison_python_path/aiq"
 chmod 0700 \
   "$home_dir" \
   "$config_home" \
@@ -60,22 +87,76 @@ chmod 0700 \
   "$cache_home" \
   "$pipx_home" \
   "$pipx_bin_dir" \
-  "$results_dir"
+  "$results_dir" \
+  "$poison_python_home" \
+  "$poison_python_path" \
+  "$poison_python_path/aiq"
+
+cat >"$poison_python_home/README" <<'EOF'
+This directory must be ignored by the isolated installed interpreter.
+EOF
+cat >"$poison_python_path/aiq/__init__.py" <<'EOF'
+raise RuntimeError("poison PYTHONPATH imported")
+EOF
+cat >"$poison_python_path/aiq/__main__.py" <<'EOF'
+raise RuntimeError("poison PYTHONPATH executed")
+EOF
 
 export HOME=$home_dir
 export XDG_CONFIG_HOME=$config_home
 export XDG_STATE_HOME=$state_home
 export XDG_DATA_HOME=$data_home
 export XDG_CACHE_HOME=$cache_home
+
+environment_names=$(
+  "$python_command" -I - <<'PY'
+import os
+
+for name in sorted(os.environ):
+    if name.startswith(("AIQ_", "GIT_", "PIPX_")):
+        print(name)
+PY
+)
+for environment_name in $environment_names; do
+  unset "$environment_name"
+done
+
+export CODEX_HOME=$home_dir/.codex
 export PIPX_HOME=$pipx_home
 export PIPX_BIN_DIR=$pipx_bin_dir
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 export PYTHONNOUSERSITE=1
-export PATH=$pipx_bin_dir:$PATH
+
+minimal_path=
+for command_path in \
+  "$git_command" \
+  "$python_command" \
+  "$sh_command" \
+  /usr/bin/git \
+  /bin/sh; do
+  command_directory=$(dirname "$command_path")
+  case ":$minimal_path:" in
+    *":$command_directory:"*) ;;
+    *)
+      minimal_path=$minimal_path${minimal_path:+:}$command_directory
+      ;;
+  esac
+done
+export PATH=$minimal_path
+
+case "$pipx_bin_dir" in
+  *" "*) ;;
+  *) fail "PIPX_BIN_DIR must contain a space for portability acceptance" ;;
+esac
+case ":$PATH:" in
+  *":$pipx_bin_dir:"*)
+    fail "PIPX_BIN_DIR must not be present on PATH during acceptance"
+    ;;
+esac
 
 assert_json_object() {
-  python3 - "$1" <<'PY'
+  "$python_command" - "$1" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -91,7 +172,7 @@ PY
 }
 
 tree_manifest() {
-  python3 - "$@" <<'PY'
+  "$python_command" - "$@" <<'PY'
 import hashlib
 import json
 import os
@@ -126,31 +207,63 @@ PY
 }
 
 stage "clone source"
-git clone --quiet -- "$source_location" "$source_checkout" ||
+"$git_command" clone --quiet -- "$source_location" "$source_checkout" ||
   fail "could not clone AIQ source from $source_location"
 for required_path in AGENTS.md LICENSE pyproject.toml src tests tools; do
   if [ ! -e "$source_checkout/$required_path" ]; then
     fail "cloned source is missing $required_path"
   fi
 done
-if [ -n "$(git -C "$source_checkout" status --porcelain)" ]; then
+if [ -n "$("$git_command" -C "$source_checkout" status --porcelain)" ]; then
   fail "fresh source clone is not clean"
 fi
 cp "$source_checkout/AGENTS.md" "$results_dir/canonical-AGENTS.md"
 
 stage "install source with pipx"
+source_revision=$(
+  "$git_command" -C "$source_checkout" rev-parse --verify HEAD
+)
 (
   cd "$source_checkout"
-  pipx install .
+  "$pipx_command" install --python "$python_command" \
+    "aiq-workqueue @ git+file://$source_checkout@$source_revision"
 )
 aiq_bin=$pipx_bin_dir/aiq
 if [ ! -x "$aiq_bin" ]; then
   fail "pipx did not install the aiq entry point"
 fi
+installed_python=$(
+  "$python_command" -I - "$aiq_bin" <<'PY'
+import os
+from pathlib import Path
+import shlex
+import sys
+
+launcher = Path(sys.argv[1]).resolve()
+with launcher.open("rb") as input_file:
+    shebang = input_file.readline().rstrip(b"\r\n")
+if not shebang.startswith(b"#!"):
+    raise SystemExit(f"installed launcher has no interpreter shebang: {launcher}")
+try:
+    shebang_arguments = shlex.split(os.fsdecode(shebang[2:]))
+except UnicodeDecodeError as error:
+    raise SystemExit("installed launcher shebang is not decodable") from error
+if not shebang_arguments:
+    raise SystemExit(f"installed launcher has an empty interpreter shebang: {launcher}")
+interpreter = Path(shebang_arguments[0])
+if not interpreter.is_absolute() or not interpreter.is_file():
+    raise SystemExit(
+        f"installed launcher interpreter is not an absolute file: {interpreter}"
+    )
+if not os.access(interpreter, os.X_OK):
+    raise SystemExit(f"installed launcher interpreter is not executable: {interpreter}")
+print(interpreter)
+PY
+)
 "$aiq_bin" --version >"$results_dir/version.txt"
 "$aiq_bin" capability list --json >"$results_dir/capabilities.json"
 assert_json_object "$results_dir/capabilities.json"
-if [ -n "$(git -C "$source_checkout" status --porcelain)" ]; then
+if [ -n "$("$git_command" -C "$source_checkout" status --porcelain)" ]; then
   fail "pipx installation changed the source checkout"
 fi
 
@@ -183,7 +296,7 @@ fi
 
 stage "prepare unrelated user environment"
 mkdir -p "$work_repo" "$home_dir/.codex"
-git -C "$work_repo" init --quiet -b main
+"$git_command" -C "$work_repo" init --quiet -b main
 cat >"$home_dir/.codex/hooks.json" <<'EOF'
 {
   "description": "user-owned acceptance configuration",
@@ -215,7 +328,10 @@ tree_manifest \
   >"$results_dir/before-plan.json"
 
 stage "plan Codex integration without mutation"
-"$aiq_bin" integration plan codex --user --json \
+"$aiq_bin" integration plan codex --user \
+  --launcher "$aiq_bin" \
+  --git-executable "$git_command" \
+  --json \
   >"$results_dir/integration-plan.json"
 assert_json_object "$results_dir/integration-plan.json"
 tree_manifest \
@@ -227,10 +343,13 @@ if ! cmp -s "$results_dir/before-plan.json" "$results_dir/after-plan.json"; then
 fi
 
 stage "install and check Codex integration"
-"$aiq_bin" integration install codex --user --json \
+"$aiq_bin" integration install codex --user \
+  --launcher "$aiq_bin" \
+  --git-executable "$git_command" \
+  --json \
   >"$results_dir/integration-install.json"
 assert_json_object "$results_dir/integration-install.json"
-python3 - "$home_dir/.codex/hooks.json" "$home_dir/.codex/AGENTS.md" \
+"$python_command" - "$home_dir/.codex/hooks.json" "$home_dir/.codex/AGENTS.md" \
   "$results_dir/original-user-AGENTS.md" <<'PY'
 import json
 from pathlib import Path
@@ -258,7 +377,7 @@ if guidance_path.read_bytes() != original_guidance_path.read_bytes():
 PY
 
 integration_state=$state_home/aiq/integrations
-python3 - "$integration_state" <<'PY'
+"$python_command" - "$integration_state" <<'PY'
 from pathlib import Path
 import stat
 import sys
@@ -277,7 +396,10 @@ tree_manifest \
   "$home_dir/.codex" \
   "$integration_state" \
   >"$results_dir/after-first-install.json"
-"$aiq_bin" integration install codex --user --json \
+"$aiq_bin" integration install codex --user \
+  --launcher "$aiq_bin" \
+  --git-executable "$git_command" \
+  --json \
   >"$results_dir/integration-reinstall.json"
 assert_json_object "$results_dir/integration-reinstall.json"
 tree_manifest \
@@ -289,31 +411,67 @@ if ! cmp -s \
   "$results_dir/after-second-install.json"; then
   fail "repeated integration install changed managed state"
 fi
-"$aiq_bin" integration check codex --user --json \
+"$aiq_bin" integration check codex --user \
+  --launcher "$aiq_bin" \
+  --git-executable "$git_command" \
+  --json \
   >"$results_dir/integration-check.json"
 assert_json_object "$results_dir/integration-check.json"
 
 stage "execute installed Codex prompt hook"
-python3 - \
+"$python_command" - \
   "$home_dir/.codex/hooks.json" \
   "$work_repo" \
-  "$results_dir/hook-output.txt" <<'PY'
+  "$results_dir/hook-output.txt" \
+  "$installed_python" \
+  "$git_command" \
+  "$sh_command" \
+  "$poison_python_home" \
+  "$poison_python_path" <<'PY'
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
 configuration = json.loads(Path(sys.argv[1]).read_text())
-commands = []
+commands: list[tuple[str, list[str]]] = []
 for group in configuration.get("hooks", {}).get("UserPromptSubmit", []):
     for hook in group.get("hooks", []):
         command = hook.get("command")
         if hook.get("type") == "command" and isinstance(command, str):
-            if "aiq" in command:
-                commands.append(command)
+            arguments = shlex.split(command)
+            if "--integration-id" in arguments:
+                commands.append((command, arguments))
 if len(commands) != 1:
     raise SystemExit(f"expected one installed AIQ prompt hook; found {len(commands)}")
+command, arguments = commands[0]
+python_executable = Path(sys.argv[4])
+if not python_executable.is_absolute() or not os.access(python_executable, os.X_OK):
+    raise SystemExit(
+        f"expected an absolute installed Python executable: {python_executable}"
+    )
+git_executable = Path(sys.argv[5])
+if not git_executable.is_absolute():
+    raise SystemExit(f"expected an absolute Git executable: {git_executable}")
+expected_arguments = [
+    str(python_executable),
+    "-I",
+    "-m",
+    "aiq",
+    "integration",
+    "receive",
+    "codex",
+    "--integration-id",
+    "aiq-workqueue.codex.user-prompt.v1",
+    "--git-executable",
+    str(git_executable),
+]
+if arguments != expected_arguments:
+    raise SystemExit(
+        f"installed hook argv differs from the absolute launcher contract: {arguments!r}"
+    )
 
 event = {
     "hook_event_name": "UserPromptSubmit",
@@ -322,16 +480,29 @@ event = {
     "cwd": sys.argv[2],
     "prompt": "Create the acceptance task",
 }
+environment = {
+    "CODEX_HOME": os.environ["CODEX_HOME"],
+    "GIT_CONFIG_GLOBAL": os.environ["GIT_CONFIG_GLOBAL"],
+    "GIT_CONFIG_NOSYSTEM": os.environ["GIT_CONFIG_NOSYSTEM"],
+    "HOME": os.environ["HOME"],
+    "PATH": "",
+    "PYTHONHOME": sys.argv[7],
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONPATH": sys.argv[8],
+    "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"],
+    "XDG_DATA_HOME": os.environ["XDG_DATA_HOME"],
+    "XDG_STATE_HOME": os.environ["XDG_STATE_HOME"],
+}
 result = subprocess.run(
-    commands[0],
+    command,
     cwd=sys.argv[2],
-    env=os.environ.copy(),
+    env=environment,
     input=json.dumps(event),
     text=True,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
     shell=True,
-    executable="/bin/sh",
+    executable=sys.argv[6],
 )
 Path(sys.argv[3]).write_text(result.stdout)
 if result.returncode:
@@ -347,7 +518,8 @@ stage "verify repository-local journal scope"
   cd "$work_repo"
   "$aiq_bin" journal path --json >"$results_dir/journal-path.json"
 )
-python3 - "$results_dir/journal-path.json" "$work_repo" "$source_offline" <<'PY'
+"$python_command" - \
+  "$results_dir/journal-path.json" "$work_repo" "$source_offline" <<'PY'
 import json
 from pathlib import Path
 import subprocess
@@ -383,7 +555,7 @@ stage "exercise message and queue lifecycle"
   "$aiq_bin" inbox list --include-content --json \
     >"$results_dir/inbox-received.json"
 )
-message_id=$(python3 - "$results_dir/inbox-received.json" <<'PY'
+message_id=$("$python_command" - "$results_dir/inbox-received.json" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -402,7 +574,7 @@ PY
   "$aiq_bin" inbox claim "$message_id" --owner acceptance --json \
     >"$results_dir/message-claim.json"
 )
-message_claim=$(python3 - "$results_dir/message-claim.json" <<'PY'
+message_claim=$("$python_command" - "$results_dir/message-claim.json" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -420,7 +592,7 @@ EOF
     --effects "$results_dir/create-effects.json" \
     --json >"$results_dir/create-result.json"
 )
-task_id=$(python3 - "$results_dir/create-result.json" <<'PY'
+task_id=$("$python_command" - "$results_dir/create-result.json" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -437,7 +609,7 @@ PY
   "$aiq_bin" queue next --owner acceptance --json \
     >"$results_dir/queue-next.json"
 )
-set -- $(python3 - "$results_dir/queue-peek.json" \
+set -- $("$python_command" - "$results_dir/queue-peek.json" \
   "$results_dir/queue-next.json" "$task_id" <<'PY'
 import json
 from pathlib import Path
@@ -469,7 +641,7 @@ task_revision=$2
     --idempotency-key acceptance:completion \
     --json >"$results_dir/completion-replay.json"
 )
-completion_message=$(python3 - \
+completion_message=$("$python_command" - \
   "$results_dir/completion-ingest.json" \
   "$results_dir/completion-replay.json" <<'PY'
 import json
@@ -501,7 +673,7 @@ fi
   "$aiq_bin" inbox claim "$completion_message" --owner acceptance --json \
     >"$results_dir/completion-claim.json"
 )
-completion_claim=$(python3 - "$results_dir/completion-claim.json" <<'PY'
+completion_claim=$("$python_command" - "$results_dir/completion-claim.json" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -509,7 +681,7 @@ import sys
 print(json.loads(Path(sys.argv[1]).read_text())["claim"]["claim_id"])
 PY
 )
-python3 - \
+"$python_command" - \
   "$results_dir/complete-effects.json" \
   "$task_id" \
   "$task_revision" \
@@ -550,7 +722,7 @@ PY
   "$aiq_bin" task show "$task_id" --json >"$results_dir/task-done.json"
   "$aiq_bin" journal check --json >"$results_dir/journal-check.json"
 )
-python3 - \
+"$python_command" - \
   "$results_dir/complete-result.json" \
   "$results_dir/complete-replay.json" \
   "$results_dir/inbox-final.json" \
@@ -580,7 +752,7 @@ if check.get("status") != "ok" or check.get("messages") != 2:
     raise SystemExit("journal integrity check did not pass")
 PY
 
-python3 - "$results_dir/journal-path.json" <<'PY'
+"$python_command" - "$results_dir/journal-path.json" <<'PY'
 import json
 from pathlib import Path
 import stat
@@ -596,7 +768,7 @@ if directory_mode != 0o700:
 if journal_mode != 0o600:
     raise SystemExit(f"journal mode is {journal_mode:04o}, expected 0600")
 PY
-if [ -n "$(git -C "$work_repo" status --porcelain)" ]; then
+if [ -n "$("$git_command" -C "$work_repo" status --porcelain)" ]; then
   fail "AIQ runtime state changed the unrelated repository worktree"
 fi
 
@@ -625,12 +797,12 @@ assert_json_object "$results_dir/integration-reuninstall.json"
 assert_json_object "$results_dir/journal-after-uninstall.json"
 
 stage "uninstall package and verify source remains clean"
-pipx uninstall aiq-workqueue
+"$pipx_command" uninstall aiq-workqueue
 if [ -e "$aiq_bin" ]; then
   fail "pipx uninstall left the aiq entry point installed"
 fi
 mv "$source_offline" "$source_checkout"
-if [ -n "$(git -C "$source_checkout" status --porcelain)" ]; then
+if [ -n "$("$git_command" -C "$source_checkout" status --porcelain)" ]; then
   fail "acceptance run changed the cloned source"
 fi
 

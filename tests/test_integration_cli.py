@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,6 +42,10 @@ class IntegrationCliTests(unittest.TestCase):
         self.launcher = self.bin_directory / "aiq"
         self.launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.launcher.chmod(0o755)
+        discovered_git = shutil.which("git")
+        if discovered_git is None:
+            self.fail("test requires Git")
+        self.git_executable = Path(discovered_git).absolute()
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -101,6 +107,21 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertEqual(payload["v"], 1)
         return payload
 
+    def run_console(
+        self,
+        launcher: Path,
+        *arguments: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(launcher), *arguments],
+            cwd=self.repository,
+            env=self.environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
     def lifecycle_command(
         self,
         operation: str,
@@ -146,7 +167,10 @@ class IntegrationCliTests(unittest.TestCase):
         command = fragment["hooks"]["UserPromptSubmit"][0]["hooks"][0][
             "command"
         ]
-        self.assertTrue(command.startswith(str(self.launcher)))
+        self.assertEqual(
+            shlex.split(command)[:4],
+            [sys.executable, "-I", "-m", "aiq"],
+        )
         self.assertIn(" integration receive codex ", command)
         self.assertFalse(self.codex_home.exists())
         self.assertFalse((self.state_home / "aiq").exists())
@@ -230,6 +254,196 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertEqual(second_uninstall["status"], "uninstalled")
         self.assertEqual(target.read_bytes(), uninstalled_bytes)
 
+    def test_lifecycle_prefers_the_invoked_console_outside_path(self) -> None:
+        environment_directory = self.root / "venv"
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "venv",
+                "--without-pip",
+                str(environment_directory),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        python_executable = environment_directory / "bin" / "python"
+        site_packages = Path(
+            subprocess.run(
+                [
+                    str(python_executable),
+                    "-c",
+                    "import site; print(site.getsitepackages()[0])",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+        )
+        (site_packages / "aiq-source.pth").write_text(
+            f"{SOURCE_ROOT}\n",
+            encoding="utf-8",
+        )
+        console_directory = self.root / "installed console"
+        console_directory.mkdir()
+        console = console_directory / "aiq"
+        console.write_text(
+            f"#!{python_executable}\n"
+            "from aiq.cli import main\n"
+            "raise SystemExit(main())\n",
+            encoding="utf-8",
+        )
+        console.chmod(0o755)
+
+        plan = self.assert_json_success(
+            self.run_console(
+                console,
+                "integration",
+                "plan",
+                "codex",
+                "--user",
+                "--git-executable",
+                str(self.git_executable),
+                "--json",
+            )
+        )
+        planned_command = plan["desired_group"]["hooks"][0]["command"]
+        planned_argv = shlex.split(planned_command)
+        self.assertEqual(
+            planned_argv[:4],
+            [str(python_executable), "-I", "-m", "aiq"],
+        )
+        self.assertEqual(
+            planned_argv[planned_argv.index("--git-executable") + 1],
+            str(self.git_executable),
+        )
+
+        printed = self.run_console(
+            console,
+            "integration",
+            "print",
+            "codex",
+            "--user",
+            "--git-executable",
+            str(self.git_executable),
+        )
+        self.assertEqual(printed.returncode, 0, printed.stderr)
+        print_command = json.loads(printed.stdout)["hooks"][
+            "UserPromptSubmit"
+        ][0]["hooks"][0]["command"]
+        self.assertEqual(
+            shlex.split(print_command)[:4],
+            [str(python_executable), "-I", "-m", "aiq"],
+        )
+
+        installed = self.assert_json_success(
+            self.run_console(
+                console,
+                "integration",
+                "install",
+                "codex",
+                "--user",
+                "--git-executable",
+                str(self.git_executable),
+                "--json",
+            )
+        )
+        self.assertEqual(installed["status"], "installed")
+        configured = json.loads(
+            (self.codex_home / "hooks.json").read_text(encoding="utf-8")
+        )
+        installed_command = configured["hooks"]["UserPromptSubmit"][0][
+            "hooks"
+        ][0]["command"]
+        installed_argv = shlex.split(installed_command)
+        self.assertEqual(
+            installed_argv[:4],
+            [str(python_executable), "-I", "-m", "aiq"],
+        )
+        self.assertEqual(
+            installed_argv[installed_argv.index("--git-executable") + 1],
+            str(self.git_executable),
+        )
+        manifest = json.loads(
+            (
+                Path(installed["state_directory"]) / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["launcher"], str(console))
+        self.assertEqual(
+            manifest["python_executable"],
+            str(python_executable),
+        )
+
+        hostile_bin = self.root / "hostile-bin"
+        hostile_bin.mkdir()
+        hostile_sentinel = self.root / "hostile-git-ran"
+        hostile_python_sentinel = self.root / "hostile-python-ran"
+        hostile_python = self.root / "hostile-python"
+        hostile_python.mkdir()
+        (hostile_python / "aiq.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(hostile_python_sentinel)!r}).write_text('hostile')\n",
+            encoding="utf-8",
+        )
+        hostile_git = hostile_bin / "git"
+        hostile_git.write_text(
+            "#!/bin/sh\n"
+            f"printf hostile > {shlex.quote(str(hostile_sentinel))}\n"
+            "exit 99\n",
+            encoding="utf-8",
+        )
+        hostile_git.chmod(0o700)
+        for index, search_path in enumerate(("", str(hostile_bin))):
+            payload = json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": f"portable-session-{index}",
+                    "turn_id": f"portable-turn-{index}",
+                    "cwd": str(self.repository),
+                    "prompt": f"portable capture {index}",
+                }
+            )
+            received = subprocess.run(
+                installed_command,
+                cwd=self.repository,
+                env={
+                    **self.environment(),
+                    "PATH": search_path,
+                    "PYTHONHOME": str(self.root / "hostile-home"),
+                    "PYTHONPATH": str(hostile_python),
+                },
+                input=payload,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=True,
+                executable="/bin/sh",
+                check=False,
+            )
+            self.assertEqual(received.returncode, 0, received.stderr)
+            self.assertEqual(received.stdout, "")
+            self.assertEqual(received.stderr, "")
+        self.assertFalse(hostile_sentinel.exists())
+        self.assertFalse(hostile_python_sentinel.exists())
+
+        checked = self.assert_json_success(
+            self.run_console(
+                console,
+                "integration",
+                "check",
+                "codex",
+                "--user",
+                "--git-executable",
+                str(self.git_executable),
+                "--json",
+            )
+        )
+        self.assertTrue(checked["ok"])
+
     def test_receive_is_silent_on_success_and_visible_on_error(self) -> None:
         payload = json.dumps(
             {
@@ -246,6 +460,8 @@ class IntegrationCliTests(unittest.TestCase):
             "codex",
             "--integration-id",
             "aiq-workqueue.codex.user-prompt.v1",
+            "--git-executable",
+            str(self.git_executable),
             input_text=payload,
         )
         self.assertEqual(received.returncode, 0, received.stderr)
@@ -274,6 +490,8 @@ class IntegrationCliTests(unittest.TestCase):
             "codex",
             "--integration-id",
             "aiq-workqueue.codex.user-prompt.v1",
+            "--git-executable",
+            str(self.git_executable),
             input_text="{",
         )
         self.assertEqual(rejected.returncode, 2)

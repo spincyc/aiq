@@ -47,6 +47,13 @@ INTERNAL_COMMAND_PATHS = {
     ("integration", "receive"),
 }
 
+GIT_EXECUTABLE_CAPABILITIES = {
+    "integration.check",
+    "integration.install",
+    "integration.plan",
+    "integration.print",
+}
+
 
 def parser_command_paths() -> set[tuple[str, ...]]:
     paths: set[tuple[str, ...]] = set()
@@ -96,6 +103,10 @@ class CapabilityContractTests(unittest.TestCase):
             self.assertTrue(descriptor["command"].startswith("aiq " + " ".join(path)))
             self.assertIsInstance(descriptor["mutates"], bool)
             self.assertTrue(descriptor["idempotency"])
+
+            if capability_id in GIT_EXECUTABLE_CAPABILITIES:
+                self.assertEqual(descriptor["version"], 2)
+                self.assertIn("[--git-executable PATH]", descriptor["command"])
 
     def test_show_returns_an_isolated_descriptor(self) -> None:
         shown = show_capability("inbox.apply")

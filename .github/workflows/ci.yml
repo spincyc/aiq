@@ -103,6 +103,7 @@ jobs:
         run: |
           echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
           /home/linuxbrew/.linuxbrew/bin/brew install gitleaks
+          python -m pip install pipx
 
       - name: Verify and build distributions
         if: ${{ matrix.policy }}
@@ -110,3 +111,7 @@ jobs:
           make public-audit
           make verify
           make build
+
+      - name: Test source installation
+        if: ${{ matrix.policy }}
+        run: ./tools/acceptance-install
