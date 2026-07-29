@@ -7,24 +7,46 @@ receives it.
 |---|---|
 | Event ingestion | Installed hook calls AIQ's Codex adapter |
 | Hook configuration | `$CODEX_HOME/hooks.json`, or `~/.codex/hooks.json` |
+| Hook runtime | Recorded absolute Python and Git executables |
+| Python isolation | `-I -m aiq` from the invoked AIQ installation |
+| Ambient environment | Works with empty or hostile `PATH`; ignores Python environment overrides |
 | Lifecycle | `plan`, `install`, `check`, `uninstall`, and `print` |
 | Whole-file replacement | Prohibited |
 | Network or telemetry | None |
 
 ## Install
 
-Preview first, then install:
+The integration resolves a durable runtime:
+
+| Setup input | Value |
+|---|---|
+| AIQ command from `pipx` | `$(pipx environment --value PIPX_BIN_DIR)/aiq` |
+| AIQ command from a standard venv | `/absolute/path/to/venv/bin/aiq` |
+| Python runtime | Captured automatically from the invoked AIQ installation |
+| Git executable | Absolute result of `command -v git` |
+
+Resolve both executables, preview, then install:
 
 ```sh
-aiq integration plan codex --user
-aiq integration install codex --user
-aiq integration check codex --user
+aiq_launcher="$(pipx environment --value PIPX_BIN_DIR)/aiq"
+git_executable="$(command -v git)"
+"$aiq_launcher" integration plan codex --user \
+  --git-executable "$git_executable"
+"$aiq_launcher" integration install codex --user \
+  --git-executable "$git_executable"
+"$aiq_launcher" integration check codex --user \
+  --git-executable "$git_executable"
 ```
 
 `plan` is read-only. Install minimally appends one owned
 `UserPromptSubmit` group, preserves unrelated hooks and top-level fields, and
 records a private manifest and backups below
 `$XDG_STATE_HOME/aiq/integrations/codex/`.
+
+AIQ records the launcher identity, its Python runtime, and Git. The hook invokes
+the recorded Python as `-I -m aiq` and passes the recorded Git path. It needs no
+shell startup file and cannot be redirected through `PATH`, `PYTHONPATH`, or
+`PYTHONHOME`.
 
 Run `/hooks` in Codex and review the installed command before trusting it.
 `check` reports `manual_review_required` because AIQ cannot observe or automate
@@ -33,7 +55,8 @@ that external trust decision.
 ## Externally managed setup
 
 ```sh
-aiq integration print codex --user
+"$aiq_launcher" integration print codex --user \
+  --git-executable "$git_executable"
 ```
 
 `print` emits a stable `hooks.json` fragment and changes no files. Use it when
@@ -65,10 +88,27 @@ TOML hooks, and conflicting entries. A changed owned hook is reported as drift
 instead of being silently replaced. Review and apply an explicit repair only
 after inspecting a new plan.
 
+If the recorded Python or Git executable moves, repair both runtime paths:
+
+```sh
+new_launcher=/absolute/path/to/aiq
+new_git_executable="$(command -v git)"
+"$new_launcher" integration plan codex --user \
+  --git-executable "$new_git_executable" --repair
+"$new_launcher" integration install codex --user \
+  --git-executable "$new_git_executable" --repair
+"$new_launcher" integration check codex --user \
+  --git-executable "$new_git_executable"
+```
+
+Invoking the new AIQ installation selects its Python automatically; the flag
+selects Git. Moving or deleting either recorded runtime before repair
+interrupts capture.
+
 Uninstall:
 
 ```sh
-aiq integration uninstall codex --user
+"$aiq_launcher" integration uninstall codex --user
 ```
 
 It removes only an unchanged, manifest-owned hook. It preserves unrelated later
@@ -83,8 +123,8 @@ indefinitely. See [Privacy](../privacy.md#integration-backups).
 After sending one prompt:
 
 ```sh
-aiq inbox list
-aiq journal check
+"$aiq_launcher" inbox list
+"$aiq_launcher" journal check
 ```
 
 The hook is silent on success, uses source `codex`, routes by the event's

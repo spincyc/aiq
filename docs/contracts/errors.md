@@ -77,8 +77,15 @@ a compatible AIQ version; they must never be silently retried as mutations.
 | `journal export OUTPUT` | Output already exists | `state_conflict` |
 | `journal destroy --confirm` | Missing, wrong, or stale inventory token | `state_conflict` |
 | Codex install/uninstall | Owned configuration or manifest has drifted | `integration_drift` |
+| Codex lifecycle | Explicit `--launcher` is relative | `invalid_argument` |
+| Codex lifecycle | Explicit `--git-executable` is relative or contains control characters | `invalid_argument` |
 | Codex lifecycle | Required launcher or host facility is unavailable | `unsupported_environment` |
+| Codex lifecycle | Required Python runtime is unavailable or not executable | `unsupported_environment` |
+| Codex lifecycle | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
+| Automatic or repo scope | Git is unavailable or repository discovery fails unexpectedly | `unsupported_environment` |
 | Configuration loading | Unknown, forbidden, malformed, or out-of-range setting | `invalid_config` |
 
 Read-only empty results are not failures. `inbox claim` returns null claim and
 message fields, and queue operations return an empty array, both with exit 0.
+Automatic scope falling back after Git confirms a non-repository is also a
+successful resolution, not an error.

@@ -715,10 +715,27 @@ def _integration_list(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _invoked_console_launcher() -> Path | None:
+    invocation = Path(sys.argv[0])
+    if invocation.name != "aiq":
+        return None
+    candidate = Path(os.path.abspath(os.fspath(invocation)))
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return None
+    return candidate
+
+
+def _invoked_python_executable() -> Path:
+    return Path(os.path.abspath(sys.executable))
+
+
 def _integration_plan(arguments: argparse.Namespace) -> int:
     _emit(
         plan_integration(
             launcher=arguments.launcher,
+            invoked_launcher=_invoked_console_launcher(),
+            python_executable=_invoked_python_executable(),
+            git_executable=arguments.git_executable,
             repair=arguments.repair,
         ),
         as_json=arguments.json,
@@ -730,6 +747,9 @@ def _integration_install(arguments: argparse.Namespace) -> int:
     _emit(
         install_integration(
             launcher=arguments.launcher,
+            invoked_launcher=_invoked_console_launcher(),
+            python_executable=_invoked_python_executable(),
+            git_executable=arguments.git_executable,
             repair=arguments.repair,
             plan_token=arguments.plan_token,
         ),
@@ -740,7 +760,12 @@ def _integration_install(arguments: argparse.Namespace) -> int:
 
 def _integration_check(arguments: argparse.Namespace) -> int:
     _emit(
-        check_integration(launcher=arguments.launcher),
+        check_integration(
+            launcher=arguments.launcher,
+            invoked_launcher=_invoked_console_launcher(),
+            python_executable=_invoked_python_executable(),
+            git_executable=arguments.git_executable,
+        ),
         as_json=arguments.json,
     )
     return 0
@@ -767,7 +792,12 @@ def _integration_print(arguments: argparse.Namespace) -> int:
             sys.stdout.write(guidance)
         return 0
 
-    rendered = print_integration(launcher=arguments.launcher)
+    rendered = print_integration(
+        launcher=arguments.launcher,
+        invoked_launcher=_invoked_console_launcher(),
+        python_executable=_invoked_python_executable(),
+        git_executable=arguments.git_executable,
+    )
     if arguments.json:
         _emit(
             {
@@ -782,7 +812,10 @@ def _integration_print(arguments: argparse.Namespace) -> int:
 
 
 def _integration_receive(arguments: argparse.Namespace) -> int:
-    return receive_hook_main(integration_id=arguments.integration_id)
+    return receive_hook_main(
+        integration_id=arguments.integration_id,
+        git_executable=arguments.git_executable,
+    )
 
 
 def _scope_parser(
@@ -943,6 +976,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration_plan.add_argument("integration_id", choices=("codex",))
     _add_user_selector(integration_plan, required=True)
     integration_plan.add_argument("--launcher", type=Path)
+    integration_plan.add_argument("--git-executable", type=Path)
     integration_plan.add_argument("--repair", action="store_true")
     integration_plan.add_argument("--json", action="store_true")
     integration_plan.set_defaults(handler=_integration_plan)
@@ -950,6 +984,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration_install.add_argument("integration_id", choices=("codex",))
     _add_user_selector(integration_install, required=True)
     integration_install.add_argument("--launcher", type=Path)
+    integration_install.add_argument("--git-executable", type=Path)
     integration_install.add_argument("--repair", action="store_true")
     integration_install.add_argument("--plan-token")
     integration_install.add_argument("--json", action="store_true")
@@ -958,6 +993,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration_check.add_argument("integration_id", choices=("codex",))
     _add_user_selector(integration_check, required=True)
     integration_check.add_argument("--launcher", type=Path)
+    integration_check.add_argument("--git-executable", type=Path)
     integration_check.add_argument("--json", action="store_true")
     integration_check.set_defaults(handler=_integration_check)
     integration_uninstall = integration_commands.add_parser("uninstall")
@@ -972,6 +1008,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_user_selector(integration_print)
     integration_print.add_argument("--launcher", type=Path)
+    integration_print.add_argument("--git-executable", type=Path)
     integration_print.add_argument("--json", action="store_true")
     integration_print.set_defaults(handler=_integration_print)
     integration_receive = integration_commands.add_parser("receive")
@@ -979,6 +1016,11 @@ def build_parser() -> argparse.ArgumentParser:
     integration_receive.add_argument(
         "--integration-id",
         default=INTEGRATION_ID,
+    )
+    integration_receive.add_argument(
+        "--git-executable",
+        type=Path,
+        required=True,
     )
     integration_receive.set_defaults(handler=_integration_receive)
 
@@ -1055,6 +1097,9 @@ def _classify_journal_error(error: JournalError) -> tuple[str, int]:
             "sqlite",
             "wal",
             "git is unavailable",
+            "git could not resolve repository scope",
+            "git returned an empty repository path",
+            "not inside a git repository",
             "unsupported journal scope",
         )
     ):
@@ -1069,8 +1114,21 @@ def _classify_error(error: Exception) -> tuple[str, int]:
         return "invalid_document", 2
     if isinstance(error, CodexIntegrationError):
         message = str(error).lower()
+        if "launcher must be an absolute path" in message:
+            return "invalid_argument", 2
+        if (
+            "git executable must be an absolute path" in message
+            or "git executable path contains control characters" in message
+            or "python executable must be an absolute path" in message
+            or "python executable path contains control characters" in message
+        ):
+            return "invalid_argument", 2
+        if "git executable" in message or "python executable" in message:
+            return "unsupported_environment", 6
         if "launcher" in message and (
-            "unavailable" in message or "cannot find" in message
+            "unavailable" in message
+            or "cannot find" in message
+            or "cannot determine" in message
         ):
             return "unsupported_environment", 6
         return "integration_drift", 6

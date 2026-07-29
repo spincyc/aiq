@@ -20,10 +20,17 @@ This document defines AIQ's first public machine-facing CLI protocol.
 - Successful `ingest --quiet` intentionally emits nothing, including in JSON
   output mode; failures remain visible.
 
-Scope-aware commands accept `--scope auto|repo|user` and `--cwd PATH`. `auto`
-selects repository scope inside Git and otherwise user scope. User-scope state
-lives at `$XDG_STATE_HOME/aiq/journal.sqlite3`, with the platform XDG default
-used when the variable is unset.
+Scope-aware commands accept `--scope auto|repo|user` and `--cwd PATH`.
+
+| Scope | Resolution |
+|---|---|
+| `repo` | Require Git to resolve the working directory's common directory |
+| `user` | Use `$XDG_STATE_HOME/aiq/journal.sqlite3`, with the platform XDG default when unset |
+| `auto` | Use repo scope when resolved; use user scope only when Git confirms the directory is not a repository |
+
+`auto` fails closed when Git is unavailable or repository discovery otherwise
+fails. It never treats ownership, permission, execution, or malformed-output
+errors as proof that the directory is outside a repository.
 
 ## Shared objects
 
@@ -202,7 +209,7 @@ Discovery and manual artifact output are read-only:
 ```text
 aiq integration list
 aiq integration print agents
-aiq integration print codex [--launcher PATH]
+aiq integration print codex [--launcher PATH] [--git-executable PATH]
 ```
 
 Without `--json`, `print agents` emits the packaged `AGENTS.md` bytes and
@@ -212,12 +219,51 @@ the command-results table.
 The supported managed lifecycle is explicitly user-scoped:
 
 ```text
-aiq integration plan codex --user [--launcher PATH] [--repair]
-aiq integration install codex --user [--launcher PATH] [--repair]
-                             [--plan-token TOKEN]
+aiq integration plan codex --user [--launcher PATH]
+                           [--git-executable PATH] [--repair]
+aiq integration install codex --user [--launcher PATH]
+                              [--git-executable PATH] [--repair]
+                              [--plan-token TOKEN]
 aiq integration check codex --user [--launcher PATH]
+                            [--git-executable PATH]
 aiq integration uninstall codex --user
 ```
+
+Launcher selection is deterministic:
+
+| Precedence | Candidate |
+|---:|---|
+| 1 | Explicit absolute `--launcher` |
+| 2 | Absolute lexical path of the `aiq` console entry point actually invoked |
+| 3 | `aiq` found through `PATH`, converted to a lexical absolute path |
+
+Relative explicit launchers are rejected. Every candidate must be an executable
+regular file. AIQ records the lexical absolute shim path without resolving
+symlinks. This path identifies the AIQ installation that produced the hook; it
+is not the executable used by the hook.
+
+The hook runtime is the absolute `sys.executable` of the invoked AIQ
+installation. Its command begins with:
+
+```text
+/absolute/python -I -m aiq integration receive codex
+```
+
+Isolated mode excludes user site-packages and `PYTHON*` environment variables
+from module selection.
+
+Git executable selection occurs when `print`, `plan`, `install`, or `check`
+runs:
+
+| Precedence | Candidate |
+|---:|---|
+| 1 | Explicit absolute `--git-executable` |
+| 2 | `git` found through the command's current `PATH`, converted to a lexical absolute path |
+
+Relative explicit paths and paths containing control characters are rejected.
+The selected path must name an executable regular file and is not resolved
+through symlinks. The hook command embeds the absolute Python and Git paths, so
+capture never searches Codex's `PATH` for AIQ, Python, or Git.
 
 Omitting `--user` is invalid. `plan` and `check` are read-only. Lifecycle
 results identify `integration`, `target`, `status`, and `action`; they add
@@ -226,9 +272,19 @@ metadata when relevant. `plan_token` lets install reject a stale reviewed
 plan. `repair` must be explicit. Install and uninstall preserve unrelated
 configuration and refuse ownership drift.
 
-`integration receive codex --integration-id ID` is an adapter-only host entry
-point. It reads the Codex event from standard input, is silent on success, and
-uses a concise host-visible error rather than the normal JSON protocol.
+Changing the Python runtime or Git executable makes an installed hook differ
+from the desired definition. `check` reports drift, and `plan` or `install`
+updates it only with explicit `--repair`. Repairing a moved installation
+requires invoking `integration install` from the replacement AIQ installation.
+Changing only the launcher identity does not change the hook command. If the
+recorded Python or Git executable later becomes unavailable, capture fails
+visibly and does not mutate the journal; install with `--repair` records the
+replacement runtime paths.
+
+`integration receive codex --integration-id ID --git-executable PATH` is an
+adapter-only host entry point. The absolute Git path is required. It reads the
+Codex event from standard input, is silent on success, and uses a concise
+host-visible error rather than the normal JSON protocol.
 
 ## Deterministic ordering
 

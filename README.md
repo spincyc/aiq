@@ -19,18 +19,48 @@ remote service.
 | Derive readiness from dependencies | Require a server or account |
 | Fence concurrent work with leases | Put runtime state in Git |
 
-## Install from source
+## Install
 
 AIQ supports Python 3.11–3.14 on Linux and macOS. Runtime dependencies are from
-the Python standard library.
+the Python standard library. Its distribution contract is installer-neutral:
+
+| Contract | Requirement |
+|---|---|
+| Distribution | Install `aiq-workqueue` as a standard Python distribution |
+| Command | Expose the `aiq` console entry point |
+| Integrations | Retain the chosen install and its recorded host tools |
+
+| Method | Install | Resolve the launcher |
+|---|---|---|
+| `pipx` | `pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'` | `aiq_bin="$(pipx environment --value PIPX_BIN_DIR)/aiq"` |
+| Standard venv | `python3 -m venv ./aiq-venv`<br>`./aiq-venv/bin/python -m pip install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'` | `aiq_bin="$(pwd)/aiq-venv/bin/aiq"` |
+
+Direct GitHub installs require Git and network access.
+
+```sh
+"$aiq_bin" --version
+```
+
+The absolute launcher needs no `PATH` change. To make the shorter `aiq`
+command available, preview and then optionally apply pipx's shell change:
+
+| Action | Command |
+|---|---|
+| Preview only | `pipx ensurepath --dry-run` |
+| Apply after review | `pipx ensurepath` |
+
+Restart the shell after applying it. AIQ itself never edits shell startup files
+or assumes a particular pipx application directory. Examples below use `aiq`;
+use `"$aiq_bin"` instead when it is not on `PATH`.
+
+### Host package bootstrap
+
+Clone the repository only when developing AIQ or using its host package
+bootstrap:
 
 ```sh
 git clone https://github.com/spincyc/aiq.git
-pipx install ./aiq
-aiq --version
 ```
-
-### Host package bootstrap
 
 ```sh
 make -C ./aiq install-packages
@@ -52,12 +82,22 @@ Package fragments: [Arch](make/platforms/arch.mk) ·
 Unsupported platforms disable only `install-packages`; neutral targets such as
 `make verify` remain usable.
 
-Update an existing source installation:
+The `main` ref is the development channel. Refresh it explicitly:
 
 ```sh
-git -C ./aiq pull --ff-only
-pipx install --force ./aiq
+pipx install --force \
+  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'
+"$(pipx environment --value PIPX_BIN_DIR)/aiq" --version
+
+./aiq-venv/bin/python -m pip install --force-reinstall \
+  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'
+./aiq-venv/bin/aiq --version
 ```
+
+AIQ never updates itself. Upgrading pipx or a host package manager does not
+implicitly update pipx-managed applications. `pipx upgrade-all` updates every
+unpinned pipx application when explicitly invoked; normal AIQ releases will
+bump the package version so `pipx upgrade aiq-workqueue` can update AIQ alone.
 
 ## Quickstart
 
@@ -131,7 +171,9 @@ committed.
 
 AIQ never replaces an entire agent configuration. Integration installers use
 preview, minimal mutation, ownership records, drift checks, and targeted
-uninstall.
+uninstall. The Codex integration records its launcher identity and absolute
+Python and Git executables. Its hook runs Python with `-I`, so dotfiles,
+`PATH`, `PYTHONPATH`, and `PYTHONHOME` cannot redirect the runtime.
 
 ## Documentation
 

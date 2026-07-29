@@ -19,9 +19,10 @@ def _capability(
     mutates: bool,
     idempotency: str,
     contract: dict[str, Any] | None = None,
+    version: int = CAPABILITY_VERSION,
 ) -> dict[str, Any]:
     descriptor: dict[str, Any] = {
-        "version": CAPABILITY_VERSION,
+        "version": version,
         "available": True,
         "purpose": purpose,
         "command": command,
@@ -149,18 +150,24 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     ),
     "integration.check": _capability(
         "Detect whether the user-level Codex integration is installed or drifted.",
-        "aiq integration check codex --user [--launcher PATH] [--json]",
+        (
+            "aiq integration check codex --user [--launcher PATH] "
+            "[--git-executable PATH] [--json]"
+        ),
         mutates=False,
         idempotency="read-only",
+        version=2,
     ),
     "integration.install": _capability(
         "Install or explicitly repair the user-level Codex integration.",
         (
             "aiq integration install codex --user "
-            "[--launcher PATH] [--plan-token TOKEN] [--repair] [--json]"
+            "[--launcher PATH] [--git-executable PATH] "
+            "[--plan-token TOKEN] [--repair] [--json]"
         ),
         mutates=True,
         idempotency="safe retry when installed state is unchanged",
+        version=2,
     ),
     "integration.list": _capability(
         "List available integration adapters.",
@@ -172,19 +179,21 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "Preview a sanitized user-level Codex integration change.",
         (
             "aiq integration plan codex --user "
-            "[--launcher PATH] [--repair] [--json]"
+            "[--launcher PATH] [--git-executable PATH] [--repair] [--json]"
         ),
         mutates=False,
         idempotency="read-only",
+        version=2,
     ),
     "integration.print": _capability(
         "Print an AGENTS bootstrap or Codex hook fragment for external management.",
         (
             "aiq integration print (agents|codex) "
-            "[--user] [--launcher PATH] [--json]"
+            "[--user] [--launcher PATH] [--git-executable PATH] [--json]"
         ),
         mutates=False,
         idempotency="read-only",
+        version=2,
     ),
     "integration.uninstall": _capability(
         "Remove unchanged AIQ-owned Codex integration material.",
