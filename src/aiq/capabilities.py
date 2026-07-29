@@ -298,6 +298,16 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="report-only by default; --apply repairs only planned "
         "AIQ-owned drift",
     ),
+    "report.send": _capability(
+        "Report an AIQ defect as one deduplicated bug-fix task in the local "
+        "AIQ development repository's queue.",
+        (
+            "aiq report --summary TEXT (--detail TEXT|--detail-file FILE|-) "
+            "[--to PATH] [--priority N] [--json]"
+        ),
+        mutates=True,
+        idempotency="identical report replays without a second task",
+    ),
     "queue.next": _capability(
         "Lease the highest-priority eligible task.",
         "aiq queue next [--owner OWNER] [--limit N] [--json]",

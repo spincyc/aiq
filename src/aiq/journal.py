@@ -1545,6 +1545,55 @@ def ingest_message(
         connection.close()
 
 
+def find_message_by_idempotency_key(
+    scope: JournalScope,
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    """Return the first stored message for one idempotency key, if any."""
+
+    if not scope.journal_path.exists():
+        return None
+    connection = _connect(scope)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+              m.message_id,
+              (
+                SELECT state.event_type
+                FROM events AS state
+                WHERE state.message_id = m.message_id
+                  AND state.event_type IN (
+                    'message.received',
+                    'message.processing',
+                    'message.applied',
+                    'message.needs_input',
+                    'message.failed',
+                    'message.superseded'
+                  )
+                ORDER BY state.sequence DESC
+                LIMIT 1
+              ) AS state_event_type
+            FROM messages AS m
+            JOIN events AS received
+              ON received.message_id = m.message_id
+             AND received.event_type = 'message.received'
+            WHERE m.idempotency_key = ?
+            ORDER BY received.sequence ASC
+            LIMIT 1
+            """,
+            (idempotency_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "message_id": row["message_id"],
+            "state": row["state_event_type"].removeprefix("message."),
+        }
+    finally:
+        connection.close()
+
+
 def list_inbox(
     scope: JournalScope,
     *,

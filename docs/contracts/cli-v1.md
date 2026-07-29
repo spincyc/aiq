@@ -94,7 +94,7 @@ The tables list fields in addition to top-level `v`.
 
 | Command | Success fields |
 |---|---|
-| `config show --json` | `version`, `scope`, `owner`, `lease_seconds`, `snapshot_keep`, `output`; optional `sources` |
+| `config show --json` | `version`, `scope`, `owner`, `lease_seconds`, `snapshot_keep`, `output`, `dev_report_repo`; optional `sources` |
 | `config check --json` | `status: "ok"` |
 | `doctor --json` | `status: "ok"` or `"failed"`, ordered `checks` of `{check, status, detail}` |
 | `journal path --json` | `scope` |
@@ -119,6 +119,7 @@ The tables list fields in addition to top-level `v`.
 | `claim list --json` | `claims` containing unreleased lease summaries with `status` |
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `status --json` | `messages`, `tasks`, `claims`, `ready`, `scope` |
+| `report --json` | `status: "reported"` with `task_id`, or `status: "duplicate"`; both add `message_id`, `scope` |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
 | `capability show NAME --json` | capability `id`, `version`, purpose, command, and selected contract |
 | `integration list --json` | sorted `integrations`, each with `id`, `version`, and `purpose` |
@@ -273,6 +274,35 @@ provenance. An identical idempotent retry returns the original `message_id`
 with `created: false`; changed content under the same identity is
 `state_conflict`. Size and field limits are documented in
 [`integrations/generic.md`](../integrations/generic.md).
+
+## Dev reports
+
+`aiq report` files an AIQ defect observed in any local repository as one
+bug-fix task in the local AIQ development checkout's repository-scope journal:
+
+```text
+aiq report --summary TEXT (--detail TEXT|--detail-file FILE|-)
+           [--to PATH] [--priority N] [--json]
+```
+
+The target is `--to PATH`, else the configured `dev_report_repo`
+(configuration or `AIQ_DEV_REPORT_REPO`); unset is `invalid_config`. The
+target must be an absolute path to an existing directory inside a Git
+repository whose journal is already initialized; `aiq report` never
+initializes a journal and never writes to the reporting repository's journal.
+Reporting is same-machine only: it writes the target journal directly and
+performs no remote calls.
+
+The stored message content is the canonical compact key-sorted JSON of exactly
+`aiq_version`, `detail`, and `summary`, and the ingest idempotency key is the
+SHA-256 of that content, so identical reports deduplicate across reporting
+repositories. `--summary` (at most 200 characters) becomes the task title and
+`--detail` (at most 16000 characters; the objective keeps the first 2000)
+becomes the objective; `--priority` defaults to 60. The reporting origin is
+recorded only as the message `cwd`, with source `dev-report`. A repeated
+identical report, from any origin, returns `status: "duplicate"` with the
+original `message_id` and creates no second task, including while a concurrent
+instance is still applying the first report.
 
 ## Export and destruction
 

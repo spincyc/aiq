@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 from importlib import resources
 import json
 import os
@@ -23,6 +24,7 @@ from aiq.journal import (
     JournalError,
     check_journal,
     create_snapshot,
+    find_message_by_idempotency_key,
     ingest_message,
     initialize_journal,
     list_inbox,
@@ -113,6 +115,7 @@ def _invocation_wants_json(arguments: Sequence[str]) -> bool:
         "journal",
         "queue",
         "reconcile",
+        "report",
         "status",
         "task",
     }:
@@ -814,6 +817,165 @@ def _status(arguments: argparse.Namespace) -> int:
     return 0
 
 
+_REPORT_OWNER = "dev-report"
+_REPORT_SUMMARY_MAX_CHARS = 200
+_REPORT_DETAIL_MAX_CHARS = 16000
+_REPORT_OBJECTIVE_MAX_CHARS = 2000
+
+
+def _report_target(arguments: argparse.Namespace) -> Path:
+    if arguments.to is not None:
+        if not arguments.to.is_absolute():
+            raise JournalError(
+                "--to must be an absolute path",
+                code="invalid_argument",
+            )
+        return arguments.to
+    configured = arguments.effective_config.dev_report_repo
+    if configured is None:
+        raise ConfigError(
+            "dev_report_repo is not configured; set it in user "
+            "configuration or AIQ_DEV_REPORT_REPO, or pass --to PATH"
+        )
+    return Path(configured)
+
+
+def _report_emit(
+    arguments: argparse.Namespace,
+    payload: Mapping[str, Any],
+) -> int:
+    if arguments.json:
+        _emit(payload, as_json=True)
+        return 0
+    print(
+        "\t".join(
+            str(payload[key])
+            for key in ("status", "task_id", "message_id")
+            if payload.get(key) is not None
+        )
+    )
+    return 0
+
+
+def _report(arguments: argparse.Namespace) -> int:
+    summary = arguments.summary
+    if not 1 <= len(summary) <= _REPORT_SUMMARY_MAX_CHARS:
+        raise JournalError(
+            f"summary must contain 1 to {_REPORT_SUMMARY_MAX_CHARS} characters",
+            code="invalid_argument",
+        )
+    detail = (
+        arguments.detail
+        if arguments.detail is not None
+        else _read_text_argument(
+            arguments.detail_file,
+            4 * _REPORT_DETAIL_MAX_CHARS,
+            label="detail",
+        )
+    )
+    if not 1 <= len(detail) <= _REPORT_DETAIL_MAX_CHARS:
+        raise JournalError(
+            f"detail must contain 1 to {_REPORT_DETAIL_MAX_CHARS} characters",
+            code="invalid_argument",
+        )
+    if not -1_000_000 <= arguments.priority <= 1_000_000:
+        raise JournalError(
+            "priority must be between -1000000 and 1000000",
+            code="invalid_argument",
+        )
+    target = _report_target(arguments)
+    if not target.is_dir():
+        raise JournalError(f"dev report target does not exist: {target}")
+    scope = resolve_scope("repo", cwd=target)
+    if not scope.journal_path.is_file():
+        raise JournalError(
+            f"dev report target journal does not exist: {scope.journal_path} "
+            "(initialize the development checkout with: aiq journal init)"
+        )
+    content = json.dumps(
+        {"aiq_version": __version__, "detail": detail, "summary": summary},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    idempotency_key = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    duplicate: dict[str, Any] = {
+        "status": "duplicate",
+        "scope": scope.to_dict(),
+    }
+    try:
+        ingested = ingest_message(
+            scope,
+            content,
+            source="dev-report",
+            idempotency_key=idempotency_key,
+            cwd=os.fspath(arguments.cwd.resolve()),
+        )
+    except JournalError as error:
+        # An identical report from another origin repository stores a
+        # different message identity; treat it as the same known defect.
+        if "different message identity" not in str(error):
+            raise
+        existing = find_message_by_idempotency_key(scope, idempotency_key)
+        if existing is None:
+            raise
+        return _report_emit(
+            arguments,
+            {**duplicate, "message_id": existing["message_id"]},
+        )
+    if not ingested.created:
+        return _report_emit(
+            arguments,
+            {**duplicate, "message_id": ingested.message_id},
+        )
+    try:
+        claimed = claim_message(
+            scope,
+            owner_id=_REPORT_OWNER,
+            lease_seconds=arguments.effective_config.lease_seconds,
+            message_id=ingested.message_id,
+        )
+    except JournalError as error:
+        # A concurrent instance claimed or applied the message first.
+        if "not claimable" not in str(error):
+            raise
+        claimed = None
+    if claimed is None:
+        return _report_emit(
+            arguments,
+            {**duplicate, "message_id": ingested.message_id},
+        )
+    applied = apply_effects(
+        scope,
+        ingested.message_id,
+        {
+            "v": 1,
+            "expect": {},
+            "effects": [
+                [
+                    "create",
+                    "$report",
+                    {
+                        "title": summary,
+                        "objective": detail[:_REPORT_OBJECTIVE_MAX_CHARS],
+                        "priority": arguments.priority,
+                    },
+                ]
+            ],
+        },
+        claim_id=claimed["claim_id"],
+    )
+    return _report_emit(
+        arguments,
+        {
+            "status": "reported",
+            "task_id": applied["aliases"]["$report"],
+            "message_id": ingested.message_id,
+            "scope": scope.to_dict(),
+        },
+    )
+
+
 def _capability_list(arguments: argparse.Namespace) -> int:
     capabilities = list_capabilities()
     if _wants_json(arguments):
@@ -1376,6 +1538,16 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status")
     _add_config_arguments(status)
     status.set_defaults(load_config=True, handler=_status)
+
+    report = commands.add_parser("report")
+    _add_config_arguments(report)
+    report.add_argument("--summary", required=True)
+    detail_group = report.add_mutually_exclusive_group(required=True)
+    detail_group.add_argument("--detail")
+    detail_group.add_argument("--detail-file", type=Path, metavar="FILE|-")
+    report.add_argument("--to", type=Path)
+    report.add_argument("--priority", type=int, default=60)
+    report.set_defaults(load_config=True, handler=_report)
 
     capability = commands.add_parser("capability")
     capability_commands = capability.add_subparsers(

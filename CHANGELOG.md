@@ -39,6 +39,9 @@ effects documents, capability contracts, and integration manifests.
 - A `make ci` CI-parity target; gitleaks pinned by checksum in CI;
   `tools/verify` runs sanity-check directly; SQLite sidecar suffixes denied by
   the public audit.
+- Dev-mode `aiq report`: file an AIQ defect from any local repository as one
+  deduplicated bug-fix task in the configured `dev_report_repo` development
+  checkout's queue.
 
 ### Fixed
 
