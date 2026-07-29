@@ -42,9 +42,20 @@ effects documents, capability contracts, and integration manifests.
 - Dev-mode `aiq report`: file an AIQ defect from any local repository as one
   deduplicated bug-fix task in the configured `dev_report_repo` development
   checkout's queue.
+- Transactional workflow commands composing the message pipeline in one
+  journal transaction, never bypassing it: `aiq enqueue` records, claims,
+  and applies one create-task request; `aiq task done` settles one or more
+  ready or owned active tasks through one recorded summary message and one
+  atomic effects document, all-or-nothing.
+- `aiq dequeue` as the ergonomic synonym of `aiq queue next` with identical
+  time-bounded lease semantics, and top-level `aiq list` showing tasks in
+  task-number order with terminal states available through `--all` or
+  `--state`.
 - `aiq ingest --if-new`: return the existing unapplied (`received` or
   `needs_input`) message with a `deduped` flag when identical content is
   already pending, instead of storing a duplicate.
+- Capability descriptors `task.enqueue`, `task.done`, `task.overview`, and
+  `queue.dequeue` for the new operations.
 
 ### Changed
 
@@ -64,6 +75,8 @@ effects documents, capability contracts, and integration manifests.
 - New retryable `contention` error code (exit 4) for journal write
   contention; `not_found` and `not_claimable` are now code-driven. Internal
   engine and journal read-path consolidation.
+- Distribution version bumped to `0.1.0a2` for the workflow-command feature
+  set.
 
 ### Fixed
 

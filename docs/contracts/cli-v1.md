@@ -113,11 +113,15 @@ The tables list fields in addition to top-level `v`.
 | `inbox needs-input --json` | `status: "needs_input"`, `message_id`, `claim_id`, `replayed` |
 | `inbox fail --json` | `status: "failed"`, `message_id`, `claim_id`, `replayed` |
 | `task list --json` | `tasks` containing task summaries |
+| `task done --json` | `status: "done"`, `message_id`, `tasks` of `task_id`, `revision`, and `state` |
 | `task show --json` | `task` containing task detail |
 | `task explain --json` | `explain` containing eligibility detail and `explanation` |
 | `task history --json` | `task_id`, `events` newest first, each with `occurred_at`, `type`, `detail` |
 | `queue peek --json` | `tasks` containing task summaries |
 | `queue next --json` | `items`, each containing separate `task` summary and `claim` |
+| `enqueue --json` | `task_id`, `state`, `message_id` |
+| `dequeue --json` | identical to `queue next` |
+| `list --json` | `tasks` of `task_id`, `revision`, `state`, `priority`, and `title` |
 | `claim list --json` | `claims` containing unreleased lease summaries with `status` |
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `status --json` | `messages`, `tasks`, `claims`, `ready`, `scope` |
@@ -317,6 +321,61 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 A processing message whose lease has expired counts as `received`. Message and
 prompt content never appears. A missing journal reports zero counts and an
 empty `ready` array without creating storage.
+
+## Workflow shortcuts
+
+The workflow commands are transactional sugar over the message pipeline,
+never a bypass: every task mutation still flows through one recorded message
+and one atomic effects application, composed inside a single journal
+transaction.
+
+```text
+aiq enqueue TITLE [--objective TEXT] [--priority N] [--requires TASK-ID ...]
+aiq dequeue [--owner OWNER] [--lease-seconds N] [--limit N]
+aiq list [--state STATE ...] [--all] [--limit N]
+aiq task done TASK_ID [TASK_ID ...] --summary TEXT [--owner OWNER]
+aiq ingest --if-new ...
+```
+
+`enqueue` persists an auto-generated request message with source `cli`,
+claims it, applies one create-task effects document, and marks the message
+applied — all in one transaction. Each required task's current revision is
+resolved into the document's `expect` internally. Any failure rolls the whole
+request back, including the message.
+
+`dequeue` is the ergonomic synonym of `queue next` with identical semantics:
+it grants a time-bounded lease and never removes the task. The response shape
+is the `queue next` shape.
+
+`list` is a top-level task listing that, unlike `task list`, can include
+terminal states: the default shows `queued`, `ready`, `active`, and
+`blocked`; `--all` adds `done`, `canceled`, and `superseded`; `--state`
+selects states explicitly (`--state` and `--all` are mutually exclusive).
+Rows are ordered by task number ascending and bounded by `--limit`
+(default 50, between 1 and 1000).
+
+`task done` settles every named task in one transaction: it persists
+`--summary` as a message with source `cli`, claims it, and applies one
+effects document that transitions all named tasks to `done`, resolving each
+task's current revision into `expect` internally and recording the summary as
+each transition reason. A task already `active` under the effective owner
+completes with its existing claim; a `ready` task is leased inside the same
+transaction. The command is all-or-nothing: any ineligible task — unknown,
+`queued`, `blocked`, terminal, or `active` under another owner — fails the
+whole command naming the offending task, with no partial changes and no
+stored message.
+
+`ingest --if-new` compares the exact content, by content hash, against the
+unapplied (`received` and `needs_input`) messages in the selected scope
+before persisting. On a match it returns the oldest matching `message_id`
+with `deduped: true` and `created: false` instead of storing a duplicate;
+otherwise it stores normally with `deduped: false`. Message content is never
+printed.
+
+`inbox claim` with an explicit `MESSAGE_ID` may also resume a parked
+`needs_input` message once its missing input has arrived; the resumed claim
+can then apply effects or record a disposition. An unaddressed
+`inbox claim` still draws only from `received` messages.
 
 ## Dev reports
 
@@ -548,6 +607,7 @@ their usual exit classes.
 |---|---|
 | Inbox | oldest current lifecycle event first |
 | Task list, queue, and status `ready` | priority descending, then creation order |
+| Top-level `list` | task number ascending |
 | Dependencies, blockers, waiters | task ID ascending |
 | Prerequisites in `task explain` | task ID ascending |
 | Task history | newest event first |

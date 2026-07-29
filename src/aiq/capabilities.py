@@ -316,6 +316,14 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="identical report replays as a duplicate carrying the "
         "tracking task without creating a second task",
     ),
+    "queue.dequeue": _capability(
+        "Lease the highest-priority eligible task; the ergonomic synonym "
+        "of queue.next with identical time-bounded lease semantics, never "
+        "removal.",
+        "aiq dequeue [--owner OWNER] [--limit N] [--json]",
+        mutates=True,
+        idempotency="not retry-safe after a lost receipt",
+    ),
     "queue.next": _capability(
         "Lease the highest-priority eligible task.",
         "aiq queue next [--owner OWNER] [--limit N] [--json]",
@@ -334,9 +342,39 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=False,
         idempotency="read-only",
     ),
+    "task.done": _capability(
+        "Settle one or more ready or owned active tasks as done through "
+        "one recorded summary message and one atomic effects application; "
+        "any ineligible task fails the whole command.",
+        (
+            "aiq task done TASK_ID [TASK_ID ...] --summary TEXT "
+            "[--owner OWNER] [--json]"
+        ),
+        mutates=True,
+        idempotency="all-or-nothing; a retry after success fails because "
+        "done tasks are terminal",
+    ),
+    "task.enqueue": _capability(
+        "Create one task in one transaction through an auto-recorded "
+        "message and one atomic create-task effects application.",
+        (
+            "aiq enqueue TITLE [--objective TEXT] [--priority N] "
+            "[--requires TASK-ID ...] [--json]"
+        ),
+        mutates=True,
+        idempotency="each call records one new message and task; failures "
+        "roll the whole request back",
+    ),
     "task.list": _capability(
         "List bounded compact current task state.",
         "aiq task list [--state STATE] [--limit N] [--json]",
+        mutates=False,
+        idempotency="read-only",
+    ),
+    "task.overview": _capability(
+        "List tasks in task-number order; terminal states are included "
+        "with --all or an explicit --state filter.",
+        "aiq list [--state STATE] [--all] [--limit N] [--json]",
         mutates=False,
         idempotency="read-only",
     ),

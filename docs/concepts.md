@@ -70,8 +70,14 @@ number provide stable tie-breaking.
 
 ## Claims and leases
 
-`inbox claim` reserves source interpretation. `queue next` atomically chooses
-and reserves ready tasks. A claim records its owner, fence, and expiry.
+`inbox claim` reserves source interpretation. `queue next` — with `dequeue`
+as its ergonomic synonym — atomically chooses and reserves ready tasks: a
+lease is time-bounded ownership, never removal. A claim records its owner,
+fence, and expiry.
+
+Transactional shortcuts (`enqueue`, `task done`) compose this pipeline
+inside one journal transaction: they record a message, claim it, and apply
+one atomic effects document, never bypassing the pipeline.
 
 Expired claims cannot authorize effects or completion. AIQ recovers expired
 work during later claim operations; `claim release` returns uncompleted work

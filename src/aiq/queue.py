@@ -17,6 +17,7 @@ from aiq.journal import (
     JournalScope,
     _connect,
     _identifier,
+    _ingest_connected,
     _utc_now,
 )
 
@@ -586,6 +587,45 @@ def _claim_resource(
     }
 
 
+def _claim_message_connected(
+    connection: sqlite3.Connection,
+    message_id: str,
+    *,
+    owner_id: str,
+    lease_seconds: int,
+    now_us: int,
+) -> dict[str, Any]:
+    """Lease one message inside an already-open transaction."""
+
+    claim = _claim_resource(
+        connection,
+        resource_kind="message",
+        resource_id=message_id,
+        owner_id=owner_id,
+        lease_seconds=lease_seconds,
+        now_us=now_us,
+        basis_revision=None,
+    )
+    connection.execute(
+        """
+        INSERT INTO events(
+          event_id,
+          occurred_at,
+          event_type,
+          message_id,
+          payload_json
+        ) VALUES (?, ?, 'message.processing', ?, ?)
+        """,
+        (
+            _identifier("evt"),
+            _utc_now(),
+            message_id,
+            _canonical_json({"claim_id": claim["claim_id"]}),
+        ),
+    )
+    return claim
+
+
 def claim_message(
     scope: JournalScope,
     *,
@@ -670,31 +710,12 @@ def claim_message(
                 )
             connection.commit()
             return None
-        claim = _claim_resource(
+        claim = _claim_message_connected(
             connection,
-            resource_kind="message",
-            resource_id=row["message_id"],
+            row["message_id"],
             owner_id=owner,
             lease_seconds=lease,
             now_us=effective_now,
-            basis_revision=None,
-        )
-        connection.execute(
-            """
-            INSERT INTO events(
-              event_id,
-              occurred_at,
-              event_type,
-              message_id,
-              payload_json
-            ) VALUES (?, ?, 'message.processing', ?, ?)
-            """,
-            (
-                _identifier("evt"),
-                _utc_now(),
-                row["message_id"],
-                _canonical_json({"claim_id": claim["claim_id"]}),
-            ),
         )
         connection.commit()
         return {
@@ -1582,6 +1603,39 @@ def apply_effects(
     *,
     claim_id: str,
 ) -> dict[str, Any]:
+    connection = _connect(scope)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        result = _apply_effects_connected(
+            connection,
+            message_id,
+            document,
+            claim_id=claim_id,
+        )
+        connection.commit()
+        return result
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _apply_effects_connected(
+    connection: sqlite3.Connection,
+    message_id: str,
+    document: dict[str, Any],
+    *,
+    claim_id: str,
+) -> dict[str, Any]:
+    """Apply one claimed message's effects inside an open transaction.
+
+    The caller owns the connection, the surrounding transaction, and the
+    commit or rollback. The public :func:`apply_effects` wraps this in
+    one immediate transaction; composed transactional commands reuse it
+    so a message, its claim, and its effects commit atomically.
+    """
+
     if not isinstance(message_id, str) or not message_id.startswith("msg_"):
         raise JournalError(f"invalid message ID: {message_id}")
     if not CLAIM_ID_PATTERN.fullmatch(claim_id):
@@ -1595,466 +1649,299 @@ def apply_effects(
     effects_hash = hashlib.sha256(canonical.encode()).hexdigest()
     effects = document["effects"]
 
-    connection = _connect(scope)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        existing = connection.execute(
-            """
-            SELECT claim_id, effects_sha256, result_json
-            FROM message_applications
-            WHERE message_id = ?
-            """,
-            (message_id,),
-        ).fetchone()
-        if existing:
-            if existing["effects_sha256"] != effects_hash:
-                raise JournalError(
-                    "message already has a different effects application"
-                )
-            if existing["claim_id"] != claim_id:
-                raise JournalError(
-                    "application replay claim does not match the original claim"
-                )
-            result = json.loads(existing["result_json"])
-            result["replayed"] = True
-            connection.commit()
-            return result
-
-        message = connection.execute(
-            f"""
-            SELECT
-              message.message_id,
-              (
-                SELECT event_type
-                FROM events
-                WHERE message_id = message.message_id
-                  AND event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
-                ORDER BY sequence DESC
-                LIMIT 1
-              ) AS state_event_type
-            FROM messages AS message
-            WHERE message.message_id = ?
-            """,
-            (message_id,),
-        ).fetchone()
-        if not message:
-            raise JournalError(f"message not found: {message_id}")
-        message_claim = connection.execute(
-            """
-            SELECT claim.*
-            FROM claims AS claim
-            LEFT JOIN claim_releases AS release
-              ON release.claim_id = claim.claim_id
-            WHERE claim.claim_id = ?
-              AND claim.resource_kind = 'message'
-              AND claim.resource_id = ?
-              AND release.claim_id IS NULL
-            """,
-            (claim_id, message_id),
-        ).fetchone()
-        if not message_claim:
-            raise JournalError(f"message claim is not active: {claim_id}")
-        effective_now = _now_us()
-        if message_claim["expires_at_us"] <= effective_now:
-            raise JournalError(f"message claim has expired: {claim_id}")
-        message_state = message["state_event_type"].removeprefix("message.")
-        if message_state == "applied":
+    existing = connection.execute(
+        """
+        SELECT claim_id, effects_sha256, result_json
+        FROM message_applications
+        WHERE message_id = ?
+        """,
+        (message_id,),
+    ).fetchone()
+    if existing:
+        if existing["effects_sha256"] != effects_hash:
             raise JournalError(
-                f"message has an applied event without an application: {message_id}"
+                "message already has a different effects application"
             )
-        if message_state != "processing":
+        if existing["claim_id"] != claim_id:
             raise JournalError(
-                f"message is not applicable: {message_id}: {message_state}"
+                "application replay claim does not match the original claim"
+            )
+        result = json.loads(existing["result_json"])
+        result["replayed"] = True
+        return result
+
+    message = connection.execute(
+        f"""
+        SELECT
+          message.message_id,
+          (
+            SELECT event_type
+            FROM events
+            WHERE message_id = message.message_id
+              AND event_type IN ({MESSAGE_LIFECYCLE_EVENT_SQL})
+            ORDER BY sequence DESC
+            LIMIT 1
+          ) AS state_event_type
+        FROM messages AS message
+        WHERE message.message_id = ?
+        """,
+        (message_id,),
+    ).fetchone()
+    if not message:
+        raise JournalError(f"message not found: {message_id}")
+    message_claim = connection.execute(
+        """
+        SELECT claim.*
+        FROM claims AS claim
+        LEFT JOIN claim_releases AS release
+          ON release.claim_id = claim.claim_id
+        WHERE claim.claim_id = ?
+          AND claim.resource_kind = 'message'
+          AND claim.resource_id = ?
+          AND release.claim_id IS NULL
+        """,
+        (claim_id, message_id),
+    ).fetchone()
+    if not message_claim:
+        raise JournalError(f"message claim is not active: {claim_id}")
+    effective_now = _now_us()
+    if message_claim["expires_at_us"] <= effective_now:
+        raise JournalError(f"message claim has expired: {claim_id}")
+    message_state = message["state_event_type"].removeprefix("message.")
+    if message_state == "applied":
+        raise JournalError(
+            f"message has an applied event without an application: {message_id}"
+        )
+    if message_state != "processing":
+        raise JournalError(
+            f"message is not applicable: {message_id}: {message_state}"
+        )
+
+    tasks = _load_current_tasks(connection)
+    initial_revisions = {
+        task_id: task["revision"] for task_id, task in tasks.items()
+    }
+    expect = document["expect"]
+    for task_id, revision in expect.items():
+        actual = initial_revisions.get(task_id)
+        if actual is None:
+            raise JournalError(f"task not found: {task_id}")
+        if actual != revision:
+            raise JournalError(
+                f"task revision changed: {task_id}: "
+                f"expected {revision}, found {actual}"
             )
 
-        tasks = _load_current_tasks(connection)
-        initial_revisions = {
-            task_id: task["revision"] for task_id, task in tasks.items()
-        }
-        expect = document["expect"]
-        for task_id, revision in expect.items():
-            actual = initial_revisions.get(task_id)
-            if actual is None:
-                raise JournalError(f"task not found: {task_id}")
-            if actual != revision:
-                raise JournalError(
-                    f"task revision changed: {task_id}: "
-                    f"expected {revision}, found {actual}"
-                )
+    aliases: dict[str, str] = {}
+    create_indexes: dict[str, int] = {}
+    for index, effect in enumerate(effects):
+        if effect[0] != "create":
+            continue
+        if len(effect) != 3:
+            raise JournalError(f"create effect {index} must have 3 items")
+        alias = effect[1]
+        if not isinstance(alias, str) or not ALIAS_PATTERN.fullmatch(alias):
+            raise JournalError(f"create effect {index} has invalid alias")
+        if alias in aliases:
+            raise JournalError(f"duplicate local task alias: {alias}")
+        cursor = connection.execute(
+            "INSERT INTO task_numbers DEFAULT VALUES"
+        )
+        task_number = cursor.lastrowid
+        aliases[alias] = f"TASK-{task_number}"
+        create_indexes[alias] = index
 
-        aliases: dict[str, str] = {}
-        create_indexes: dict[str, int] = {}
-        for index, effect in enumerate(effects):
-            if effect[0] != "create":
-                continue
-            if len(effect) != 3:
-                raise JournalError(f"create effect {index} must have 3 items")
+    plans: list[dict[str, Any]] = []
+    touched: set[str] = set()
+    update_targets: set[str] = set()
+    transition_targets: set[str] = set()
+    edge_operations: set[tuple[str, str]] = set()
+    task_claims_to_release: dict[str, tuple[dict[str, Any], str]] = {}
+
+    def require_expected(task_id: str) -> None:
+        if task_id in initial_revisions and task_id not in expect:
+            raise JournalError(
+                f"document.expect is missing referenced task: {task_id}"
+            )
+
+    def existing_at(reference: str, index: int) -> str:
+        canonical_id = _resolve(reference, aliases)
+        if reference.startswith("$") and create_indexes[reference] >= index:
+            raise JournalError(
+                f"local alias must be created before effect {index}: {reference}"
+            )
+        if canonical_id not in tasks:
+            raise JournalError(f"task not found: {canonical_id}")
+        require_expected(canonical_id)
+        return canonical_id
+
+    def resolved_before(reference: str, index: int) -> str:
+        canonical_id = _resolve(reference, aliases)
+        if reference.startswith("$") and create_indexes[reference] >= index:
+            raise JournalError(
+                f"local alias must be created before effect {index}: {reference}"
+            )
+        return canonical_id
+
+    for index, effect in enumerate(effects):
+        operation = effect[0]
+        if operation == "create":
             alias = effect[1]
-            if not isinstance(alias, str) or not ALIAS_PATTERN.fullmatch(alias):
-                raise JournalError(f"create effect {index} has invalid alias")
-            if alias in aliases:
-                raise JournalError(f"duplicate local task alias: {alias}")
-            cursor = connection.execute(
-                "INSERT INTO task_numbers DEFAULT VALUES"
+            task_id = aliases[alias]
+            spec = effect[2]
+            if not isinstance(spec, dict):
+                raise JournalError(f"create effect {index} spec must be an object")
+            _exact_keys(
+                spec,
+                allowed={"title", "objective", "priority", "parent", "requires"},
+                required={"title"},
+                path=f"effects[{index}].spec",
             )
-            task_number = cursor.lastrowid
-            aliases[alias] = f"TASK-{task_number}"
-            create_indexes[alias] = index
-
-        plans: list[dict[str, Any]] = []
-        touched: set[str] = set()
-        update_targets: set[str] = set()
-        transition_targets: set[str] = set()
-        edge_operations: set[tuple[str, str]] = set()
-        task_claims_to_release: dict[str, tuple[dict[str, Any], str]] = {}
-
-        def require_expected(task_id: str) -> None:
-            if task_id in initial_revisions and task_id not in expect:
+            title = _text(
+                spec["title"],
+                path=f"effects[{index}].title",
+                minimum=1,
+                maximum=200,
+            )
+            objective = spec.get("objective")
+            if objective is not None:
+                objective = _text(
+                    objective,
+                    path=f"effects[{index}].objective",
+                    maximum=2000,
+                )
+            priority = _integer(
+                spec.get("priority", 0),
+                path=f"effects[{index}].priority",
+                minimum=-1000000,
+                maximum=1000000,
+            )
+            parent_reference = spec.get("parent")
+            parent = None
+            if parent_reference is not None:
+                parent = resolved_before(
+                    _task_reference(
+                        parent_reference,
+                        path=f"effects[{index}].parent",
+                    ),
+                    index,
+                )
+                require_expected(parent)
+            requires = spec.get("requires", [])
+            if not isinstance(requires, list) or len(requires) > 64:
                 raise JournalError(
-                    f"document.expect is missing referenced task: {task_id}"
+                    f"effects[{index}].requires must be an array of at most 64 tasks"
                 )
+            dependencies = [
+                resolved_before(
+                    _task_reference(
+                        reference,
+                        path=f"effects[{index}].requires",
+                    ),
+                    index,
+                )
+                for reference in requires
+            ]
+            if len(dependencies) != len(set(dependencies)):
+                raise JournalError(f"create effect {index} has duplicate dependencies")
+            for dependency in dependencies:
+                require_expected(dependency)
+            task = {
+                "task_id": task_id,
+                "task_number": int(task_id.removeprefix("TASK-")),
+                "revision": 1,
+                "event_sequence": 0,
+                "state": "queued",
+                "title": title,
+                "objective": objective,
+                "priority": priority,
+                "parent_task_id": parent,
+                "reason": None,
+                "superseded_by_task_id": None,
+                "dependencies": dependencies,
+                "created_at": _utc_now(),
+                "created_by_message_id": message_id,
+                "created_sequence": 0,
+            }
+            tasks[task_id] = task
+            plans.append(
+                {
+                    "index": index,
+                    "operation": operation,
+                    "task": deepcopy(task),
+                    "effect": effect,
+                }
+            )
+            touched.add(task_id)
+            continue
 
-        def existing_at(reference: str, index: int) -> str:
-            canonical_id = _resolve(reference, aliases)
-            if reference.startswith("$") and create_indexes[reference] >= index:
+        if operation == "update":
+            if len(effect) != 3:
+                raise JournalError(f"update effect {index} must have 3 items")
+            reference = _task_reference(effect[1], path=f"effects[{index}].task")
+            task_id = existing_at(reference, index)
+            if task_id in update_targets:
+                raise JournalError(f"duplicate update effect for {task_id}")
+            update_targets.add(task_id)
+            current = tasks[task_id]
+            if current["state"] in TERMINAL_STATES:
                 raise JournalError(
-                    f"local alias must be created before effect {index}: {reference}"
+                    f"terminal task is immutable: {task_id}: {current['state']}"
                 )
-            if canonical_id not in tasks:
-                raise JournalError(f"task not found: {canonical_id}")
-            require_expected(canonical_id)
-            return canonical_id
-
-        def resolved_before(reference: str, index: int) -> str:
-            canonical_id = _resolve(reference, aliases)
-            if reference.startswith("$") and create_indexes[reference] >= index:
-                raise JournalError(
-                    f"local alias must be created before effect {index}: {reference}"
-                )
-            return canonical_id
-
-        for index, effect in enumerate(effects):
-            operation = effect[0]
-            if operation == "create":
-                alias = effect[1]
-                task_id = aliases[alias]
-                spec = effect[2]
-                if not isinstance(spec, dict):
-                    raise JournalError(f"create effect {index} spec must be an object")
-                _exact_keys(
-                    spec,
-                    allowed={"title", "objective", "priority", "parent", "requires"},
-                    required={"title"},
-                    path=f"effects[{index}].spec",
-                )
-                title = _text(
-                    spec["title"],
+            if current.get("claim") is not None:
+                raise JournalError(f"active task cannot be updated: {task_id}")
+            patch = effect[2]
+            if not isinstance(patch, dict):
+                raise JournalError(f"update effect {index} patch must be an object")
+            _exact_keys(
+                patch,
+                allowed={"title", "objective", "priority", "parent"},
+                required=set(),
+                path=f"effects[{index}].patch",
+            )
+            if not patch:
+                raise JournalError(f"update effect {index} patch must not be empty")
+            revised = _copy_revision(current)
+            if "title" in patch:
+                revised["title"] = _text(
+                    patch["title"],
                     path=f"effects[{index}].title",
                     minimum=1,
                     maximum=200,
                 )
-                objective = spec.get("objective")
-                if objective is not None:
-                    objective = _text(
+            if "objective" in patch:
+                objective = patch["objective"]
+                revised["objective"] = (
+                    None
+                    if objective is None
+                    else _text(
                         objective,
                         path=f"effects[{index}].objective",
                         maximum=2000,
                     )
-                priority = _integer(
-                    spec.get("priority", 0),
+                )
+            if "priority" in patch:
+                revised["priority"] = _integer(
+                    patch["priority"],
                     path=f"effects[{index}].priority",
                     minimum=-1000000,
                     maximum=1000000,
                 )
-                parent_reference = spec.get("parent")
-                parent = None
-                if parent_reference is not None:
-                    parent = resolved_before(
+            if "parent" in patch:
+                parent_reference = patch["parent"]
+                revised["parent_task_id"] = (
+                    None
+                    if parent_reference is None
+                    else resolved_before(
                         _task_reference(
                             parent_reference,
                             path=f"effects[{index}].parent",
                         ),
                         index,
                     )
-                    require_expected(parent)
-                requires = spec.get("requires", [])
-                if not isinstance(requires, list) or len(requires) > 64:
-                    raise JournalError(
-                        f"effects[{index}].requires must be an array of at most 64 tasks"
-                    )
-                dependencies = [
-                    resolved_before(
-                        _task_reference(
-                            reference,
-                            path=f"effects[{index}].requires",
-                        ),
-                        index,
-                    )
-                    for reference in requires
-                ]
-                if len(dependencies) != len(set(dependencies)):
-                    raise JournalError(f"create effect {index} has duplicate dependencies")
-                for dependency in dependencies:
-                    require_expected(dependency)
-                task = {
-                    "task_id": task_id,
-                    "task_number": int(task_id.removeprefix("TASK-")),
-                    "revision": 1,
-                    "event_sequence": 0,
-                    "state": "queued",
-                    "title": title,
-                    "objective": objective,
-                    "priority": priority,
-                    "parent_task_id": parent,
-                    "reason": None,
-                    "superseded_by_task_id": None,
-                    "dependencies": dependencies,
-                    "created_at": _utc_now(),
-                    "created_by_message_id": message_id,
-                    "created_sequence": 0,
-                }
-                tasks[task_id] = task
-                plans.append(
-                    {
-                        "index": index,
-                        "operation": operation,
-                        "task": deepcopy(task),
-                        "effect": effect,
-                    }
                 )
-                touched.add(task_id)
-                continue
-
-            if operation == "update":
-                if len(effect) != 3:
-                    raise JournalError(f"update effect {index} must have 3 items")
-                reference = _task_reference(effect[1], path=f"effects[{index}].task")
-                task_id = existing_at(reference, index)
-                if task_id in update_targets:
-                    raise JournalError(f"duplicate update effect for {task_id}")
-                update_targets.add(task_id)
-                current = tasks[task_id]
-                if current["state"] in TERMINAL_STATES:
-                    raise JournalError(
-                        f"terminal task is immutable: {task_id}: {current['state']}"
-                    )
-                if current.get("claim") is not None:
-                    raise JournalError(f"active task cannot be updated: {task_id}")
-                patch = effect[2]
-                if not isinstance(patch, dict):
-                    raise JournalError(f"update effect {index} patch must be an object")
-                _exact_keys(
-                    patch,
-                    allowed={"title", "objective", "priority", "parent"},
-                    required=set(),
-                    path=f"effects[{index}].patch",
-                )
-                if not patch:
-                    raise JournalError(f"update effect {index} patch must not be empty")
-                revised = _copy_revision(current)
-                if "title" in patch:
-                    revised["title"] = _text(
-                        patch["title"],
-                        path=f"effects[{index}].title",
-                        minimum=1,
-                        maximum=200,
-                    )
-                if "objective" in patch:
-                    objective = patch["objective"]
-                    revised["objective"] = (
-                        None
-                        if objective is None
-                        else _text(
-                            objective,
-                            path=f"effects[{index}].objective",
-                            maximum=2000,
-                        )
-                    )
-                if "priority" in patch:
-                    revised["priority"] = _integer(
-                        patch["priority"],
-                        path=f"effects[{index}].priority",
-                        minimum=-1000000,
-                        maximum=1000000,
-                    )
-                if "parent" in patch:
-                    parent_reference = patch["parent"]
-                    revised["parent_task_id"] = (
-                        None
-                        if parent_reference is None
-                        else resolved_before(
-                            _task_reference(
-                                parent_reference,
-                                path=f"effects[{index}].parent",
-                            ),
-                            index,
-                        )
-                    )
-                    if revised["parent_task_id"]:
-                        require_expected(revised["parent_task_id"])
-                tasks[task_id] = revised
-                plans.append(
-                    {
-                        "index": index,
-                        "operation": operation,
-                        "task": deepcopy(revised),
-                        "effect": effect,
-                    }
-                )
-                touched.add(task_id)
-                continue
-
-            if operation == "transition":
-                if len(effect) not in {3, 4}:
-                    raise JournalError(f"transition effect {index} must have 3 or 4 items")
-                reference = _task_reference(effect[1], path=f"effects[{index}].task")
-                task_id = existing_at(reference, index)
-                if task_id in transition_targets:
-                    raise JournalError(f"duplicate transition effect for {task_id}")
-                transition_targets.add(task_id)
-                destination = effect[2]
-                if destination not in TASK_STATES:
-                    raise JournalError(
-                        f"transition effect {index} has invalid state: {destination!r}"
-                    )
-                metadata = effect[3] if len(effect) == 4 else {}
-                if not isinstance(metadata, dict):
-                    raise JournalError(
-                        f"transition effect {index} metadata must be an object"
-                    )
-                _exact_keys(
-                    metadata,
-                    allowed={"reason", "by", "claim"},
-                    required=set(),
-                    path=f"effects[{index}].metadata",
-                )
-                current = tasks[task_id]
-                current_effective = _effective_states(tasks)[task_id]
-                if destination == current["state"]:
-                    raise JournalError(
-                        f"task transition is a no-op: {task_id}: {destination}"
-                    )
-                if destination == "active":
-                    raise JournalError(
-                        f"active state requires a queue claim: {task_id}"
-                    )
-                if destination == "done":
-                    transition_claim_id = metadata.get("claim")
-                    if (
-                        not isinstance(transition_claim_id, str)
-                        or current.get("claim") is None
-                        or current["claim"]["claim_id"] != transition_claim_id
-                        or current["claim"]["basis_revision"] != current["revision"]
-                    ):
-                        raise JournalError(
-                            f"done transition requires the current task claim: {task_id}"
-                        )
-                elif "claim" in metadata:
-                    raise JournalError(
-                        f"transition effect {index} allows claim only for done"
-                    )
-                if destination not in TRANSITIONS[current_effective]:
-                    raise JournalError(
-                        f"invalid task transition: {task_id}: "
-                        f"{current_effective} -> {destination}"
-                    )
-                reason = metadata.get("reason")
-                if destination in {"blocked", "canceled", "superseded"}:
-                    reason = _text(
-                        reason,
-                        path=f"effects[{index}].reason",
-                        minimum=1,
-                        maximum=1000,
-                    )
-                elif reason is not None:
-                    reason = _text(
-                        reason,
-                        path=f"effects[{index}].reason",
-                        maximum=1000,
-                    )
-                replacement = None
-                if destination == "superseded":
-                    if "by" not in metadata:
-                        raise JournalError(
-                            f"transition effect {index} requires metadata.by"
-                        )
-                    replacement = resolved_before(
-                        _task_reference(
-                            metadata["by"],
-                            path=f"effects[{index}].by",
-                        ),
-                        index,
-                    )
-                    if replacement == task_id:
-                        raise JournalError(f"task cannot supersede itself: {task_id}")
-                    if replacement not in tasks:
-                        raise JournalError(f"replacement task not found: {replacement}")
-                    require_expected(replacement)
-                elif "by" in metadata:
-                    raise JournalError(
-                        f"transition effect {index} allows by only for superseded"
-                    )
-                revised = _copy_revision(current)
-                revised["state"] = destination
-                revised["reason"] = reason
-                revised["superseded_by_task_id"] = replacement
-                tasks[task_id] = revised
-                if current.get("claim") is not None:
-                    disposition = "completed" if destination == "done" else "revoked"
-                    task_claims_to_release[current["claim"]["claim_id"]] = (
-                        current["claim"],
-                        disposition,
-                    )
-                    revised["claim"] = None
-                plans.append(
-                    {
-                        "index": index,
-                        "operation": operation,
-                        "task": deepcopy(revised),
-                        "effect": effect,
-                    }
-                )
-                touched.add(task_id)
-                continue
-
-            if len(effect) != 3:
-                raise JournalError(f"{operation} effect {index} must have 3 items")
-            task_reference = _task_reference(
-                effect[1],
-                path=f"effects[{index}].task",
-            )
-            dependency_reference = _task_reference(
-                effect[2],
-                path=f"effects[{index}].dependency",
-            )
-            task_id = existing_at(task_reference, index)
-            dependency_id = existing_at(dependency_reference, index)
-            edge_key = (task_id, dependency_id)
-            if edge_key in edge_operations:
-                raise JournalError(
-                    f"duplicate dependency effect: {task_id} -> {dependency_id}"
-                )
-            edge_operations.add(edge_key)
-            current = tasks[task_id]
-            if current.get("claim") is not None or current["state"] in TERMINAL_STATES:
-                raise JournalError(
-                    f"dependencies are immutable in active or terminal task: {task_id}"
-                )
-            revised = _copy_revision(current)
-            dependencies = set(revised["dependencies"])
-            if operation == "require":
-                if dependency_id in dependencies:
-                    raise JournalError(
-                        f"dependency already exists: {task_id} -> {dependency_id}"
-                    )
-                dependencies.add(dependency_id)
-            else:
-                if dependency_id not in dependencies:
-                    raise JournalError(
-                        f"dependency does not exist: {task_id} -> {dependency_id}"
-                    )
-                dependencies.remove(dependency_id)
-            revised["dependencies"] = sorted(dependencies)
+                if revised["parent_task_id"]:
+                    require_expected(revised["parent_task_id"])
             tasks[task_id] = revised
             plans.append(
                 {
@@ -2065,198 +1952,650 @@ def apply_effects(
                 }
             )
             touched.add(task_id)
+            continue
 
-        extra_expectations = sorted(set(expect) - set(initial_revisions))
-        if extra_expectations:
-            raise JournalError(
-                f"document.expect contains unknown tasks: {', '.join(extra_expectations)}"
-            )
-        _validate_graph(tasks)
-
-        for plan in plans:
-            task = plan["task"]
-            event_type = {
-                "create": "task.created",
-                "update": "task.revised",
-                "transition": "task.state_changed",
-                "require": "task.dependency_added",
-                "unrequire": "task.dependency_removed",
-            }[plan["operation"]]
-            cursor = connection.execute(
-                """
-                INSERT INTO events(
-                  event_id,
-                  occurred_at,
-                  event_type,
-                  message_id,
-                  task_id,
-                  payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    _identifier("evt"),
-                    _utc_now(),
-                    event_type,
-                    message_id,
-                    task["task_id"],
-                    _event_payload(plan["operation"], plan["effect"]),
-                ),
-            )
-            sequence = cursor.lastrowid
-            if plan["operation"] == "create":
-                task["created_sequence"] = sequence
-                tasks[task["task_id"]]["created_sequence"] = sequence
-                connection.execute(
-                    """
-                    INSERT INTO tasks(
-                      task_id,
-                      task_number,
-                      created_at,
-                      created_by_message_id,
-                      created_sequence
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        task["task_id"],
-                        task["task_number"],
-                        task["created_at"],
-                        message_id,
-                        sequence,
-                    ),
+        if operation == "transition":
+            if len(effect) not in {3, 4}:
+                raise JournalError(f"transition effect {index} must have 3 or 4 items")
+            reference = _task_reference(effect[1], path=f"effects[{index}].task")
+            task_id = existing_at(reference, index)
+            if task_id in transition_targets:
+                raise JournalError(f"duplicate transition effect for {task_id}")
+            transition_targets.add(task_id)
+            destination = effect[2]
+            if destination not in TASK_STATES:
+                raise JournalError(
+                    f"transition effect {index} has invalid state: {destination!r}"
                 )
-            if tasks[task["task_id"]]["revision"] == task["revision"]:
-                tasks[task["task_id"]]["event_sequence"] = sequence
-            connection.execute(
-                """
-                INSERT INTO task_effects(
-                  message_id,
-                  effect_index,
-                  event_sequence,
-                  operation,
-                  task_id,
-                  payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    message_id,
-                    plan["index"],
-                    sequence,
-                    plan["operation"],
-                    task["task_id"],
-                    _event_payload(plan["operation"], plan["effect"]),
-                ),
+            metadata = effect[3] if len(effect) == 4 else {}
+            if not isinstance(metadata, dict):
+                raise JournalError(
+                    f"transition effect {index} metadata must be an object"
+                )
+            _exact_keys(
+                metadata,
+                allowed={"reason", "by", "claim"},
+                required=set(),
+                path=f"effects[{index}].metadata",
             )
-            connection.execute(
-                """
-                INSERT INTO task_revisions(
-                  task_id,
-                  revision,
-                  event_sequence,
-                  state,
-                  title,
-                  objective,
-                  priority,
-                  parent_task_id,
-                  dependencies_json,
-                  reason,
-                  superseded_by_task_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task["task_id"],
-                    task["revision"],
-                    sequence,
-                    task["state"],
-                    task["title"],
-                    task["objective"],
-                    task["priority"],
-                    task["parent_task_id"],
-                    _canonical_json(task["dependencies"]),
-                    task["reason"],
-                    task["superseded_by_task_id"],
-                ),
+            current = tasks[task_id]
+            current_effective = _effective_states(tasks)[task_id]
+            if destination == current["state"]:
+                raise JournalError(
+                    f"task transition is a no-op: {task_id}: {destination}"
+                )
+            if destination == "active":
+                raise JournalError(
+                    f"active state requires a queue claim: {task_id}"
+                )
+            if destination == "done":
+                transition_claim_id = metadata.get("claim")
+                if (
+                    not isinstance(transition_claim_id, str)
+                    or current.get("claim") is None
+                    or current["claim"]["claim_id"] != transition_claim_id
+                    or current["claim"]["basis_revision"] != current["revision"]
+                ):
+                    raise JournalError(
+                        f"done transition requires the current task claim: {task_id}"
+                    )
+            elif "claim" in metadata:
+                raise JournalError(
+                    f"transition effect {index} allows claim only for done"
+                )
+            if destination not in TRANSITIONS[current_effective]:
+                raise JournalError(
+                    f"invalid task transition: {task_id}: "
+                    f"{current_effective} -> {destination}"
+                )
+            reason = metadata.get("reason")
+            if destination in {"blocked", "canceled", "superseded"}:
+                reason = _text(
+                    reason,
+                    path=f"effects[{index}].reason",
+                    minimum=1,
+                    maximum=1000,
+                )
+            elif reason is not None:
+                reason = _text(
+                    reason,
+                    path=f"effects[{index}].reason",
+                    maximum=1000,
+                )
+            replacement = None
+            if destination == "superseded":
+                if "by" not in metadata:
+                    raise JournalError(
+                        f"transition effect {index} requires metadata.by"
+                    )
+                replacement = resolved_before(
+                    _task_reference(
+                        metadata["by"],
+                        path=f"effects[{index}].by",
+                    ),
+                    index,
+                )
+                if replacement == task_id:
+                    raise JournalError(f"task cannot supersede itself: {task_id}")
+                if replacement not in tasks:
+                    raise JournalError(f"replacement task not found: {replacement}")
+                require_expected(replacement)
+            elif "by" in metadata:
+                raise JournalError(
+                    f"transition effect {index} allows by only for superseded"
+                )
+            revised = _copy_revision(current)
+            revised["state"] = destination
+            revised["reason"] = reason
+            revised["superseded_by_task_id"] = replacement
+            tasks[task_id] = revised
+            if current.get("claim") is not None:
+                disposition = "completed" if destination == "done" else "revoked"
+                task_claims_to_release[current["claim"]["claim_id"]] = (
+                    current["claim"],
+                    disposition,
+                )
+                revised["claim"] = None
+            plans.append(
+                {
+                    "index": index,
+                    "operation": operation,
+                    "task": deepcopy(revised),
+                    "effect": effect,
+                }
             )
+            touched.add(task_id)
+            continue
 
-        release_now = _now_us()
-        for task_claim, disposition in task_claims_to_release.values():
-            _append_claim_release(
-                connection,
-                task_claim,
-                disposition=disposition,
-                now_us=release_now,
-            )
-        _append_claim_release(
-            connection,
-            message_claim,
-            disposition="applied",
-            now_us=release_now,
+        if len(effect) != 3:
+            raise JournalError(f"{operation} effect {index} must have 3 items")
+        task_reference = _task_reference(
+            effect[1],
+            path=f"effects[{index}].task",
         )
+        dependency_reference = _task_reference(
+            effect[2],
+            path=f"effects[{index}].dependency",
+        )
+        task_id = existing_at(task_reference, index)
+        dependency_id = existing_at(dependency_reference, index)
+        edge_key = (task_id, dependency_id)
+        if edge_key in edge_operations:
+            raise JournalError(
+                f"duplicate dependency effect: {task_id} -> {dependency_id}"
+            )
+        edge_operations.add(edge_key)
+        current = tasks[task_id]
+        if current.get("claim") is not None or current["state"] in TERMINAL_STATES:
+            raise JournalError(
+                f"dependencies are immutable in active or terminal task: {task_id}"
+            )
+        revised = _copy_revision(current)
+        dependencies = set(revised["dependencies"])
+        if operation == "require":
+            if dependency_id in dependencies:
+                raise JournalError(
+                    f"dependency already exists: {task_id} -> {dependency_id}"
+                )
+            dependencies.add(dependency_id)
+        else:
+            if dependency_id not in dependencies:
+                raise JournalError(
+                    f"dependency does not exist: {task_id} -> {dependency_id}"
+                )
+            dependencies.remove(dependency_id)
+        revised["dependencies"] = sorted(dependencies)
+        tasks[task_id] = revised
+        plans.append(
+            {
+                "index": index,
+                "operation": operation,
+                "task": deepcopy(revised),
+                "effect": effect,
+            }
+        )
+        touched.add(task_id)
 
-        applied_at = _utc_now()
-        applied_cursor = connection.execute(
+    extra_expectations = sorted(set(expect) - set(initial_revisions))
+    if extra_expectations:
+        raise JournalError(
+            f"document.expect contains unknown tasks: {', '.join(extra_expectations)}"
+        )
+    _validate_graph(tasks)
+
+    for plan in plans:
+        task = plan["task"]
+        event_type = {
+            "create": "task.created",
+            "update": "task.revised",
+            "transition": "task.state_changed",
+            "require": "task.dependency_added",
+            "unrequire": "task.dependency_removed",
+        }[plan["operation"]]
+        cursor = connection.execute(
             """
             INSERT INTO events(
               event_id,
               occurred_at,
               event_type,
               message_id,
+              task_id,
               payload_json
-            ) VALUES (?, ?, 'message.applied', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 _identifier("evt"),
-                applied_at,
+                _utc_now(),
+                event_type,
                 message_id,
-                _canonical_json({"effects_sha256": effects_hash}),
+                task["task_id"],
+                _event_payload(plan["operation"], plan["effect"]),
             ),
         )
-        final_effective = _effective_states(tasks)
-        result = {
-            "status": "applied",
-            "message_id": message_id,
-            "effects_sha256": effects_hash,
-            "aliases": aliases,
-            "tasks": [
-                _task_output(
-                    tasks[task_id],
-                    final_effective[task_id],
-                    final_effective,
-                )
-                for task_id in sorted(
-                    touched,
-                    key=lambda value: int(value.removeprefix("TASK-")),
-                )
-            ],
-            "applied_sequence": applied_cursor.lastrowid,
-            "replayed": False,
-        }
-        result_json = _canonical_json(result)
+        sequence = cursor.lastrowid
+        if plan["operation"] == "create":
+            task["created_sequence"] = sequence
+            tasks[task["task_id"]]["created_sequence"] = sequence
+            connection.execute(
+                """
+                INSERT INTO tasks(
+                  task_id,
+                  task_number,
+                  created_at,
+                  created_by_message_id,
+                  created_sequence
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    task["task_id"],
+                    task["task_number"],
+                    task["created_at"],
+                    message_id,
+                    sequence,
+                ),
+            )
+        if tasks[task["task_id"]]["revision"] == task["revision"]:
+            tasks[task["task_id"]]["event_sequence"] = sequence
         connection.execute(
             """
-            INSERT INTO message_applications(
+            INSERT INTO task_effects(
               message_id,
-              claim_id,
-              effects_sha256,
-              applied_at,
-              applied_event_sequence,
-              effect_count,
-              document_json,
-              result_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              effect_index,
+              event_sequence,
+              operation,
+              task_id,
+              payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
-                claim_id,
-                effects_hash,
-                applied_at,
-                applied_cursor.lastrowid,
-                len(effects),
-                canonical,
-                result_json,
+                plan["index"],
+                sequence,
+                plan["operation"],
+                task["task_id"],
+                _event_payload(plan["operation"], plan["effect"]),
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO task_revisions(
+              task_id,
+              revision,
+              event_sequence,
+              state,
+              title,
+              objective,
+              priority,
+              parent_task_id,
+              dependencies_json,
+              reason,
+              superseded_by_task_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task["task_id"],
+                task["revision"],
+                sequence,
+                task["state"],
+                task["title"],
+                task["objective"],
+                task["priority"],
+                task["parent_task_id"],
+                _canonical_json(task["dependencies"]),
+                task["reason"],
+                task["superseded_by_task_id"],
+            ),
+        )
+
+    release_now = _now_us()
+    for task_claim, disposition in task_claims_to_release.values():
+        _append_claim_release(
+            connection,
+            task_claim,
+            disposition=disposition,
+            now_us=release_now,
+        )
+    _append_claim_release(
+        connection,
+        message_claim,
+        disposition="applied",
+        now_us=release_now,
+    )
+
+    applied_at = _utc_now()
+    applied_cursor = connection.execute(
+        """
+        INSERT INTO events(
+          event_id,
+          occurred_at,
+          event_type,
+          message_id,
+          payload_json
+        ) VALUES (?, ?, 'message.applied', ?, ?)
+        """,
+        (
+            _identifier("evt"),
+            applied_at,
+            message_id,
+            _canonical_json({"effects_sha256": effects_hash}),
+        ),
+    )
+    final_effective = _effective_states(tasks)
+    result = {
+        "status": "applied",
+        "message_id": message_id,
+        "effects_sha256": effects_hash,
+        "aliases": aliases,
+        "tasks": [
+            _task_output(
+                tasks[task_id],
+                final_effective[task_id],
+                final_effective,
+            )
+            for task_id in sorted(
+                touched,
+                key=lambda value: int(value.removeprefix("TASK-")),
+            )
+        ],
+        "applied_sequence": applied_cursor.lastrowid,
+        "replayed": False,
+    }
+    result_json = _canonical_json(result)
+    connection.execute(
+        """
+        INSERT INTO message_applications(
+          message_id,
+          claim_id,
+          effects_sha256,
+          applied_at,
+          applied_event_sequence,
+          effect_count,
+          document_json,
+          result_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            message_id,
+            claim_id,
+            effects_hash,
+            applied_at,
+            applied_cursor.lastrowid,
+            len(effects),
+            canonical,
+            result_json,
+        ),
+    )
+    return result
+
+
+def overview_tasks(
+    scope: JournalScope,
+    *,
+    states: set[str] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """List compact task rows in task-number order from one snapshot.
+
+    Unlike :func:`list_tasks`, an explicit ``states`` filter may select
+    terminal states; the default remains the non-terminal states.
+    """
+
+    if limit < 1 or limit > 1000:
+        raise JournalError("task limit must be between 1 and 1000")
+    if states and not states <= set(TASK_STATES):
+        raise JournalError("unsupported task state filter")
+    with _read_snapshot(scope) as (connection, effective_now):
+        tasks = _load_current_tasks(connection, now_us=effective_now)
+        effective = _effective_states(tasks)
+        selected = [
+            task
+            for task in tasks.values()
+            if (
+                effective[task["task_id"]] in states
+                if states is not None
+                else effective[task["task_id"]] not in TERMINAL_STATES
+            )
+        ]
+        selected.sort(key=lambda task: task["task_number"])
+        return [
+            {
+                "task_id": task["task_id"],
+                "revision": task["revision"],
+                "state": effective[task["task_id"]],
+                "priority": task["priority"],
+                "title": task["title"],
+            }
+            for task in selected[:limit]
+        ]
+
+
+def enqueue_task(
+    scope: JournalScope,
+    *,
+    title: str,
+    objective: str | None = None,
+    priority: int = 0,
+    requires: list[str] | tuple[str, ...] = (),
+    owner_id: str,
+    lease_seconds: int = 900,
+    cwd: str | None = None,
+    now_us: int | None = None,
+) -> dict[str, Any]:
+    """Create one task through the full message pipeline atomically.
+
+    One transaction persists an auto-generated request message, claims
+    it, applies a single create-task effects document, and marks the
+    message applied. The task mutation still flows through a recorded
+    message and one atomic effects application; nothing bypasses the
+    pipeline, and any failure rolls the whole request back.
+    """
+
+    owner = _text(owner_id, path="owner_id", minimum=1, maximum=200)
+    lease = _integer(
+        lease_seconds,
+        path="lease_seconds",
+        minimum=1,
+        maximum=86400,
+    )
+    requirements = list(requires)
+    for reference in requirements:
+        if not isinstance(reference, str) or not TASK_ID_PATTERN.fullmatch(
+            reference
+        ):
+            raise JournalError(
+                f"invalid task ID: {reference}",
+                code="invalid_argument",
+            )
+    if len(requirements) != len(set(requirements)):
+        raise JournalError(
+            "duplicate required task ID",
+            code="invalid_argument",
+        )
+    specification: dict[str, Any] = {"title": title, "priority": priority}
+    if objective is not None:
+        specification["objective"] = objective
+    if requirements:
+        specification["requires"] = requirements
+    content = _canonical_json(
+        {"action": "enqueue", "spec": specification, "v": 1}
+    )
+    effective_now = _now_us() if now_us is None else now_us
+    connection = _connect(scope)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        ingested = _ingest_connected(
+            connection,
+            scope,
+            content,
+            source="cli",
+            cwd=cwd,
+        )
+        claim = _claim_message_connected(
+            connection,
+            ingested.message_id,
+            owner_id=owner,
+            lease_seconds=lease,
+            now_us=effective_now,
+        )
+        expect: dict[str, int] = {}
+        for reference in requirements:
+            row = connection.execute(
+                "SELECT revision FROM current_tasks WHERE task_id = ?",
+                (reference,),
+            ).fetchone()
+            if row is None:
+                raise JournalError(
+                    f"task not found: {reference}",
+                    code="not_found",
+                )
+            expect[reference] = row["revision"]
+        result = _apply_effects_connected(
+            connection,
+            ingested.message_id,
+            {
+                "v": 1,
+                "expect": expect,
+                "effects": [["create", "$task", specification]],
+            },
+            claim_id=claim["claim_id"],
+        )
         connection.commit()
-        return result
+        task = result["tasks"][0]
+        return {
+            "task_id": task["task_id"],
+            "message_id": ingested.message_id,
+            "state": task["state"],
+            "revision": task["revision"],
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def settle_tasks_done(
+    scope: JournalScope,
+    *,
+    task_ids: list[str] | tuple[str, ...],
+    summary: str,
+    owner_id: str,
+    lease_seconds: int = 900,
+    cwd: str | None = None,
+    now_us: int | None = None,
+) -> dict[str, Any]:
+    """Transition every named task to done in one atomic transaction.
+
+    One transaction persists the summary as a message, claims it, and
+    applies a single effects document transitioning every named task to
+    done with each task's current revision resolved into ``expect``. A
+    task already active under ``owner_id`` completes with its existing
+    claim; a ready task is leased inside the same transaction. Any
+    ineligible task fails the whole command without partial changes.
+    """
+
+    identifiers = list(task_ids)
+    if not identifiers:
+        raise JournalError(
+            "at least one task ID is required",
+            code="invalid_argument",
+        )
+    for task_id in identifiers:
+        if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(
+            task_id
+        ):
+            raise JournalError(
+                f"invalid task ID: {task_id}",
+                code="invalid_argument",
+            )
+    if len(identifiers) != len(set(identifiers)):
+        raise JournalError(
+            "duplicate task ID",
+            code="invalid_argument",
+        )
+    owner = _text(owner_id, path="owner_id", minimum=1, maximum=200)
+    lease = _integer(
+        lease_seconds,
+        path="lease_seconds",
+        minimum=1,
+        maximum=86400,
+    )
+    explanation = _text(summary, path="summary", minimum=1, maximum=1000)
+    effective_now = _now_us() if now_us is None else now_us
+    connection = _connect(scope)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        _recover_expired_claims(
+            connection,
+            resource_kind="task",
+            now_us=effective_now,
+        )
+        tasks = _load_current_tasks(connection, now_us=effective_now)
+        states = _effective_states(tasks)
+        settlement_claims: dict[str, dict[str, Any]] = {}
+        for task_id in identifiers:
+            if task_id not in tasks:
+                raise JournalError(
+                    f"task not found: {task_id}",
+                    code="not_found",
+                )
+            task = tasks[task_id]
+            state = states[task_id]
+            if state == "active":
+                claim = task["claim"]
+                if claim["owner_id"] != owner:
+                    raise JournalError(
+                        f"task is not settleable: {task_id}: active claim "
+                        f"is held by another owner",
+                        code="not_claimable",
+                    )
+                settlement_claims[task_id] = dict(claim)
+            elif state == "ready":
+                settlement_claims[task_id] = _claim_resource(
+                    connection,
+                    resource_kind="task",
+                    resource_id=task_id,
+                    owner_id=owner,
+                    lease_seconds=lease,
+                    now_us=effective_now,
+                    basis_revision=task["revision"],
+                )
+            else:
+                raise JournalError(
+                    f"task is not settleable: {task_id}: {state}",
+                    code="state_conflict",
+                )
+        ingested = _ingest_connected(
+            connection,
+            scope,
+            explanation,
+            source="cli",
+            cwd=cwd,
+        )
+        message_claim = _claim_message_connected(
+            connection,
+            ingested.message_id,
+            owner_id=owner,
+            lease_seconds=lease,
+            now_us=effective_now,
+        )
+        result = _apply_effects_connected(
+            connection,
+            ingested.message_id,
+            {
+                "v": 1,
+                "expect": {
+                    task_id: tasks[task_id]["revision"]
+                    for task_id in identifiers
+                },
+                "effects": [
+                    [
+                        "transition",
+                        task_id,
+                        "done",
+                        {
+                            "claim": settlement_claims[task_id]["claim_id"],
+                            "reason": explanation,
+                        },
+                    ]
+                    for task_id in identifiers
+                ],
+            },
+            claim_id=message_claim["claim_id"],
+        )
+        connection.commit()
+        return {
+            "status": "done",
+            "message_id": ingested.message_id,
+            "tasks": [
+                {
+                    "task_id": task["task_id"],
+                    "revision": task["revision"],
+                    "state": task["state"],
+                }
+                for task in result["tasks"]
+            ],
+        }
     except Exception:
         connection.rollback()
         raise

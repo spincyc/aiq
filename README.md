@@ -150,8 +150,11 @@ one contract instead of carrying every tool description in context.
 | Capture a message without duplicates | `aiq ingest --if-new --message TEXT` |
 | Inspect pending messages | `aiq inbox list` |
 | Summarize bounded work state | `aiq status` |
+| Create one task in one step | `aiq enqueue TITLE` |
+| List tasks, including finished ones | `aiq list --all` |
 | Preview ready work | `aiq queue peek` |
-| Lease ready work | `aiq queue next --owner OWNER` |
+| Lease ready work | `aiq queue next --owner OWNER` (or `aiq dequeue`) |
+| Settle leased or ready tasks as done | `aiq task done TASK-1 --summary TEXT` |
 | Verify storage and history | `aiq journal check` |
 | Check local health read-only | `aiq doctor` |
 | Explain task eligibility | `aiq task explain TASK-1` |

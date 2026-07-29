@@ -23,12 +23,13 @@ JSON_COMMAND_PATHS = {
     tuple(name.split("."))
     for name in """
         capability.list capability.show claim.list claim.release config.check
-        config.show doctor inbox.apply inbox.claim inbox.fail inbox.list
-        inbox.needs-input ingest integration.check integration.install
-        integration.list integration.plan integration.print
-        integration.uninstall journal.check journal.destroy journal.export
-        journal.init journal.path journal.snapshot queue.next queue.peek
-        reconcile report status task.explain task.history task.list task.show
+        config.show dequeue doctor enqueue inbox.apply inbox.claim inbox.fail
+        inbox.list inbox.needs-input ingest integration.check
+        integration.install integration.list integration.plan
+        integration.print integration.uninstall journal.check journal.destroy
+        journal.export journal.init journal.path journal.snapshot list
+        queue.next queue.peek reconcile report status task.done task.explain
+        task.history task.list task.show
     """.split()
 }
 
@@ -268,6 +269,45 @@ class CliProtocolTests(unittest.TestCase):
         )
         self.assertEqual(claims["claims"][0]["status"], "active")
         self.ok("claim", "release", item["claim"]["claim_id"], *self.scope)
+
+        enqueued = self.ok(
+            "enqueue", "Transactional task", "--objective", "Enqueue flow",
+            "--priority", "3", "--requires", task_id, *self.scope,
+        )
+        self.assertEqual(set(enqueued), {"message_id", "state", "task_id", "v"})
+        self.assertEqual(enqueued["state"], "queued")
+        listed = self.ok("list", *self.scope)
+        self.assertEqual(
+            [entry["task_id"] for entry in listed["tasks"]],
+            [task_id, enqueued["task_id"]],
+        )
+        self.assertEqual(
+            set(listed["tasks"][0]),
+            {"priority", "revision", "state", "task_id", "title"},
+        )
+        dequeued = self.ok("dequeue", "--owner", "protocol-test", *self.scope)
+        self.assertEqual(set(dequeued), {"items", "v"})
+        self.assertEqual(dequeued["items"][0]["task"]["task_id"], task_id)
+        settled = self.ok(
+            "task", "done", task_id, "--summary", "Protocol settlement",
+            "--owner", "protocol-test", *self.scope,
+        )
+        self.assertEqual(set(settled), {"message_id", "status", "tasks", "v"})
+        self.assertEqual(settled["status"], "done")
+        self.assertEqual(
+            settled["tasks"],
+            [{"task_id": task_id, "revision": 2, "state": "done"}],
+        )
+        self.ok(
+            "task", "done", enqueued["task_id"],
+            "--summary", "Protocol settlement follow-up",
+            "--owner", "protocol-test", *self.scope,
+        )
+        finished = self.ok("list", "--all", *self.scope)
+        self.assertEqual(
+            [entry["state"] for entry in finished["tasks"]],
+            ["done", "done"],
+        )
 
         stored = self.ok(
             "ingest", "--message", "Deduplicated protocol content",

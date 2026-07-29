@@ -22,6 +22,7 @@ from aiq.journal import (
     resolve_scope,
 )
 from aiq.queue import (
+    TASK_STATES,
     TRANSITIONS,
     _effective_states,
     _now_us,
@@ -31,13 +32,16 @@ from aiq.queue import (
     claim_next_tasks,
     claim_task,
     dispose_message,
+    enqueue_task,
     explain_task,
     list_claims,
     list_tasks,
     next_tasks,
+    overview_tasks,
     parse_effect_document,
     read_status,
     release_claim,
+    settle_tasks_done,
     show_task,
     task_history,
 )
@@ -1047,6 +1051,229 @@ class QueueTest(unittest.TestCase):
                 message_id=message.message_id,
             )
         self.assertEqual(check_journal(self.scope)["status"], "ok")
+
+    def test_enqueue_is_one_recorded_and_applied_transaction(self) -> None:
+        first = enqueue_task(
+            self.scope,
+            title="Enqueued work",
+            objective="Reach the goal",
+            priority=9,
+            owner_id="worker",
+        )
+        dependent = enqueue_task(
+            self.scope,
+            title="Dependent work",
+            requires=[first["task_id"]],
+            owner_id="worker",
+        )
+
+        self.assertEqual(first["state"], "ready")
+        self.assertEqual(dependent["state"], "queued")
+        shown = show_task(self.scope, first["task_id"])
+        self.assertEqual(shown["created_by_message_id"], first["message_id"])
+        self.assertEqual(shown["title"], "Enqueued work")
+        self.assertEqual(shown["objective"], "Reach the goal")
+        self.assertEqual(shown["priority"], 9)
+        self.assertEqual(
+            show_task(self.scope, dependent["task_id"])["dependencies"],
+            [first["task_id"]],
+        )
+        # Both auto-generated messages were applied inside their own
+        # transaction: nothing is pending and no claim remains held.
+        self.assertEqual(list_inbox(self.scope), [])
+        status = read_status(self.scope)
+        self.assertEqual(status["messages"]["applied"], 2)
+        self.assertEqual(status["claims"]["active"], 0)
+        self.assertEqual(check_journal(self.scope)["status"], "ok")
+
+    def test_enqueue_rolls_back_completely_on_any_failure(self) -> None:
+        failures = (
+            ({"title": "Bad", "requires": ["TASK-999"]}, "task not found"),
+            ({"title": ""}, "title"),
+            ({"title": "Bad", "requires": ["not-a-task"]}, "invalid task ID"),
+            (
+                {"title": "Bad", "requires": ["TASK-1", "TASK-1"]},
+                "duplicate required",
+            ),
+        )
+        for kwargs, error in failures:
+            with self.subTest(error=error):
+                with self.assertRaisesRegex(JournalError, error):
+                    enqueue_task(self.scope, owner_id="worker", **kwargs)
+
+        self.assertEqual(list_tasks(self.scope), [])
+        self.assertEqual(list_inbox(self.scope), [])
+        self.assertEqual(
+            read_status(self.scope)["messages"],
+            {
+                "received": 0,
+                "processing": 0,
+                "applied": 0,
+                "needs_input": 0,
+                "failed": 0,
+            },
+        )
+
+    def test_settle_done_reuses_owned_claim_and_leases_ready(self) -> None:
+        leased = enqueue_task(
+            self.scope,
+            title="Leased work",
+            owner_id="worker",
+        )
+        ready = enqueue_task(self.scope, title="Ready work", owner_id="worker")
+        claim_task(self.scope, leased["task_id"], owner_id="worker")
+
+        result = settle_tasks_done(
+            self.scope,
+            task_ids=[leased["task_id"], ready["task_id"]],
+            summary="Both branches are verified complete",
+            owner_id="worker",
+        )
+
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(
+            result["tasks"],
+            [
+                {"task_id": leased["task_id"], "revision": 2, "state": "done"},
+                {"task_id": ready["task_id"], "revision": 2, "state": "done"},
+            ],
+        )
+        for task_id in (leased["task_id"], ready["task_id"]):
+            shown = show_task(self.scope, task_id)
+            self.assertEqual(shown["state"], "done")
+            self.assertEqual(
+                shown["reason"],
+                "Both branches are verified complete",
+            )
+        # The summary message and every task claim were consumed inside
+        # the one transaction.
+        self.assertEqual(list_inbox(self.scope), [])
+        self.assertEqual(list_claims(self.scope), [])
+        self.assertEqual(read_status(self.scope)["messages"]["applied"], 3)
+        self.assertEqual(check_journal(self.scope)["status"], "ok")
+
+    def test_settle_done_is_all_or_nothing(self) -> None:
+        ready = enqueue_task(self.scope, title="Ready work", owner_id="worker")
+        dependent = enqueue_task(
+            self.scope,
+            title="Queued work",
+            requires=[ready["task_id"]],
+            owner_id="worker",
+        )
+        before = read_status(self.scope)
+
+        with self.assertRaisesRegex(
+            JournalError,
+            f"not settleable: {dependent['task_id']}: queued",
+        ) as caught:
+            settle_tasks_done(
+                self.scope,
+                task_ids=[ready["task_id"], dependent["task_id"]],
+                summary="Premature settlement",
+                owner_id="worker",
+            )
+
+        self.assertEqual(caught.exception.code, "state_conflict")
+        self.assertEqual(show_task(self.scope, ready["task_id"])["state"], "ready")
+        self.assertEqual(show_task(self.scope, ready["task_id"])["revision"], 1)
+        self.assertEqual(read_status(self.scope), before)
+
+        claim_task(self.scope, ready["task_id"], owner_id="other")
+        with self.assertRaisesRegex(JournalError, "held by another owner") as held:
+            settle_tasks_done(
+                self.scope,
+                task_ids=[ready["task_id"]],
+                summary="Wrong owner",
+                owner_id="worker",
+            )
+        self.assertEqual(held.exception.code, "not_claimable")
+        self.assertEqual(show_task(self.scope, ready["task_id"])["state"], "active")
+        self.assertEqual(check_journal(self.scope)["status"], "ok")
+
+    def test_settle_done_retry_after_success_changes_nothing(self) -> None:
+        created = enqueue_task(
+            self.scope,
+            title="Terminal work",
+            owner_id="worker",
+        )
+        settle_tasks_done(
+            self.scope,
+            task_ids=[created["task_id"]],
+            summary="Verified complete",
+            owner_id="worker",
+        )
+        before = read_status(self.scope)
+
+        with self.assertRaisesRegex(
+            JournalError,
+            f"not settleable: {created['task_id']}: done",
+        ):
+            settle_tasks_done(
+                self.scope,
+                task_ids=[created["task_id"]],
+                summary="Verified complete",
+                owner_id="worker",
+            )
+
+        self.assertEqual(read_status(self.scope), before)
+        self.assertEqual(show_task(self.scope, created["task_id"])["revision"], 2)
+        self.assertEqual(check_journal(self.scope)["status"], "ok")
+
+    def test_overview_orders_by_task_number_and_filters_states(self) -> None:
+        first = enqueue_task(
+            self.scope,
+            title="Alpha",
+            priority=1,
+            owner_id="worker",
+        )
+        second = enqueue_task(
+            self.scope,
+            title="Beta",
+            priority=50,
+            owner_id="worker",
+        )
+        third = enqueue_task(
+            self.scope,
+            title="Gamma",
+            requires=[second["task_id"]],
+            owner_id="worker",
+        )
+        settle_tasks_done(
+            self.scope,
+            task_ids=[first["task_id"]],
+            summary="Alpha complete",
+            owner_id="worker",
+        )
+
+        default = overview_tasks(self.scope)
+        everything = overview_tasks(self.scope, states=set(TASK_STATES))
+        done_only = overview_tasks(self.scope, states={"done"})
+
+        # Task-number order, not priority order, and terminal states only
+        # on request.
+        self.assertEqual(
+            [task["task_id"] for task in default],
+            [second["task_id"], third["task_id"]],
+        )
+        self.assertEqual(
+            [task["task_id"] for task in everything],
+            [first["task_id"], second["task_id"], third["task_id"]],
+        )
+        self.assertEqual(everything[0]["state"], "done")
+        self.assertEqual(
+            set(everything[0]),
+            {"task_id", "revision", "state", "priority", "title"},
+        )
+        self.assertEqual(
+            [task["task_id"] for task in done_only],
+            [first["task_id"]],
+        )
+        self.assertEqual(
+            len(overview_tasks(self.scope, states=set(TASK_STATES), limit=1)),
+            1,
+        )
+        with self.assertRaisesRegex(JournalError, "task limit"):
+            overview_tasks(self.scope, limit=0)
 
     def test_claim_release_is_retryable(self) -> None:
         message = self.ingest("Release this claim")

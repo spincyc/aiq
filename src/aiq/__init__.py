@@ -5,7 +5,7 @@ from importlib.metadata import version as _distribution_version
 
 
 _DISTRIBUTION_NAME = "aiq-workqueue"
-_SOURCE_VERSION = "0.1.0a1"
+_SOURCE_VERSION = "0.1.0a2"
 
 
 def _resolve_version() -> str:
