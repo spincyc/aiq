@@ -161,6 +161,38 @@ class DoctorCliTests(unittest.TestCase):
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(checks["journal"]["status"], "fail")
 
+    def test_doctor_warns_on_journal_permissions_and_exits_zero(self) -> None:
+        initialized = self.run_aiq(
+            "journal", "init", "--scope", "user", "--json"
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        journal_path = self.state_home / "aiq" / "journal.sqlite3"
+        journal_path.chmod(0o644)
+
+        completed = self.run_aiq("doctor", "--scope", "user", "--json")
+
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        payload, checks = self.doctor_payload(completed)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(checks["journal"]["status"], "warn")
+        self.assertIn("0644", checks["journal"]["detail"])
+        self.assertIn("0600", checks["journal"]["detail"])
+
+    def test_doctor_reports_scope_resolution_failure(self) -> None:
+        completed = self.run_aiq(
+            "doctor", "--scope", "repo", "--cwd", str(self.home), "--json"
+        )
+
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        payload, checks = self.doctor_payload(completed)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(checks["scope"]["status"], "fail")
+        self.assertEqual(checks["journal"]["status"], "skipped")
+        self.assertEqual(
+            checks["journal"]["detail"],
+            "scope resolution failed",
+        )
+
     def test_doctor_human_output_is_aligned_and_terse(self) -> None:
         completed = self.run_aiq("doctor", "--scope", "user")
         self.assertEqual(completed.returncode, 0, completed.stderr)

@@ -6,13 +6,17 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
 
+from aiq.journal import SCHEMA_VERSION
+
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "schema-v1.sql"
 
 
 def _codex_entry(payload):
@@ -156,6 +160,79 @@ class ReconcileCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         return stale_python
+
+    def install_v1_user_journal(self) -> Path:
+        """Install the frozen schema-v1 fixture at the user journal path."""
+
+        journal_root = self.state_home / "aiq"
+        journal_path = journal_root / "journal.sqlite3"
+        journal_root.mkdir(mode=0o700, parents=True)
+        script = FIXTURE_PATH.read_text(encoding="utf-8")
+        for token, value in (
+            ("__AIQ_SCOPE_KIND__", "user"),
+            ("__AIQ_SCOPE_ROOT__", str(journal_root).replace("'", "''")),
+            ("__AIQ_SCOPE_ID__", "user"),
+        ):
+            script = script.replace(token, value)
+        connection = sqlite3.connect(journal_path)
+        try:
+            connection.executescript(script)
+        finally:
+            connection.close()
+        journal_path.chmod(0o600)
+        return journal_path
+
+    def journal_schema_version(self, journal_path: Path) -> int:
+        connection = sqlite3.connect(journal_path)
+        try:
+            row = connection.execute(
+                "SELECT value FROM journal_metadata"
+                " WHERE key = 'schema_version'"
+            ).fetchone()
+        finally:
+            connection.close()
+        return int(row[0])
+
+    def test_default_run_is_read_only_and_apply_migrates(self) -> None:
+        journal_path = self.install_v1_user_journal()
+
+        report = self.reconcile(returncode=1)
+
+        self.assertEqual(report["status"], "attention")
+        self.assertEqual(report["problems"], 1)
+        self.assertEqual(report["journal"]["status"], "drifted")
+        self.assertIn("migration", report["journal"]["reason"])
+        self.assertEqual(self.journal_schema_version(journal_path), 1)
+
+        applied = self.reconcile("--apply")
+
+        self.assertEqual(applied["status"], "ok")
+        self.assertEqual(applied["journal"]["status"], "ok")
+        self.assertIsNone(applied["journal"]["reason"])
+        self.assertEqual(
+            self.journal_schema_version(journal_path),
+            SCHEMA_VERSION,
+        )
+
+    def test_human_output_uses_uniform_tab_rows(self) -> None:
+        completed = self.run_aiq(
+            "reconcile", "--user", "--scope", "user", "--cwd", str(self.root),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        *rows, summary = completed.stdout.splitlines()
+        self.assertEqual(
+            [tuple(row.split("\t")[:3]) for row in rows],
+            [
+                ("integration", "claude", "skipped"),
+                ("integration", "codex", "skipped"),
+                ("journal", "-", "skipped"),
+            ],
+        )
+        for row in rows:
+            self.assertEqual(len(row.split("\t")), 4, row)
+        self.assertEqual(summary, "status\tok\tproblems\t0")
 
     def test_absent_integration_and_journal_are_skipped(self) -> None:
         payload = self.reconcile()

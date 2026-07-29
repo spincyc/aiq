@@ -12,8 +12,7 @@ import sys
 from typing import Any, Mapping
 
 from aiq.config import Config, ConfigError, resolve_config
-from aiq.integrations import claude as claude_integration
-from aiq.integrations import codex as codex_integration
+from aiq.integrations import HOOK_INTEGRATIONS
 from aiq.integrations._hooks import HookIntegrationError
 from aiq.journal import (
     SCHEMA_VERSION,
@@ -75,7 +74,16 @@ def _git_check() -> dict[str, str]:
     )
 
 
-def _journal_check(scope: JournalScope) -> dict[str, str]:
+def inspect_journal(scope: JournalScope) -> dict[str, str]:
+    """Cheap read-only journal health check.
+
+    Shared by ``aiq doctor`` and ``aiq reconcile``'s report-only default.
+    Never opens the journal for writing, migrates storage, or rehashes
+    content; deep verification stays explicit in ``aiq journal check``.
+    Returns a check record with ``status`` ok/warn/fail/skipped and a
+    ``detail`` line.
+    """
+
     path = scope.journal_path
     if not os.path.lexists(path):
         return _check("journal", "skipped", f"journal not initialized: {path}")
@@ -144,9 +152,9 @@ def _journal_check(scope: JournalScope) -> dict[str, str]:
     return _check("journal", "ok", f"schema v{version}; quick check ok")
 
 
-_INTEGRATION_MODULES = (
-    ("integration.claude", claude_integration),
-    ("integration.codex", codex_integration),
+_INTEGRATION_MODULES = tuple(
+    (f"integration.{integration_id}", record.module)
+    for integration_id, record in sorted(HOOK_INTEGRATIONS.items())
 )
 
 
@@ -236,7 +244,7 @@ def run_doctor(
     if scope is None:
         checks.append(_check("journal", "skipped", "scope resolution failed"))
     else:
-        checks.append(_journal_check(scope))
+        checks.append(inspect_journal(scope))
     checks.append(
         _check(
             "journal.deep",

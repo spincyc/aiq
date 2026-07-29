@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from aiq import __version__
 from aiq.cli import main
@@ -39,20 +40,21 @@ class ReportCliTest(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-        self.saved_environ = dict(os.environ)
-        for key in [
-            name
-            for name in os.environ
-            if name.startswith(("AIQ_", "GIT_"))
-        ]:
-            del os.environ[key]
-        os.environ.update(
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("AIQ_", "GIT_"))
+        }
+        environment.update(
             {
                 "HOME": str(self.root / "home"),
                 "XDG_CONFIG_HOME": str(self.root / "config"),
                 "XDG_STATE_HOME": str(self.root / "state"),
             }
         )
+        patcher = patch.dict(os.environ, environment, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.assertEqual(
             self.run_cli(
                 "journal", "init",
@@ -62,8 +64,6 @@ class ReportCliTest(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        os.environ.clear()
-        os.environ.update(self.saved_environ)
         self.temporary_directory.cleanup()
 
     def run_cli(self, *arguments: str) -> tuple[int, str, str]:
@@ -126,6 +126,7 @@ class ReportCliTest(unittest.TestCase):
         self.assertEqual(payload["v"], 1)
         self.assertEqual(payload["status"], "reported")
         self.assertEqual(payload["scope"]["kind"], "repo")
+        self.assertIs(payload["detail_truncated"], False)
         tasks = self.target_tasks()
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0]["task_id"], payload["task_id"])
@@ -171,7 +172,7 @@ class ReportCliTest(unittest.TestCase):
             payload = json.loads(stdout)
             self.assertEqual(payload["status"], "duplicate")
             self.assertEqual(payload["message_id"], first["message_id"])
-            self.assertNotIn("task_id", payload)
+            self.assertEqual(payload["task_id"], first["task_id"])
         self.assertEqual(len(self.target_tasks()), 1)
         self.assertFalse(
             (self.origin_b / ".git" / "aiq" / "journal.sqlite3").exists()
@@ -182,9 +183,11 @@ class ReportCliTest(unittest.TestCase):
         self.assertEqual(self.target_tasks(), [])
 
     def test_environment_variable_selects_target(self) -> None:
-        os.environ["AIQ_DEV_REPORT_REPO"] = str(self.target)
-
-        code, stdout, stderr = self.report(to=False)
+        with patch.dict(
+            os.environ,
+            {"AIQ_DEV_REPORT_REPO": str(self.target)},
+        ):
+            code, stdout, stderr = self.report(to=False)
 
         self.assertEqual(code, 0, stderr)
         self.assertEqual(json.loads(stdout)["status"], "reported")
@@ -199,9 +202,8 @@ class ReportCliTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        os.environ["AIQ_DEV_REPORT_REPO"] = str(decoy)
-
-        code, stdout, stderr = self.report()
+        with patch.dict(os.environ, {"AIQ_DEV_REPORT_REPO": str(decoy)}):
+            code, stdout, stderr = self.report()
 
         self.assertEqual(code, 0, stderr)
         self.assertEqual(json.loads(stdout)["status"], "reported")
@@ -246,13 +248,37 @@ class ReportCliTest(unittest.TestCase):
 
         code, stdout, stderr = self.report(detail="d" * 16000)
         self.assertEqual(code, 0, stderr)
-        task_id = json.loads(stdout)["task_id"]
+        payload = json.loads(stdout)
+        self.assertIs(payload["detail_truncated"], True)
+        task_id = payload["task_id"]
         code, stdout, stderr = self.run_cli(
             "task", "show", str(task_id),
             "--scope", "repo", "--cwd", str(self.target), "--json",
         )
         self.assertEqual(code, 0, stderr)
         self.assertEqual(len(json.loads(stdout)["task"]["objective"]), 2000)
+
+    def test_priority_bounds_are_enforced(self) -> None:
+        self.assert_error(
+            self.report("--priority", "1000001"), 2, "invalid_argument"
+        )
+        self.assert_error(
+            self.report("--priority", "-1000001"), 2, "invalid_argument"
+        )
+        self.assertEqual(self.target_tasks(), [])
+
+        code, stdout, stderr = self.report(
+            "--priority", "1000000", summary="Upper bound report"
+        )
+        self.assertEqual(code, 0, stderr)
+        code, stdout, stderr = self.report(
+            "--priority", "-1000000", summary="Lower bound report"
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(
+            sorted(task["priority"] for task in self.target_tasks()),
+            [-1_000_000, 1_000_000],
+        )
 
     def test_preingested_identical_content_is_reported_duplicate(self) -> None:
         summary = "Queue next loses a claim"
@@ -275,6 +301,8 @@ class ReportCliTest(unittest.TestCase):
             payload = json.loads(stdout)
             self.assertEqual(payload["status"], "duplicate")
             self.assertEqual(payload["message_id"], ingested.message_id)
+            # The pre-ingested message never produced a tracking task.
+            self.assertNotIn("task_id", payload)
         self.assertEqual(self.target_tasks(), [])
 
 

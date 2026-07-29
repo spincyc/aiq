@@ -288,15 +288,16 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="safe retry when an idempotency key is supplied",
     ),
     "reconcile.run": _capability(
-        "Re-bind AIQ-owned integrations and validate or migrate selected "
-        "journal state after an external installer upgrades AIQ.",
+        "Report AIQ-owned integration and journal health after an external "
+        "installer upgrades AIQ; --apply repairs planned AIQ-owned drift "
+        "and validates or migrates selected journal state.",
         (
             "aiq reconcile --user [--apply] "
             "[--launcher PATH] [--git-executable PATH] [--json]"
         ),
         mutates=True,
-        idempotency="report-only by default; --apply repairs only planned "
-        "AIQ-owned drift",
+        idempotency="report-only by default (cheap read-only journal "
+        "inspection); --apply repairs only planned AIQ-owned drift",
     ),
     "report.send": _capability(
         "Report an AIQ defect as one deduplicated bug-fix task in the local "
@@ -306,7 +307,8 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
             "[--to PATH] [--priority N] [--json]"
         ),
         mutates=True,
-        idempotency="identical report replays without a second task",
+        idempotency="identical report replays as a duplicate carrying the "
+        "tracking task without creating a second task",
     ),
     "queue.next": _capability(
         "Lease the highest-priority eligible task.",

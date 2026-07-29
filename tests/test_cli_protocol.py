@@ -9,7 +9,12 @@ import sys
 import tempfile
 import unittest
 
-from aiq.cli import _classify_error, _versioned, build_parser
+from aiq.cli import (
+    CONFIG_OUTPUT_COMMANDS,
+    _classify_error,
+    _versioned,
+    build_parser,
+)
 from aiq.integrations.codex import CodexIntegrationError
 
 
@@ -351,9 +356,20 @@ class CliProtocolTests(unittest.TestCase):
             5,
             "schema_incompatible",
         )
+        # Plan is report-only: unresolvable executables yield an unsafe
+        # plan with exit 0. Install surfaces them as error envelopes.
+        unsafe = self.run_aiq(
+            "integration", "plan", "codex", "--user",
+            "--launcher", str(self.root / "missing-aiq"), "--json",
+        )
+        self.assertEqual(unsafe.returncode, 0, unsafe.stderr)
+        unsafe_plan = json.loads(unsafe.stdout)
+        self.assertEqual(unsafe_plan["status"], "unsafe")
+        self.assertEqual(unsafe_plan["action"], "block")
+        self.assertIn("unavailable", unsafe_plan["blocked_reason"])
         self.assert_error(
             self.run_aiq(
-                "integration", "plan", "codex", "--user",
+                "integration", "install", "codex", "--user",
                 "--launcher", str(self.root / "missing-aiq"), "--json",
             ),
             6,
@@ -361,7 +377,7 @@ class CliProtocolTests(unittest.TestCase):
         )
         self.assert_error(
             self.run_aiq(
-                "integration", "plan", "codex", "--user",
+                "integration", "install", "codex", "--user",
                 "--launcher", "relative-aiq", "--json",
             ),
             2,
@@ -369,7 +385,7 @@ class CliProtocolTests(unittest.TestCase):
         )
         self.assert_error(
             self.run_aiq(
-                "integration", "plan", "codex", "--user", "--json",
+                "integration", "install", "codex", "--user", "--json",
                 environment={**self.environment, "PATH": ""},
             ),
             6,
@@ -377,7 +393,7 @@ class CliProtocolTests(unittest.TestCase):
         )
         self.assert_error(
             self.run_aiq(
-                "integration", "plan", "codex", "--user",
+                "integration", "install", "codex", "--user",
                 "--launcher", str(self.launcher),
                 "--git-executable", "relative-git", "--json",
             ),
@@ -386,7 +402,7 @@ class CliProtocolTests(unittest.TestCase):
         )
         self.assert_error(
             self.run_aiq(
-                "integration", "plan", "codex", "--user",
+                "integration", "install", "codex", "--user",
                 "--launcher", str(self.launcher),
                 "--git-executable", str(self.root / "missing-git"), "--json",
             ),
@@ -395,13 +411,60 @@ class CliProtocolTests(unittest.TestCase):
         )
         self.assert_error(
             self.run_aiq(
-                "integration", "plan", "codex", "--user",
+                "integration", "install", "codex", "--user",
                 "--launcher", str(self.launcher), "--json",
                 environment={**self.environment, "PATH": ""},
             ),
             6,
             "unsupported_environment",
         )
+
+    def test_config_output_commands_match_registered_parsers(self) -> None:
+        def loads_config(parser) -> bool:
+            if parser._defaults.get("load_config"):
+                return True
+            return any(
+                loads_config(child)
+                for action in parser._actions
+                if action.__class__.__name__ == "_SubParsersAction"
+                for child in action.choices.values()
+            )
+
+        root = build_parser()
+        subparsers = next(
+            action
+            for action in root._actions
+            if action.__class__.__name__ == "_SubParsersAction"
+        )
+        registered = {
+            name
+            for name, child in subparsers.choices.items()
+            if loads_config(child)
+        }
+        # doctor and ingest resolve configuration inside their handlers:
+        # doctor reports configuration failures as checks, and ingest
+        # resolves configuration only after the event supplies the
+        # effective cwd.
+        self.assertEqual(
+            registered,
+            CONFIG_OUTPUT_COMMANDS - {"doctor", "ingest"},
+        )
+        self.assertLessEqual({"doctor", "ingest"}, CONFIG_OUTPUT_COMMANDS)
+
+    def test_config_error_honors_configured_json_output(self) -> None:
+        config_path = self.root / "config" / "aiq" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            'version = 1\noutput = "json"\n',
+            encoding="utf-8",
+        )
+
+        completed = self.run_aiq(
+            "config", "show", "--lease-seconds", "0",
+            "--cwd", str(self.repository),
+        )
+
+        self.assert_error(completed, 2, "invalid_config")
 
     def test_envelope_rejects_conflicting_payload_version(self) -> None:
         self.assertEqual(

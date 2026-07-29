@@ -18,6 +18,7 @@ from aiq.queue import (
     claim_task,
     explain_task,
     list_claims,
+    read_status,
     release_claim,
     task_history,
 )
@@ -233,6 +234,29 @@ class ExplainTaskTests(IntrospectionTestCase):
         self.assertEqual(
             superseded["explanation"],
             f"superseded by {second}: Replaced",
+        )
+
+    def test_expired_task_lease_frees_task_in_explain_and_status(self) -> None:
+        first, _ = self.create_pair()
+        expired = claim_task(
+            self.scope,
+            first,
+            owner_id="worker",
+            lease_seconds=1,
+            now_us=_now_us() - 10_000_000,
+        )["claim"]
+        self.assertEqual(expired["owner_id"], "worker")
+
+        explained = explain_task(self.scope, first)
+        self.assertEqual(explained["state"], "ready")
+        self.assertIsNone(explained["claim"])
+        self.assertEqual(explained["explanation"], "ready: no prerequisites")
+
+        status = read_status(self.scope)
+        self.assertEqual(status["claims"], {"active": 0})
+        self.assertIn(
+            first,
+            [task["task_id"] for task in status["ready"]],
         )
 
     def test_rejects_invalid_and_unknown_tasks(self) -> None:
