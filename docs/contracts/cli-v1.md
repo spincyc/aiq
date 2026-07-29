@@ -105,8 +105,11 @@ The tables list fields in addition to top-level `v`.
 | `inbox fail --json` | `status: "failed"`, `message_id`, `claim_id`, `replayed` |
 | `task list --json` | `tasks` containing task summaries |
 | `task show --json` | `task` containing task detail |
+| `task explain --json` | `explain` containing eligibility detail and `explanation` |
+| `task history --json` | `task_id`, `events` newest first, each with `occurred_at`, `type`, `detail` |
 | `queue peek --json` | `tasks` containing task summaries |
 | `queue next --json` | `items`, each containing separate `task` summary and `claim` |
+| `claim list --json` | `claims` containing unreleased lease summaries with `status` |
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `status --json` | `messages`, `tasks`, `claims`, `ready`, `scope` |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
@@ -209,6 +212,39 @@ Doctor writes its report to standard output even when checks fail. Exit 0
 means no check reported `fail`; exit 1 means at least one did. Warnings and
 skips do not change the exit code. Failures that prevent producing the
 report itself use the standard error envelope and exit codes.
+## Introspection
+
+Task and claim introspection is read-only, deterministic, and bounded:
+
+```text
+aiq task explain TASK_ID
+aiq task history TASK_ID [--limit N]
+aiq claim list [--owner OWNER] [--resource message|task]
+               [--status active|expired] [--limit N]
+```
+
+`task explain` reads one consistent snapshot and returns `explain` with
+`task_id`, `revision`, effective `state`, `recorded_state`, `prerequisites`
+(each prerequisite's `task_id`, effective `state`, and `satisfied`),
+`blocked_by`, `waiting_on`, the active lease as `claim` (`claim_id`,
+`owner_id`, `expires_at`; `null` when none), `reason`,
+`superseded_by_task_id`, and one deterministic single-line `explanation`.
+
+`task history` returns at most `--limit` recorded events for one task
+(default 50, between 1 and 1000), newest first. Entries contain
+`occurred_at`, `type` (`task.created`, `task.revised`,
+`task.state_changed`, `task.dependency_added`, `task.dependency_removed`,
+`claim.acquired`, `claim.released`, `claim.consumed`, `claim.revoked`, or
+`claim.expired`), and a type-specific `detail`: task events carry the
+resulting `revision` plus the changed `state`, patched `fields`, or
+`dependency`; claim events carry `claim_id` plus `owner_id` and
+`expires_at` or the release `disposition`. Message content never appears.
+
+`claim list` returns at most `--limit` unreleased claims (default 100,
+between 1 and 1000) in acquisition order. Each entry contains the shared
+claim fields plus `status`: `active` while the lease deadline is in the
+future, `expired` once the lease is recoverable. `--owner`, `--resource`,
+and `--status` filters apply before the limit.
 
 ## Generic event ingestion
 
@@ -391,6 +427,9 @@ their usual exit classes.
 | Inbox | oldest current lifecycle event first |
 | Task list, queue, and status `ready` | priority descending, then creation order |
 | Dependencies, blockers, waiters | task ID ascending |
+| Prerequisites in `task explain` | task ID ascending |
+| Task history | newest event first |
+| Claim list | claim acquisition order |
 | Applied tasks | task number ascending |
 | Capabilities | capability ID ascending |
 

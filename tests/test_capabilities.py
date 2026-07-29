@@ -16,6 +16,7 @@ from aiq.journal import JournalError
 EXPECTED_COMMAND_PATHS = {
     "capability.list": ("capability", "list"),
     "capability.show": ("capability", "show"),
+    "claim.list": ("claim", "list"),
     "claim.release": ("claim", "release"),
     "config.check": ("config", "check"),
     "config.show": ("config", "show"),
@@ -42,6 +43,8 @@ EXPECTED_COMMAND_PATHS = {
     "reconcile.run": ("reconcile",),
     "queue.peek": ("queue", "peek"),
     "status.show": ("status",),
+    "task.explain": ("task", "explain"),
+    "task.history": ("task", "history"),
     "task.list": ("task", "list"),
     "task.show": ("task", "show"),
 }
