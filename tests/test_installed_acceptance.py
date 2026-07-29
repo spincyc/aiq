@@ -36,9 +36,7 @@ class InstalledAcceptanceTest(unittest.TestCase):
         wheel_directory.mkdir()
         cls._run_setup(
             [
-                sys.executable,
-                "-m",
-                "build",
+                "pyproject-build",
                 "--no-isolation",
                 "--wheel",
                 "--outdir",
@@ -54,9 +52,7 @@ class InstalledAcceptanceTest(unittest.TestCase):
         sdist_directory.mkdir()
         cls._run_setup(
             [
-                sys.executable,
-                "-m",
-                "build",
+                "pyproject-build",
                 "--no-isolation",
                 "--sdist",
                 "--outdir",
@@ -81,9 +77,7 @@ class InstalledAcceptanceTest(unittest.TestCase):
         sdist_wheel_directory.mkdir()
         cls._run_setup(
             [
-                sys.executable,
-                "-m",
-                "build",
+                "pyproject-build",
                 "--no-isolation",
                 "--wheel",
                 "--outdir",

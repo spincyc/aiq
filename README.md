@@ -26,13 +26,31 @@ the Python standard library.
 
 ```sh
 git clone https://github.com/spincyc/aiq.git
-make -C ./aiq install-packages  # Arch Linux
 pipx install ./aiq
 aiq --version
 ```
 
-On other systems, provide Git, Python, and pipx with the platform package
-manager before running `pipx install`.
+### Host package bootstrap
+
+```sh
+make -C ./aiq install-packages
+```
+
+| Host | `AIQ_PLATFORM` | Status | Package manager |
+|---|---|---|---|
+| Arch Linux | `arch` | Supported | `pacman` through `sudo` |
+| macOS | `macos` | Best effort; not verified here | Existing Homebrew installation |
+| Other | Detected OS ID | No bundled fragment | Target exits without installing |
+
+```sh
+make -C ./aiq AIQ_PLATFORM=arch install-packages
+```
+
+Package fragments: [Arch](make/platforms/arch.mk) ·
+[macOS](make/platforms/macos.mk)
+
+Unsupported platforms disable only `install-packages`; neutral targets such as
+`make verify` remain usable.
 
 Update an existing source installation:
 
@@ -129,6 +147,7 @@ uninstall.
 ## Develop
 
 ```sh
+make install-packages  # Optional supported-host toolchain bootstrap
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .

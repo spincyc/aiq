@@ -24,9 +24,21 @@ python3 -m venv .venv
 python -m pip install --editable .
 ```
 
-On Arch Linux, `make install-packages` installs the declared development
-tools. On other supported systems, provide equivalent `git`, `gitleaks`,
-`make`, `pipx`, and Python build commands.
+`make install-packages` detects and loads a supported package fragment:
+
+| `AIQ_PLATFORM` | Fragment | Installer |
+|---|---|---|
+| `arch` | [`make/platforms/arch.mk`](make/platforms/arch.mk) | `pacman` through `sudo` |
+| `macos` | [`make/platforms/macos.mk`](make/platforms/macos.mk) | Existing Homebrew |
+
+Override detection when necessary:
+
+```sh
+make AIQ_PLATFORM=arch install-packages
+```
+
+An unsupported selection exits without installing. Add a platform fragment or
+install equivalent tools with the native package manager.
 
 Run the complete local checks before submitting a change:
 

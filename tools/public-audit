@@ -26,6 +26,7 @@ ALLOWED_TOP_LEVEL = frozenset(
         "README.md",
         "SECURITY.md",
         "docs",
+        "make",
         "pyproject.toml",
         "schemas",
         "src",
