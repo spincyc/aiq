@@ -197,6 +197,15 @@ def install_integration(
     )
 
 
+def installed_manifest(
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Return the validated installed user-level manifest, if one exists."""
+
+    return _hooks.installed_manifest(SPEC, environment=environment)
+
+
 def check_integration(
     *,
     launcher: str | Path | None = None,

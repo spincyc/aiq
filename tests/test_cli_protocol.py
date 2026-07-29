@@ -23,7 +23,7 @@ JSON_COMMAND_PATHS = {
         integration.check integration.install integration.list integration.plan
         integration.print integration.uninstall journal.check journal.destroy
         journal.export journal.init journal.path journal.snapshot queue.next
-        queue.peek status task.list task.show
+        queue.peek reconcile status task.list task.show
     """.split()
 }
 
@@ -264,6 +264,9 @@ class CliProtocolTests(unittest.TestCase):
             self.assertEqual(disposed["status"], status)
 
         self.ok("journal", "check", *self.scope)
+        reconciled = self.ok("reconcile", "--user", *self.scope)
+        self.assertEqual(reconciled["status"], "ok")
+        self.assertEqual(reconciled["integrations"][0]["status"], "skipped")
         self.ok("journal", "snapshot", *self.scope)
         self.ok(
             "journal", "export", str(self.root / "journal.jsonl"), *self.scope,

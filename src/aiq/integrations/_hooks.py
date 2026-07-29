@@ -148,6 +148,25 @@ def integration_present(
     return target.exists() or state_directory.exists()
 
 
+def installed_manifest(
+    spec: HookIntegrationSpec,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Return the validated installed user-level manifest, if one exists."""
+
+    effective_environment = os.environ if environment is None else environment
+    target = spec.target_path(effective_environment)
+    manifest = _read_manifest(
+        spec,
+        _integration_state_directory(spec, effective_environment, target),
+        target=target,
+    )
+    if manifest is None or manifest.get("status") != "installed":
+        return None
+    return manifest
+
+
 def _ensure_private_directory(spec: HookIntegrationSpec, path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     status = path.lstat()

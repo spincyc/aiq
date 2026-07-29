@@ -115,6 +115,7 @@ The tables list fields in addition to top-level `v`.
 | `integration print agents --json` | `artifact: "agents"`, `content` |
 | `integration print (claude\|codex) --json` | `integration` naming the adapter, `fragment` |
 | Integration lifecycle command with `--json` | integration status, action, target, changes, and operation-specific fields |
+| `reconcile --user --json` | `status`, `apply`, `integrations`, `journal`, `problems` |
 
 `inbox claim` returns exact message content only in its separate `message`
 object. `queue next` does not duplicate a claim inside the task. Event IDs and
@@ -349,6 +350,39 @@ host-visible error rather than the normal JSON protocol. Capture failure exits
 2 for `codex` and 1 for `claude`: Claude Code treats exit 2 from a
 `UserPromptSubmit` hook as a blocking error that erases the user's prompt, so
 the Claude adapter fails visibly without blocking.
+
+## Post-upgrade reconciliation
+
+AIQ never updates itself; refreshing the host installation is the external
+installer's job. After such an upgrade, one local command re-binds AIQ-owned
+integration material and validates or migrates the selected journal state:
+
+```text
+aiq reconcile --user [--apply] [--launcher PATH] [--git-executable PATH]
+```
+
+The default run is report-only. For each supported user-level adapter whose
+active manifest exists, it plans against the current invocation (the current
+Python runtime, and the explicit, recorded, or discovered Git executable) and
+reports one entry with `integration`, `status`, `action`, and `reason`.
+Adapters without an installed manifest are `skipped`, never failed. It then
+runs `journal check` semantics for the scope selected by `--scope`, which
+validates and migrates supported storage; a journal that does not exist is
+`skipped`.
+
+Per-entry `status` is `ok`, `skipped`, `repaired`, `drifted`, `blocked`, or
+`failed`. With `--apply`, reconciliation performs `install --repair` only
+where the plan reports a safe repair of manifest-owned material; conflicting,
+unmanaged, or unsafe targets stay untouched and are reported. Launcher
+selection reuses the integration rules, extended by the recorded manifest
+launcher before any `PATH` discovery; reconciliation never guesses beyond
+those rules and never mutates pipx, venv, Homebrew, or distro-owned package
+environments.
+
+The report is always emitted on standard output. Exit status is `0` when
+nothing needs attention and `1` when findings remain that reconciliation
+could not, or was not allowed to, fix; error envelopes on standard error keep
+their usual exit classes.
 
 ## Deterministic ordering
 

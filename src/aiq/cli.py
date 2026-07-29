@@ -108,6 +108,7 @@ def _invocation_wants_json(arguments: Sequence[str]) -> bool:
         "ingest",
         "journal",
         "queue",
+        "reconcile",
         "status",
         "task",
     }:
@@ -890,6 +891,146 @@ def _integration_receive(arguments: argparse.Namespace) -> int:
     )
 
 
+_RECONCILE_PROBLEM_STATUSES = frozenset({"blocked", "drifted", "failed"})
+
+
+def _recorded_executable(recorded: str) -> Path | None:
+    path = Path(recorded)
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+    return None
+
+
+def _reconcile_integration(
+    integration_id: str,
+    module: Any,
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "integration": integration_id,
+        "status": "skipped",
+        "action": "none",
+        "reason": None,
+    }
+    try:
+        manifest = module.installed_manifest()
+    except HookIntegrationError as error:
+        entry.update({"status": "failed", "reason": str(error)})
+        return entry
+    if manifest is None:
+        entry["reason"] = (
+            f"no installed AIQ {integration_id} integration manifest"
+        )
+        return entry
+    entry["target"] = manifest["target"]
+    invoked_launcher = _invoked_console_launcher()
+    if arguments.launcher is None and invoked_launcher is None:
+        invoked_launcher = _recorded_executable(manifest["launcher"])
+    git_executable: Path | None = arguments.git_executable
+    if git_executable is None:
+        git_executable = _recorded_executable(manifest["git_executable"])
+    options: dict[str, Any] = {
+        "launcher": arguments.launcher,
+        "invoked_launcher": invoked_launcher,
+        "python_executable": _invoked_python_executable(),
+        "git_executable": git_executable,
+    }
+    try:
+        plan = module.plan_integration(**options)
+        if plan["status"] == "installed" and plan["action"] == "none":
+            entry["status"] = "ok"
+            return entry
+        if plan["status"] != "drifted":
+            entry.update(
+                {"status": "blocked", "reason": plan["blocked_reason"]}
+            )
+            return entry
+        if not arguments.apply:
+            entry.update(
+                {
+                    "status": "drifted",
+                    "action": "repair",
+                    "reason": plan["blocked_reason"],
+                }
+            )
+            return entry
+        repair_plan = module.plan_integration(**options, repair=True)
+        if repair_plan["action"] != "repair":
+            entry.update(
+                {
+                    "status": "blocked",
+                    "reason": repair_plan["blocked_reason"]
+                    or "no safe owned repair is planned",
+                }
+            )
+            return entry
+        repaired = module.install_integration(
+            **options,
+            repair=True,
+            plan_token=repair_plan["plan_token"],
+        )
+        entry.update(
+            {
+                "status": "repaired",
+                "action": "repair",
+                "backup": repaired.get("backup"),
+            }
+        )
+    except HookIntegrationError as error:
+        entry.update({"status": "failed", "reason": str(error)})
+    return entry
+
+
+def _reconcile_journal(arguments: argparse.Namespace) -> dict[str, Any]:
+    try:
+        result = check_journal(_scope(arguments))
+    except JournalError as error:
+        message = str(error)
+        status = "skipped" if "does not exist" in message else "failed"
+        return {"status": status, "reason": message}
+    except (OSError, sqlite3.Error) as error:
+        return {"status": "failed", "reason": str(error)}
+    return {"status": result["status"], "reason": None, "scope": result["scope"]}
+
+
+def _reconcile(arguments: argparse.Namespace) -> int:
+    integrations = [
+        _reconcile_integration(integration_id, module, arguments)
+        for integration_id, module in sorted(_INTEGRATION_MODULES.items())
+    ]
+    journal = _reconcile_journal(arguments)
+    problems = sum(
+        entry["status"] in _RECONCILE_PROBLEM_STATUSES
+        for entry in (*integrations, journal)
+    )
+    status = "ok" if problems == 0 else "attention"
+    if arguments.json:
+        _emit(
+            {
+                "status": status,
+                "apply": arguments.apply,
+                "integrations": integrations,
+                "journal": journal,
+                "problems": problems,
+            },
+            as_json=True,
+        )
+    else:
+        for entry in (
+            *(
+                {**entry, "kind": f"integration\t{entry['integration']}"}
+                for entry in integrations
+            ),
+            {**journal, "kind": "journal"},
+        ):
+            line = f"{entry['kind']}\t{entry['status']}"
+            if entry.get("reason"):
+                line += f"\t{_single_line(entry['reason'])}"
+            print(line)
+        print(f"status\t{status}\tproblems\t{problems}")
+    return 0 if problems == 0 else 1
+
+
 def _scope_parser(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
     name: str,
@@ -1113,6 +1254,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     integration_receive.set_defaults(handler=_integration_receive)
+
+    reconcile = commands.add_parser("reconcile")
+    _add_config_arguments(reconcile)
+    _add_user_selector(reconcile, required=True)
+    reconcile.add_argument("--apply", action="store_true")
+    reconcile.add_argument("--launcher", type=Path)
+    reconcile.add_argument("--git-executable", type=Path)
+    reconcile.set_defaults(handler=_reconcile, load_config=True)
 
     return parser
 
