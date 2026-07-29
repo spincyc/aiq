@@ -19,6 +19,7 @@ EXPECTED_COMMAND_PATHS = {
     "claim.release": ("claim", "release"),
     "config.check": ("config", "check"),
     "config.show": ("config", "show"),
+    "doctor": ("doctor",),
     "inbox.apply": ("inbox", "apply"),
     "inbox.claim": ("inbox", "claim"),
     "inbox.fail": ("inbox", "fail"),

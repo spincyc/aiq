@@ -122,6 +122,15 @@ SPEC = _hooks.HookIntegrationSpec(
 )
 
 
+def integration_present(
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Report whether the Codex target or AIQ-owned state exists."""
+
+    return _hooks.integration_present(SPEC, environment=environment)
+
+
 def print_integration(
     *,
     launcher: str | Path | None = None,

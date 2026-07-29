@@ -89,6 +89,7 @@ The tables list fields in addition to top-level `v`.
 |---|---|
 | `config show --json` | `version`, `scope`, `owner`, `lease_seconds`, `snapshot_keep`, `output`; optional `sources` |
 | `config check --json` | `status: "ok"` |
+| `doctor --json` | `status: "ok"` or `"failed"`, ordered `checks` of `{check, status, detail}` |
 | `journal path --json` | `scope` |
 | `journal init --json` | `status: "initialized"`, `scope` |
 | `journal check --json` | `status: "ok"`, message/task/application/claim/snapshot counts, `scope` |
@@ -173,6 +174,40 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 A processing message whose lease has expired counts as `received`. Message and
 prompt content never appears. A missing journal reports zero counts and an
 empty `ready` array without creating storage.
+
+## Doctor
+
+`aiq doctor` summarizes local health with cheap read-only checks:
+
+```text
+aiq doctor [--scope SCOPE] [--cwd PATH] [--no-repo-config] [--json]
+```
+
+Each check reports `check`, `status`, and `detail`. `status` is `ok`, `warn`,
+`fail`, or `skipped`. The stable check order is `python`, `sqlite`, `config`,
+`git`, `scope`, `journal`, `journal.deep`, `integration.claude`, and
+`integration.codex`.
+
+- `python` and `sqlite` compare the runtime against the supported minimums.
+- `config` validates the effective configuration layers.
+- `git` reports Git availability for repository scope resolution.
+- `scope` resolves the selected scope and journal location.
+- `journal` inspects an existing journal file without opening it for
+  writing: file type, permissions, a SQLite quick check, and schema-version
+  compatibility. An uninitialized journal is `skipped`, not a failure.
+- `integration.claude` and `integration.codex` run the read-only integration
+  check only when the adapter's target or recorded state exists; an absent
+  integration is `skipped`.
+
+Doctor never mutates local state and never performs remote calls. Deep
+journal verification stays explicit: `journal.deep` is always `skipped` and
+points to `aiq journal check`, which verifies semantic history and may
+migrate supported storage.
+
+Doctor writes its report to standard output even when checks fail. Exit 0
+means no check reported `fail`; exit 1 means at least one did. Warnings and
+skips do not change the exit code. Failures that prevent producing the
+report itself use the standard error envelope and exit codes.
 
 ## Generic event ingestion
 

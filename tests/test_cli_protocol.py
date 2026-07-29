@@ -18,7 +18,8 @@ JSON_COMMAND_PATHS = {
     tuple(name.split("."))
     for name in """
         capability.list capability.show claim.release config.check config.show
-        inbox.apply inbox.claim inbox.fail inbox.list inbox.needs-input ingest
+        doctor inbox.apply inbox.claim inbox.fail inbox.list inbox.needs-input
+        ingest
         integration.check integration.install integration.list integration.plan
         integration.print integration.uninstall journal.check journal.destroy
         journal.export journal.init journal.path journal.snapshot queue.next
@@ -192,6 +193,8 @@ class CliProtocolTests(unittest.TestCase):
         path = self.ok("journal", "path", *self.scope)
         self.assertEqual(set(path), {"scope", "v"})
         self.ok("journal", "init", *self.scope)
+        doctor = self.ok("doctor", *self.scope)
+        self.assertEqual(set(doctor), {"checks", "status", "v"})
         ingested = self.ok(
             "ingest", "--message", "Create a protocol-test task",
             "--source", "protocol-test", *self.scope,

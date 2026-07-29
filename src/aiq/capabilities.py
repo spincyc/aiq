@@ -65,6 +65,31 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=False,
         idempotency="read-only",
     ),
+    "doctor": _capability(
+        "Summarize local configuration, dependency, journal, scope, and "
+        "integration health without mutating state.",
+        "aiq doctor [--json]",
+        mutates=False,
+        idempotency="read-only",
+        contract={
+            "checks": [
+                "python",
+                "sqlite",
+                "config",
+                "git",
+                "scope",
+                "journal",
+                "journal.deep",
+                "integration.codex",
+            ],
+            "statuses": ["ok", "warn", "fail", "skipped"],
+            "exit": "0 when no check fails; 1 when any check fails",
+            "deep": (
+                "deep journal verification stays explicit through "
+                "aiq journal check, which may migrate supported storage"
+            ),
+        },
+    ),
     "inbox.apply": _capability(
         "Commit one claimed message's task effects atomically.",
         "aiq inbox apply MESSAGE_ID --claim CLAIM_ID --effects FILE|- [--json]",
