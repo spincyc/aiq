@@ -270,6 +270,19 @@ class IntegrationCliTests(unittest.TestCase):
             text=True,
         )
         python_executable = environment_directory / "bin" / "python"
+        runtime_executable = Path(
+            subprocess.run(
+                [
+                    str(python_executable),
+                    "-c",
+                    "import sys; print(sys.executable)",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+        )
         site_packages = Path(
             subprocess.run(
                 [
@@ -314,7 +327,7 @@ class IntegrationCliTests(unittest.TestCase):
         planned_argv = shlex.split(planned_command)
         self.assertEqual(
             planned_argv[:4],
-            [str(python_executable), "-I", "-m", "aiq"],
+            [str(runtime_executable), "-I", "-m", "aiq"],
         )
         self.assertEqual(
             planned_argv[planned_argv.index("--git-executable") + 1],
@@ -336,7 +349,7 @@ class IntegrationCliTests(unittest.TestCase):
         ][0]["hooks"][0]["command"]
         self.assertEqual(
             shlex.split(print_command)[:4],
-            [str(python_executable), "-I", "-m", "aiq"],
+            [str(runtime_executable), "-I", "-m", "aiq"],
         )
 
         installed = self.assert_json_success(
@@ -361,7 +374,7 @@ class IntegrationCliTests(unittest.TestCase):
         installed_argv = shlex.split(installed_command)
         self.assertEqual(
             installed_argv[:4],
-            [str(python_executable), "-I", "-m", "aiq"],
+            [str(runtime_executable), "-I", "-m", "aiq"],
         )
         self.assertEqual(
             installed_argv[installed_argv.index("--git-executable") + 1],
@@ -375,7 +388,7 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertEqual(manifest["launcher"], str(console))
         self.assertEqual(
             manifest["python_executable"],
-            str(python_executable),
+            str(runtime_executable),
         )
 
         hostile_bin = self.root / "hostile-bin"
