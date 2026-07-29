@@ -612,9 +612,14 @@ def claim_message(
         )
         parameters: list[Any] = []
         requested = ""
+        # An unaddressed claim draws only from `received` messages. An
+        # explicit MESSAGE_ID may additionally resume a parked
+        # `needs_input` message once its missing input has arrived.
+        claimable_states = "'message.received'"
         if message_id is not None:
             requested = "AND message.message_id = ?"
             parameters.append(message_id)
+            claimable_states = "'message.received', 'message.needs_input'"
         row = connection.execute(
             f"""
             WITH lifecycle AS (
@@ -635,7 +640,7 @@ def claim_message(
             JOIN lifecycle
               ON lifecycle.message_id = message.message_id
              AND lifecycle.rank = 1
-            WHERE lifecycle.event_type = 'message.received'
+            WHERE lifecycle.event_type IN ({claimable_states})
               {requested}
               AND NOT EXISTS (
                 SELECT 1

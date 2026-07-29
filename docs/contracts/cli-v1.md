@@ -487,10 +487,11 @@ runnable work may remain at completion. It performs one read-only journal
 snapshot — a missing journal counts as nothing runnable and creates no
 storage — and blocks with exit 2 and exactly one stderr line, for example
 `AIQ: runnable work remains: 2 ready tasks, 1 active claim — run aiq status`,
-when ready tasks, unexpired active claims, or unapplied (`received` or
-`needs_input`) messages remain and the payload's `stop_hook_active` loop
-guard is falsy. Both hosts feed that stderr line back to the model and
-continue the turn. When the loop guard is set, or nothing is runnable, the
+when ready tasks, unexpired active claims, or unapplied (`received`)
+messages remain and the payload's `stop_hook_active` loop guard is falsy. A
+parked `needs_input` message awaits the user, not the agent, and never
+counts as runnable work. Both hosts feed that stderr line back to the model
+and continue the turn. When the loop guard is set, or nothing is runnable, the
 gate exits 0 silently. The gate fails open: any error on the gate path
 (unresolvable scope, invalid payload, locked or unreadable journal) exits 0
 with a single stderr diagnostic, so an AIQ defect never blocks stopping —

@@ -158,7 +158,9 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         },
     ),
     "inbox.claim": _capability(
-        "Lease one unapplied message and return its exact content.",
+        "Lease one unapplied message and return its exact content; an "
+        "explicit MESSAGE_ID may also resume a parked needs_input message "
+        "once its missing input has arrived.",
         "aiq inbox claim [MESSAGE_ID] [--owner OWNER] [--json]",
         mutates=True,
         idempotency="not retry-safe after a lost receipt",

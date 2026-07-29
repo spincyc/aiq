@@ -869,6 +869,54 @@ class CodexIntegrationTest(unittest.TestCase):
                 "— run aiq status",
             )
 
+    def test_stop_gate_ignores_parked_needs_input_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(
+                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
+                check=True,
+            )
+            payload = json.dumps(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": "session",
+                    "cwd": str(repository),
+                }
+            )
+            parked_only = {
+                "messages": {"received": 0, "needs_input": 3},
+                "tasks": {"ready": 0},
+                "claims": {"active": 0},
+            }
+            mixed = {
+                "messages": {"received": 1, "needs_input": 2},
+                "tasks": {"ready": 0},
+                "claims": {"active": 0},
+            }
+
+            with patch("aiq.queue.read_status", return_value=parked_only):
+                allowed = gate_hook(
+                    payload,
+                    git_executable=self.git_executable(),
+                )
+            with patch("aiq.queue.read_status", return_value=mixed):
+                blocked = gate_hook(
+                    payload,
+                    git_executable=self.git_executable(),
+                )
+
+            # A parked needs_input message awaits the user, not the
+            # agent: alone it never blocks stopping, and it never counts
+            # toward the unapplied-message total.
+            self.assertIsNone(allowed)
+            self.assertEqual(
+                blocked,
+                "AIQ: runnable work remains: 1 unapplied message "
+                "— run aiq status",
+            )
+
     def test_receive_hook_uses_reviewed_git_with_hostile_empty_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

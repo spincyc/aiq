@@ -74,11 +74,13 @@ message.
 The installed command is also registered under the `Stop` event. When Claude
 Code is about to finish a turn, the hook resolves the AIQ scope from the
 event's absolute `cwd` and takes one read-only journal snapshot. If ready
-tasks, unexpired active claims, or unapplied (`received` or `needs_input`)
-messages remain, it exits 2 with a single stderr line such as
+tasks, unexpired active claims, or unapplied (`received`) messages remain,
+it exits 2 with a single stderr line such as
 `AIQ: runnable work remains: 2 ready tasks, 1 active claim — run aiq status`.
-Claude Code feeds that line back to the model and continues the turn, so the
-model can run the remaining work before declaring completion.
+A parked `needs_input` message awaits the user, not the agent, and never
+blocks stopping. Claude Code feeds that line back to the model and continues
+the turn, so the model can run the remaining work before declaring
+completion.
 
 The gate honors the host loop guard: when the `Stop` payload carries a truthy
 `stop_hook_active` — Claude Code sets it while already continuing because of

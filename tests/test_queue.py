@@ -961,13 +961,91 @@ class QueueTest(unittest.TestCase):
         self.assertFalse(first["replayed"])
         self.assertTrue(second["replayed"])
         self.assertEqual(list_inbox(self.scope)[0]["state"], "needs_input")
-        with self.assertRaisesRegex(JournalError, "not claimable") as caught:
+        self.assertIsNone(claim_message(self.scope, owner_id="other"))
+        self.assertEqual(check_journal(self.scope)["status"], "ok")
+
+    def test_needs_input_message_resumes_through_explicit_claim(self) -> None:
+        message = self.ingest("Parked until input arrives")
+        claim = claim_message(
+            self.scope,
+            owner_id="worker",
+            message_id=message.message_id,
+        )
+        assert claim is not None
+        dispose_message(
+            self.scope,
+            message.message_id,
+            claim_id=claim["claim_id"],
+            disposition="needs_input",
+            reason="need a decision",
+        )
+
+        # An unaddressed claim never draws a parked message; only the
+        # explicit MESSAGE_ID resumes it once the input has arrived.
+        self.assertIsNone(claim_message(self.scope, owner_id="worker"))
+        resumed = claim_message(
+            self.scope,
+            owner_id="worker",
+            message_id=message.message_id,
+        )
+        assert resumed is not None
+        self.assertEqual(
+            resumed["message"]["content"],
+            "Parked until input arrives",
+        )
+
+        applied = apply_effects(
+            self.scope,
+            message.message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$resumed", {"title": "Resumed work"}]],
+            },
+            claim_id=resumed["claim_id"],
+        )
+
+        self.assertEqual(applied["status"], "applied")
+        self.assertEqual(list_inbox(self.scope), [])
+        self.assertEqual(check_journal(self.scope)["status"], "ok")
+
+    def test_resumed_needs_input_message_can_fail_terminally(self) -> None:
+        message = self.ingest("Parked and then abandoned")
+        claim = claim_message(
+            self.scope,
+            owner_id="worker",
+            message_id=message.message_id,
+        )
+        assert claim is not None
+        dispose_message(
+            self.scope,
+            message.message_id,
+            claim_id=claim["claim_id"],
+            disposition="needs_input",
+            reason="waiting for input",
+        )
+        resumed = claim_message(
+            self.scope,
+            owner_id="worker",
+            message_id=message.message_id,
+        )
+        assert resumed is not None
+
+        dispose_message(
+            self.scope,
+            message.message_id,
+            claim_id=resumed["claim_id"],
+            disposition="failed",
+            reason="the input never arrived",
+        )
+
+        self.assertEqual(list_inbox(self.scope)[0]["state"], "failed")
+        with self.assertRaisesRegex(JournalError, "not claimable"):
             claim_message(
                 self.scope,
-                owner_id="other",
+                owner_id="worker",
                 message_id=message.message_id,
             )
-        self.assertEqual(caught.exception.code, "not_claimable")
         self.assertEqual(check_journal(self.scope)["status"], "ok")
 
     def test_claim_release_is_retryable(self) -> None:

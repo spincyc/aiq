@@ -29,11 +29,17 @@ applies a versioned effects document or records a disposition.
 | `received` | Available for interpretation |
 | `processing` | Held by a live message claim |
 | `applied` | Its effects committed |
-| `needs_input` | Parked with a reason |
+| `needs_input` | Parked with a reason until the missing input arrives |
 | `failed` | Closed as unprocessable |
 
 An effects application is all-or-nothing. Identical retries with the original
 claim return the stored result; conflicting retries fail.
+
+A parked `needs_input` message is not terminal: claiming it explicitly by
+message ID resumes it once the missing input arrives, and the resumed claim
+can then apply effects or record a disposition. An unaddressed claim draws
+only from `received` messages, and a parked message awaits the user, so it
+does not count as runnable agent work.
 
 ## Tasks and revisions
 

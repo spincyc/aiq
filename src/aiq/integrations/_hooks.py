@@ -1657,7 +1657,9 @@ def gate_stop_hook(
     the scope resolved from the payload working directory, or ``None``
     when stopping is allowed: the host's ``stop_hook_active`` loop guard
     is set, or no ready task, unexpired active claim, or unapplied
-    message remains. The check is one read-only snapshot; a missing
+    ``received`` message remains. A parked ``needs_input`` message is
+    not runnable work — it awaits the user, not the agent — so it never
+    blocks stopping. The check is one read-only snapshot; a missing
     journal counts as nothing runnable and never creates storage. Errors
     raise; the boundary in :func:`run_receive_hook_main` fails open on
     them (exit 0) so an AIQ defect never blocks stopping.
@@ -1721,9 +1723,9 @@ def gate_stop_hook(
     status = read_status(scope)
     ready_tasks = int(status["tasks"].get("ready", 0))
     active_claims = int(status["claims"].get("active", 0))
-    unapplied_messages = int(status["messages"].get("received", 0)) + int(
-        status["messages"].get("needs_input", 0)
-    )
+    # A parked needs_input message awaits the user, not the agent, so it
+    # deliberately does not count as runnable work here.
+    unapplied_messages = int(status["messages"].get("received", 0))
     if not (ready_tasks or active_claims or unapplied_messages):
         return None
     parts = []

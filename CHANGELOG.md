@@ -64,9 +64,15 @@ effects documents, capability contracts, and integration manifests.
 
 ### Fixed
 
+- A parked `needs_input` message is claimable again through an explicit
+  `inbox claim MESSAGE_ID`, so it can resume once the missing input
+  arrives and then be applied or failed; previously parked messages were
+  terminally unclaimable (TASK-25).
+- The Stop-gate hook no longer counts `needs_input` messages as runnable
+  work: they await the user, not the agent, so they no longer block the
+  host from stopping (TASK-25).
 - Codex `[hooks.state]` trust records in `config.toml` no longer block the
   integration lifecycle as inline-hook conflicts.
-
 - Hook-integration manifests survive hook-template changes, integration-id
   markers match as exact command tokens, and explicit repair adopts a hook
   left unmanaged by an interrupted install.
