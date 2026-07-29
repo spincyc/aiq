@@ -68,6 +68,8 @@ DENIED_PATH_SUFFIXES = (
     ".sqlite3",
 )
 
+DENIED_NAME_PATTERN = re.compile(r"\.(?:db|sqlite3?)-")
+
 DENIED_CONTENT = (
     (
         "personal Unix home path",
@@ -162,7 +164,9 @@ def path_violations(path: str) -> list[str]:
     lower_name = candidate.name.lower()
     if lower_name == ".env" or lower_name.startswith(".env."):
         violations.append("environment file is denied")
-    if lower_name.endswith(DENIED_PATH_SUFFIXES):
+    if lower_name.endswith(DENIED_PATH_SUFFIXES) or DENIED_NAME_PATTERN.search(
+        lower_name
+    ):
         violations.append("private or generated file suffix is denied")
     return violations
 

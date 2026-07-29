@@ -267,7 +267,16 @@ def check_build() -> None:
         )
 
 
+def check_sanity() -> None:
+    run([str(REPO_ROOT / "tools" / "sanity-check")])
+
+
 def main() -> int:
+    try:
+        check_sanity()
+    except (OSError, RuntimeError) as error:
+        print(f"FAIL check_sanity: {error}")
+        return 1
     checks = (
         check_platform_packages,
         check_tool_syntax,

@@ -40,13 +40,17 @@ make AIQ_PLATFORM=arch install-packages
 An unsupported selection exits without installing. Add a platform fragment or
 install equivalent tools with the native package manager.
 
-Run the complete local checks before submitting a change:
+Use `make verify` as the fast default check during development. Before
+submitting a change, run the full CI-parity check:
 
 ```sh
-make verify
-make public-audit
-make build
+make ci
 ```
+
+`make ci` runs exactly what the CI policy leg runs: `verify` (which starts
+with `tools/sanity-check`), `public-audit`, `build`, and
+`tools/acceptance-install`. A passing `make ci` means the policy leg of CI
+will pass on the same inputs.
 
 ## Pull requests
 
