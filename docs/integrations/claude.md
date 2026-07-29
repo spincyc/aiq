@@ -41,7 +41,8 @@ git_executable="$(command -v git)"
 `plan` is read-only. Install minimally appends one owned `UserPromptSubmit`
 group inside the `hooks` object of the user-level `settings.json`, preserves
 every unrelated setting and hook, and records a private manifest and backups
-below `$XDG_STATE_HOME/aiq/integrations/claude/`.
+below
+`${XDG_STATE_HOME:-$HOME/.local/state}/aiq/integrations/claude/<target-id>/`.
 
 AIQ records the launcher identity, its Python runtime, and Git. The hook
 invokes the recorded Python as `-I -m aiq` and passes the recorded Git path. It
@@ -56,14 +57,15 @@ automate that external trust decision.
 
 The hook writes nothing to stdout: Claude Code injects `UserPromptSubmit`
 stdout into model context, and capture must not alter the conversation. A
-capture failure exits 1 with a single-line stderr message. It never exits 2,
-because Claude Code treats exit 2 from a `UserPromptSubmit` hook as a blocking
-error that erases the user's prompt; a journal problem must not block
-prompting.
+capture failure exits 1 with a single-line stderr message, never 2, so a
+journal problem cannot block prompting; the normative capture exit codes and
+the exit-2 rationale are defined in the
+[CLI contract](../contracts/cli-v1.md#integrations).
 
-Claude Code delivers `session_id` and a per-prompt `prompt_id`. The adapter
-uses them as the idempotency identity, so a re-delivered event deduplicates.
-When `prompt_id` is absent, each event is captured as a new message.
+The adapter's idempotency identity covers `session_id`, the per-prompt
+`prompt_id`, the working directory, and the exact content: a byte-identical
+re-delivered event deduplicates, and any difference is captured as a new
+message.
 
 ## Externally managed setup
 
@@ -143,7 +145,7 @@ After sending one prompt:
 ```
 
 The hook is silent on success, uses source `claude`, routes by the event's
-absolute `cwd`, and deduplicates a repeated session/prompt event.
+absolute `cwd`, and deduplicates a repeated identical event.
 
 If capture is missing, run `integration check`, inspect `journal path` from the
 target repository, and verify hooks are enabled in Claude Code. Claude Code

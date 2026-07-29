@@ -28,8 +28,9 @@ variable, consistently for successes and failures. Unexpected defects use
 
 Outside JSON mode, AIQ writes a terminal-safe diagnostic to standard error.
 Human wording and formatting are not a compatibility surface. The
-adapter-only `integration receive codex` command instead uses its documented
-host-visible capture diagnostic.
+adapter-only `integration receive` commands instead use their documented
+host-visible capture diagnostic: a single-line stderr message with exit 1,
+which never blocks the host prompt.
 
 ## Exit codes
 
@@ -38,13 +39,15 @@ host-visible capture diagnostic.
 | 0 | Success, including an empty queue or no claimable message | — |
 | 2 | Invalid invocation, configuration, or input document | `invalid_argument`, `invalid_config`, `invalid_document` |
 | 3 | Requested resource does not exist | `not_found` |
-| 4 | Resource exists but its state or fence rejects the operation | `not_claimable`, `claim_expired`, `claim_mismatch`, `revision_conflict`, `state_conflict` |
+| 4 | Resource exists but its state or fence rejects the operation | `not_claimable`, `claim_expired`, `claim_mismatch`, `revision_conflict`, `state_conflict`, `contention` |
 | 5 | Journal integrity or schema compatibility failure | `integrity_failed`, `schema_incompatible` |
 | 6 | Filesystem, operating-system, or integration failure | `io_error`, `integration_drift`, `unsupported_environment` |
 | 70 | Unexpected AIQ implementation defect | `internal_error` |
 
 The exit code is the coarse recovery category; `code` is the precise branch.
-Automation should use both and must not parse `error`.
+Automation should use both and must not parse `error`. `aiq doctor` and
+`aiq reconcile --user` additionally exit 1, with no error envelope, when the
+report they emit on standard output contains findings.
 
 ## Stable codes
 
@@ -59,6 +62,7 @@ Automation should use both and must not parse `error`.
 | `claim_mismatch` | A claim does not own the requested resource or revision |
 | `revision_conflict` | A task revision differs from the effects document fence |
 | `state_conflict` | A requested transition or mutation is invalid in current state |
+| `contention` | A concurrent writer held the journal beyond the bounded retry window |
 | `integrity_failed` | Stored data fails structural or semantic integrity checks |
 | `schema_incompatible` | The journal is newer than or unsupported by this AIQ |
 | `io_error` | A required local filesystem or subprocess operation failed |
@@ -68,7 +72,8 @@ Automation should use both and must not parse `error`.
 
 Retry behavior depends on the code. `revision_conflict` requires rereading task
 state. `claim_expired` requires acquiring a new claim. `not_claimable` may be a
-normal competing-worker result. Integrity and schema errors require repair or
+normal competing-worker result. `contention` is transient and safe to retry
+after a short delay. Integrity and schema errors require repair or
 a compatible AIQ version; they must never be silently retried as mutations.
 
 ## Operation-specific classification
@@ -89,6 +94,9 @@ a compatible AIQ version; they must never be silently retried as mutations.
 | Integration lifecycle | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
 | Automatic or repo scope | Git is unavailable or repository discovery fails unexpectedly | `unsupported_environment` |
 | Configuration loading | Unknown, forbidden, malformed, or out-of-range setting | `invalid_config` |
+| `report` | No `--to` and no configured `dev_report_repo` | `invalid_config` |
+| `report` | Target directory or its initialized journal is absent | `not_found` |
+| `report` | Over-length `--summary` or `--detail`, or out-of-range `--priority` | `invalid_argument` |
 
 Read-only empty results are not failures. `inbox claim` returns null claim and
 message fields, and queue operations return an empty array, both with exit 0.

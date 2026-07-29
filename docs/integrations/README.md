@@ -40,8 +40,12 @@ unrelated project instructions.
 | `integration print` | Emit fragments for manual management |
 | `integration install` | Apply a minimal, recorded change |
 | `integration check` | Detect missing files or configuration drift |
-| `integration uninstall` | Remove only unchanged AIQ-owned material |
+| `integration uninstall` | Remove only unchanged AIQ-owned material; the result names `integration_id` and `deleted_file` |
 
 An installer must never replace an entire agent settings file. It must use
 private backups, a versioned ownership manifest, atomic writes, and
 compare-before-change behavior.
+
+After an external AIQ upgrade, `aiq reconcile --user` reports whether
+installed AIQ-owned hooks still match the current installation; with
+`--apply` it repairs only manifest-owned material.

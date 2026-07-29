@@ -43,6 +43,22 @@ effects documents, capability contracts, and integration manifests.
   deduplicated bug-fix task in the configured `dev_report_repo` development
   checkout's queue.
 
+### Changed
+
+- `aiq reconcile --user` defaults to a strictly read-only journal inspection;
+  validation and migration now require `--apply`. `integration print` no
+  longer requires a resolvable AIQ launcher.
+- `aiq report` duplicates return the original `task_id`, and results flag
+  truncated objectives with `detail_truncated`. Uninstall results add
+  `integration_id` and `deleted_file`; guidance checks report
+  `trust: "not_applicable"`.
+- Hook capture failure now exits 1 for both adapters and never blocks the
+  host prompt; hook dedup identity now covers session, turn identity, working
+  directory, and content, so only byte-identical redelivery replays.
+- New retryable `contention` error code (exit 4) for journal write
+  contention; `not_found` and `not_claimable` are now code-driven. Internal
+  engine and journal read-path consolidation.
+
 ### Fixed
 
 - Hook-integration manifests survive hook-template changes, integration-id

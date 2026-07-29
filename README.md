@@ -152,6 +152,12 @@ one contract instead of carrying every tool description in context.
 | Preview ready work | `aiq queue peek` |
 | Lease ready work | `aiq queue next --owner OWNER` |
 | Verify storage and history | `aiq journal check` |
+| Check local health read-only | `aiq doctor` |
+| Explain task eligibility | `aiq task explain TASK-1` |
+| Review recorded task history | `aiq task history TASK-1` |
+| List unreleased leases | `aiq claim list` |
+| File an AIQ defect report | `aiq report --summary TEXT --detail -` |
+| Reconcile after an AIQ upgrade | `aiq reconcile --user` |
 
 Normal inbox output omits raw message content. Claim a message to interpret it,
 or use `--include-content` deliberately.
@@ -204,6 +210,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
 make verify
+make ci  # Full CI-parity checks
 ```
 
 AIQ is licensed under [Apache-2.0](LICENSE).

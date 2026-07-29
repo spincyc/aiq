@@ -34,7 +34,9 @@ scope, identity, output, or retention. `snapshot_keep` controls snapshot
 retention only; it never removes messages or task history. `dev_report_repo`
 names the local AIQ development checkout that receives `aiq report` bug
 reports; it is deliberately excluded from repository configuration so a cloned
-repository cannot redirect reports.
+repository cannot redirect reports. The additional `agent-root` value visible
+in the CLI `--scope` choices is an internal, unstable hook and is not a
+configurable scope.
 
 Example user configuration:
 

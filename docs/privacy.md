@@ -56,6 +56,17 @@ integration result and remove only that directory while no integration command
 is running. Removing active integration state leaves an unmanaged hook and
 prevents safe uninstall.
 
+### Dev reports
+
+`aiq report` copies data out of the reporting context: the summary and up to
+16,000 characters of detail, which may quote prompts, paths, or other
+sensitive text, are written into the configured AIQ development checkout's
+repository-scope journal and retained indefinitely under that journal's
+policies. Identical reports are deduplicated across reporting origins, and
+the reporting repository's absolute working directory is recorded as the
+message `cwd`. Destroying or exporting the reporting repository's own journal
+never touches that copy; erase it through the development checkout's journal.
+
 ## Export
 
 Export writes a new private `aiq-journal-jsonl` v1 file with media type

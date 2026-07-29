@@ -41,7 +41,7 @@ git_executable="$(command -v git)"
 `plan` is read-only. Install minimally appends one owned
 `UserPromptSubmit` group, preserves unrelated hooks and top-level fields, and
 records a private manifest and backups below
-`$XDG_STATE_HOME/aiq/integrations/codex/`.
+`${XDG_STATE_HOME:-$HOME/.local/state}/aiq/integrations/codex/<target-id>/`.
 
 AIQ records the launcher identity, its Python runtime, and Git. The hook invokes
 the recorded Python as `-I -m aiq` and passes the recorded Git path. It needs no
@@ -128,7 +128,7 @@ After sending one prompt:
 ```
 
 The hook is silent on success, uses source `codex`, routes by the event's
-absolute `cwd`, and deduplicates a repeated session/turn event.
+absolute `cwd`, and deduplicates a repeated identical event.
 
 If capture is missing, run `integration check`, inspect `journal path` from the
 target repository, and verify that Codex hooks are enabled. Inline hooks in

@@ -27,7 +27,9 @@ This document defines AIQ's first public machine-facing CLI protocol.
 - Successful `ingest --quiet` intentionally emits nothing, including in JSON
   output mode; failures remain visible.
 
-Scope-aware commands accept `--scope auto|repo|user` and `--cwd PATH`.
+Scope-aware commands accept `--scope auto|repo|user` and `--cwd PATH`. The
+parser additionally exposes an `agent-root` scope choice; it is an internal,
+unstable hook and not part of this contract.
 
 | Scope | Resolution |
 |---|---|
@@ -119,7 +121,7 @@ The tables list fields in addition to top-level `v`.
 | `claim list --json` | `claims` containing unreleased lease summaries with `status` |
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `status --json` | `messages`, `tasks`, `claims`, `ready`, `scope` |
-| `report --json` | `status: "reported"` with `task_id`, or `status: "duplicate"`; both add `message_id`, `scope` |
+| `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
 | `capability show NAME --json` | capability `id`, `version`, purpose, command, and selected contract |
 | `integration list --json` | sorted `integrations`, each with `id`, `version`, and `purpose` |
@@ -168,25 +170,6 @@ validates discovered layers without initializing a journal. Configuration
 precedence and allowed repository keys are defined in
 [`configuration.md`](../configuration.md).
 
-## Status
-
-The status dashboard is read-only and reads one journal snapshot:
-
-```text
-aiq status [--scope SCOPE] [--cwd PATH] [--json]
-```
-
-| Field | Meaning |
-|---|---|
-| `messages` | Message counts keyed by `received`, `processing`, `applied`, `needs_input`, and `failed` |
-| `tasks` | Effective task-state counts keyed by every task state |
-| `claims` | `active`: unreleased, unexpired message and task leases |
-| `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, and `title` |
-
-A processing message whose lease has expired counts as `received`. Message and
-prompt content never appears. A missing journal reports zero counts and an
-empty `ready` array without creating storage.
-
 ## Doctor
 
 `aiq doctor` summarizes local health with cheap read-only checks:
@@ -220,89 +203,6 @@ Doctor writes its report to standard output even when checks fail. Exit 0
 means no check reported `fail`; exit 1 means at least one did. Warnings and
 skips do not change the exit code. Failures that prevent producing the
 report itself use the standard error envelope and exit codes.
-## Introspection
-
-Task and claim introspection is read-only, deterministic, and bounded:
-
-```text
-aiq task explain TASK_ID
-aiq task history TASK_ID [--limit N]
-aiq claim list [--owner OWNER] [--resource message|task]
-               [--status active|expired] [--limit N]
-```
-
-`task explain` reads one consistent snapshot and returns `explain` with
-`task_id`, `revision`, effective `state`, `recorded_state`, `prerequisites`
-(each prerequisite's `task_id`, effective `state`, and `satisfied`),
-`blocked_by`, `waiting_on`, the active lease as `claim` (`claim_id`,
-`owner_id`, `expires_at`; `null` when none), `reason`,
-`superseded_by_task_id`, and one deterministic single-line `explanation`.
-
-`task history` returns at most `--limit` recorded events for one task
-(default 50, between 1 and 1000), newest first. Entries contain
-`occurred_at`, `type` (`task.created`, `task.revised`,
-`task.state_changed`, `task.dependency_added`, `task.dependency_removed`,
-`claim.acquired`, `claim.released`, `claim.consumed`, `claim.revoked`, or
-`claim.expired`), and a type-specific `detail`: task events carry the
-resulting `revision` plus the changed `state`, patched `fields`, or
-`dependency`; claim events carry `claim_id` plus `owner_id` and
-`expires_at` or the release `disposition`. Message content never appears.
-
-`claim list` returns at most `--limit` unreleased claims (default 100,
-between 1 and 1000) in acquisition order. Each entry contains the shared
-claim fields plus `status`: `active` while the lease deadline is in the
-future, `expired` once the lease is recoverable. `--owner`, `--resource`,
-and `--status` filters apply before the limit.
-
-## Generic event ingestion
-
-Canonical provider-neutral input uses either exact form:
-
-```text
-aiq ingest --event-json FILE
-aiq ingest --event-json -
-```
-
-`-` reads standard input. The strict event object contains required `v: 1`,
-`source`, and nonempty `content`; optional fields are `idempotency_key`,
-`session_id`, `turn_id`, and absolute `cwd`. Unknown or duplicate keys,
-unsupported versions, invalid UTF-8, and nonstandard JSON numbers fail before
-journal mutation.
-
-An event `cwd` overrides command `--cwd` for scope resolution and stored
-provenance. An identical idempotent retry returns the original `message_id`
-with `created: false`; changed content under the same identity is
-`state_conflict`. Size and field limits are documented in
-[`integrations/generic.md`](../integrations/generic.md).
-
-## Dev reports
-
-`aiq report` files an AIQ defect observed in any local repository as one
-bug-fix task in the local AIQ development checkout's repository-scope journal:
-
-```text
-aiq report --summary TEXT (--detail TEXT|--detail-file FILE|-)
-           [--to PATH] [--priority N] [--json]
-```
-
-The target is `--to PATH`, else the configured `dev_report_repo`
-(configuration or `AIQ_DEV_REPORT_REPO`); unset is `invalid_config`. The
-target must be an absolute path to an existing directory inside a Git
-repository whose journal is already initialized; `aiq report` never
-initializes a journal and never writes to the reporting repository's journal.
-Reporting is same-machine only: it writes the target journal directly and
-performs no remote calls.
-
-The stored message content is the canonical compact key-sorted JSON of exactly
-`aiq_version`, `detail`, and `summary`, and the ingest idempotency key is the
-SHA-256 of that content, so identical reports deduplicate across reporting
-repositories. `--summary` (at most 200 characters) becomes the task title and
-`--detail` (at most 16000 characters; the objective keeps the first 2000)
-becomes the objective; `--priority` defaults to 60. The reporting origin is
-recorded only as the message `cwd`, with source `dev-report`. A repeated
-identical report, from any origin, returns `status: "duplicate"` with the
-original `message_id` and creates no second task, including while a concurrent
-instance is still applying the first report.
 
 ## Export and destruction
 
@@ -331,6 +231,124 @@ unchanged inventory. It returns `deleted_files` and status `destroyed` or
 `already_absent`. External exports and integration state are outside its
 deletion boundary.
 
+## Generic event ingestion
+
+Canonical provider-neutral input uses either exact form:
+
+```text
+aiq ingest --event-json FILE
+aiq ingest --event-json -
+```
+
+`-` reads standard input. The strict event object contains required `v: 1`,
+`source`, and nonempty `content`; optional fields are `idempotency_key`,
+`session_id`, `turn_id`, and absolute `cwd`. Unknown or duplicate keys,
+unsupported versions, invalid UTF-8, and nonstandard JSON numbers fail before
+journal mutation.
+
+An event `cwd` overrides command `--cwd` for scope resolution and stored
+provenance. An identical idempotent retry returns the original `message_id`
+with `created: false`; changed content under the same identity is
+`state_conflict`. Size and field limits are documented in
+[`integrations/generic.md`](../integrations/generic.md).
+
+## Introspection
+
+Task and claim introspection is read-only, deterministic, and bounded:
+
+```text
+aiq task explain TASK_ID
+aiq task history TASK_ID [--limit N]
+aiq claim list [--owner OWNER] [--resource message|task]
+               [--status active|expired] [--limit N]
+```
+
+`task explain` reads one consistent snapshot and returns `explain` with:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `task_id` | string | Explained task |
+| `revision` | positive integer | Current task revision |
+| `state` | string | Effective task state |
+| `recorded_state` | string | Stored task state |
+| `prerequisites` | array | Each prerequisite's `task_id`, effective `state`, and `satisfied` |
+| `blocked_by` | array of task IDs | Blocking tasks |
+| `waiting_on` | array of task IDs | Awaited tasks |
+| `claim` | object or null | Active lease: `claim_id`, `owner_id`, `expires_at` |
+| `reason` | string or null | Recorded transition reason |
+| `superseded_by_task_id` | string or null | Replacement task |
+| `explanation` | string | One deterministic single-line summary |
+
+`task history` returns at most `--limit` recorded events for one task
+(default 50, between 1 and 1000), newest first. Message content never
+appears. Each entry contains:
+
+| Field | Meaning |
+|---|---|
+| `occurred_at` | RFC 3339 event time |
+| `type` | `task.created`, `task.revised`, `task.state_changed`, `task.dependency_added`, `task.dependency_removed`, `claim.acquired`, `claim.released`, `claim.consumed`, `claim.revoked`, or `claim.expired` |
+| `detail` | Type-specific object: task events carry the resulting `revision` plus the changed `state`, patched `fields`, or `dependency`; claim events carry `claim_id` plus `owner_id` and `expires_at`, or the release `disposition` |
+
+`claim list` returns at most `--limit` unreleased claims (default 100,
+between 1 and 1000) in acquisition order. `--owner`, `--resource`, and
+`--status` filters apply before the limit. Each entry contains:
+
+| Field | Meaning |
+|---|---|
+| Shared claim fields | The [Claim](#claim) object fields |
+| `status` | `active` while the lease deadline is in the future; `expired` once the lease is recoverable |
+
+## Status
+
+The status dashboard is read-only and reads one journal snapshot:
+
+```text
+aiq status [--scope SCOPE] [--cwd PATH] [--json]
+```
+
+| Field | Meaning |
+|---|---|
+| `messages` | Message counts keyed by `received`, `processing`, `applied`, `needs_input`, and `failed` |
+| `tasks` | Effective task-state counts keyed by every task state |
+| `claims` | `active`: unreleased, unexpired message and task leases |
+| `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, and `title` |
+| `scope` | The resolved [Scope](#scope) object |
+
+A processing message whose lease has expired counts as `received`. Message and
+prompt content never appears. A missing journal reports zero counts and an
+empty `ready` array without creating storage.
+
+## Dev reports
+
+`aiq report` files an AIQ defect observed in any local repository as one
+bug-fix task in the local AIQ development checkout's repository-scope journal:
+
+```text
+aiq report --summary TEXT (--detail TEXT|--detail-file FILE|-)
+           [--to PATH] [--priority N] [--json]
+```
+
+The target is `--to PATH`, else the configured `dev_report_repo`
+(configuration or `AIQ_DEV_REPORT_REPO`); unset is `invalid_config`. The
+target must be an absolute path to an existing directory inside a Git
+repository whose journal is already initialized; `aiq report` never
+initializes a journal and never writes to the reporting repository's journal.
+Reporting is same-machine only: it writes the target journal directly and
+performs no remote calls.
+
+The stored message content is the canonical compact key-sorted JSON of exactly
+`aiq_version`, `detail`, and `summary`, and the ingest idempotency key is the
+SHA-256 of that content, so identical reports deduplicate across reporting
+repositories. `--summary` (at most 200 characters) becomes the task title and
+`--detail` (at most 16000 characters) becomes the objective, which keeps the
+first 2000 characters; the result includes `detail_truncated` when the
+objective was cut, and the deduplicated message always retains the full
+detail. `--priority` defaults to 60. The reporting origin is recorded only as
+the message `cwd`, with source `dev-report`. A repeated identical report, from
+any origin, returns `status: "duplicate"` with the original `message_id` and
+`task_id` and creates no second task, including while a concurrent instance is
+still applying the first report.
+
 ## Integrations
 
 Discovery and manual artifact output are read-only:
@@ -338,12 +356,15 @@ Discovery and manual artifact output are read-only:
 ```text
 aiq integration list
 aiq integration print agents
-aiq integration print (claude|codex) [--launcher PATH] [--git-executable PATH]
+aiq integration print (claude|codex) [--user] [--launcher PATH]
+                                     [--git-executable PATH]
 ```
 
 Without `--json`, `print agents` emits the packaged `AGENTS.md` bytes and
 `print` with an adapter name emits that adapter's JSON hook fragment. Their
-JSON forms use the fields in the command-results table.
+JSON forms use the fields in the command-results table. `print` never
+requires a resolvable AIQ launcher; an explicit `--launcher` remains
+accepted.
 
 The supported managed lifecycle is explicitly user-scoped. `INTEGRATION` is
 `claude` or `codex`:
@@ -361,8 +382,12 @@ aiq integration uninstall INTEGRATION --user
 
 | Adapter | Managed target | Event identity |
 |---|---|---|
-| `claude` | `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` | `session_id` and optional `prompt_id` |
-| `codex` | `${CODEX_HOME:-~/.codex}/hooks.json` | `session_id` and `turn_id` |
+| `claude` | `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` | `session_id`, optional `prompt_id`, `cwd`, and content |
+| `codex` | `${CODEX_HOME:-~/.codex}/hooks.json` | `session_id`, `turn_id`, `cwd`, and content |
+
+The event identity is the hook idempotency identity: a byte-identical
+redelivered event replays the original message, and any difference in that
+identity is captured as a new message.
 
 The guidance lifecycle manages one AIQ-owned marked block containing the
 packaged `AGENTS.md` bootstrap inside an explicitly selected file:
@@ -424,9 +449,11 @@ Omitting `--user` for `codex`, or `--target` for `guidance`, is invalid.
 `plan` and `check` are read-only. Lifecycle
 results identify `integration`, `target`, `status`, and `action`; they add
 `integration_id`, `changes`, digests, plan token, backup, trust, or ownership
-metadata when relevant. `plan_token` lets install reject a stale reviewed
-plan. `repair` must be explicit. Install and uninstall preserve unrelated
-configuration and refuse ownership drift.
+metadata when relevant. Uninstall results always include `integration_id` and
+`deleted_file`. Guidance `check` reports `trust: "not_applicable"` because the
+owned block contains no hook command to review. `plan_token` lets install
+reject a stale reviewed plan. `repair` must be explicit. Install and uninstall
+preserve unrelated configuration and refuse ownership drift.
 
 Changing the Python runtime or Git executable makes an installed hook differ
 from the desired definition. `check` reports drift, and `plan` or `install`
@@ -441,28 +468,41 @@ replacement runtime paths.
 an adapter-only host entry point. The absolute Git path is required. It reads
 the host event from standard input, is silent on success, and uses a concise
 host-visible error rather than the normal JSON protocol. Capture failure exits
-2 for `codex` and 1 for `claude`: Claude Code treats exit 2 from a
-`UserPromptSubmit` hook as a blocking error that erases the user's prompt, so
-the Claude adapter fails visibly without blocking.
+1 for both adapters: a visible single-line stderr diagnostic that never blocks
+the host prompt. Neither adapter exits 2, because Claude Code treats exit 2
+from a `UserPromptSubmit` hook as a blocking error that erases the user's
+prompt, and a journal problem must never block prompting.
 
 ## Post-upgrade reconciliation
 
 AIQ never updates itself; refreshing the host installation is the external
 installer's job. After such an upgrade, one local command re-binds AIQ-owned
-integration material and validates or migrates the selected journal state:
+integration material and inspects, or with `--apply` validates and migrates,
+the selected journal state:
 
 ```text
 aiq reconcile --user [--apply] [--launcher PATH] [--git-executable PATH]
+              [--scope SCOPE] [--cwd PATH] [--json]
 ```
 
-The default run is report-only. For each supported user-level adapter whose
-active manifest exists, it plans against the current invocation (the current
-Python runtime, and the explicit, recorded, or discovered Git executable) and
-reports one entry with `integration`, `status`, `action`, and `reason`.
-Adapters without an installed manifest are `skipped`, never failed. It then
-runs `journal check` semantics for the scope selected by `--scope`, which
-validates and migrates supported storage; a journal that does not exist is
-`skipped`.
+The default run is strictly read-only. For each supported user-level adapter
+whose active manifest exists, it plans against the current invocation (the
+current Python runtime, and the explicit, recorded, or discovered Git
+executable) and reports one entry with `integration`, `status`, `action`, and
+`reason`. Adapters without an installed manifest are `skipped`, never failed.
+The journal step for the scope selected by `--scope` is a cheap read-only
+inspection by default; full `journal check` validation and supported-storage
+migration run only with `--apply`. A journal that does not exist is `skipped`.
+
+The top-level result contains:
+
+| Field | Meaning |
+|---|---|
+| `status` | `ok` when nothing needs attention; `attention` when findings remain |
+| `apply` | Whether the run was invoked with `--apply` |
+| `integrations` | The per-adapter entries described above |
+| `journal` | The journal inspection or check entry for the selected scope |
+| `problems` | Remaining findings; empty exactly when `status` is `ok` |
 
 Per-entry `status` is `ok`, `skipped`, `repaired`, `drifted`, `blocked`, or
 `failed`. With `--apply`, reconciliation performs `install --repair` only

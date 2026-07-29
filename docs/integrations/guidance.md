@@ -23,7 +23,8 @@ aiq integration check guidance --target /absolute/path/AGENTS.md
 
 `plan` and `check` are read-only. Install appends the owned marked block,
 creates the target file only when it is absent, and records a private manifest
-and exact-byte backups below `$XDG_STATE_HOME/aiq/integrations/guidance/`.
+and exact-byte backups below
+`${XDG_STATE_HOME:-$HOME/.local/state}/aiq/integrations/guidance/<target-id>/`.
 Package installation never mutates guidance; only these explicit commands do.
 AIQ never infers a Codex home, repository root, or dotfiles location for this
 target.
@@ -38,10 +39,24 @@ target.
 | Drift safety | An edited or unmanaged block fails closed |
 | Reversibility | Uninstall restores the pre-install bytes exactly |
 
-Markers already present without an AIQ manifest are unmanaged and block every
-operation. An edited owned block, or packaged content that changed after an
-upgrade, is drift; review a new plan and pass explicit `--repair` to install.
-`plan_token` lets install reject a stale reviewed plan.
+The normative marker, ownership, drift, and repair rules live in the
+[CLI contract](../contracts/cli-v1.md#integrations); this page is a
+walkthrough. `check` reports `trust: "not_applicable"` because the owned
+block contains no hook command to review.
+
+## Repair
+
+An edited owned block, or packaged bootstrap content that changed after an
+AIQ upgrade, is drift. Review a new plan, then repair explicitly:
+
+```sh
+aiq integration plan guidance --target /absolute/path/AGENTS.md --repair
+aiq integration install guidance --target /absolute/path/AGENTS.md --repair
+aiq integration check guidance --target /absolute/path/AGENTS.md
+```
+
+Repair replaces only the owned marked block and preserves every unrelated
+byte.
 
 ## Uninstall
 
