@@ -4,13 +4,13 @@ Claude Code stores user-level hooks inside ``settings.json`` next to
 unrelated settings, delivers ``prompt_id`` instead of ``turn_id``, and
 treats hook exit code 2 as a blocking error that erases the user's
 prompt. The adapter therefore preserves unrelated settings keys, derives
-idempotency from ``prompt_id``, and fails with exit code 1 so a capture
-failure never blocks the prompt.
+idempotency from ``prompt_id`` when it is delivered (without one each
+event is captured, with no deduplication), and fails with exit code 1 so
+a capture failure never blocks the prompt.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import shlex
@@ -18,7 +18,6 @@ from typing import Any, BinaryIO, Mapping, TextIO
 
 from aiq.integrations import _hooks
 from aiq.integrations._hooks import HookIntegrationError
-from aiq.journal import ingest_message, resolve_scope
 
 
 CONTRACT_VERSION = 1
@@ -75,20 +74,9 @@ def _hook_group(
 def _preflight(
     environment: Mapping[str, str],
     target: Path,
+    document: dict[str, Any],
 ) -> dict[str, str] | None:
-    if not target.exists() and not target.is_symlink():
-        return None
-    data = _hooks.read_bounded(
-        target,
-        _hooks.TARGET_MAX_BYTES,
-        label="Claude Code settings",
-        error_class=ClaudeIntegrationError,
-    )
-    try:
-        document = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if isinstance(document, dict) and document.get("disableAllHooks") is True:
+    if document.get("disableAllHooks") is True:
         return {
             "status": "disabled",
             "blocked_reason": (
@@ -109,6 +97,14 @@ SPEC = _hooks.HookIntegrationSpec(
     target_path=_target_path,
     hook_group=_hook_group,
     preflight=_preflight,
+    receive=_hooks.ReceivePayloadSpec(
+        source="claude",
+        input_label="Claude Code hook input",
+        event="UserPromptSubmit",
+        required_fields=("session_id", "cwd"),
+        turn_field="prompt_id",
+        turn_required=False,
+    ),
 )
 
 
@@ -234,82 +230,13 @@ def receive_hook(
 ) -> dict[str, Any]:
     """Validate and durably ingest one Claude Code ``UserPromptSubmit`` payload."""
 
-    if integration_id != INTEGRATION_ID:
-        raise ClaudeIntegrationError("unsupported Claude Code integration id")
-    if git_executable is None:
-        raise ClaudeIntegrationError(
-            "Claude Code hook requires an absolute Git executable"
-        )
-    resolved_git_executable = _hooks.git_executable_path(
-        git_executable,
-        error_class=ClaudeIntegrationError,
-    )
-    if isinstance(payload, str):
-        raw = payload.encode()
-    else:
-        raw = payload
-    if len(raw) > HOOK_INPUT_MAX_BYTES:
-        raise ClaudeIntegrationError(
-            f"Claude Code hook input exceeds {HOOK_INPUT_MAX_BYTES} bytes"
-        )
-    try:
-        document = json.loads(
-            raw,
-            object_pairs_hook=_hooks.object_without_duplicates_hook(
-                ClaudeIntegrationError
-            ),
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ClaudeIntegrationError(
-            "Claude Code hook input is invalid JSON"
-        ) from error
-    if not isinstance(document, dict):
-        raise ClaudeIntegrationError("Claude Code hook input must be a JSON object")
-    if document.get("hook_event_name") != "UserPromptSubmit":
-        raise ClaudeIntegrationError(
-            "Claude Code hook is not a UserPromptSubmit event"
-        )
-    prompt = document.get("prompt")
-    if not isinstance(prompt, str) or not prompt:
-        raise ClaudeIntegrationError(
-            "Claude Code hook has no non-empty string prompt"
-        )
-    values: dict[str, str] = {}
-    for field in ("session_id", "cwd"):
-        value = document.get(field)
-        if not isinstance(value, str) or not value:
-            raise ClaudeIntegrationError(
-                f"Claude Code hook {field} must be a non-empty string"
-            )
-        values[field] = value
-    prompt_id = document.get("prompt_id")
-    if prompt_id is not None and (
-        not isinstance(prompt_id, str) or not prompt_id
-    ):
-        raise ClaudeIntegrationError(
-            "Claude Code hook prompt_id must be a non-empty string"
-        )
-    cwd = Path(values["cwd"])
-    if not cwd.is_absolute() or not cwd.is_dir():
-        raise ClaudeIntegrationError(
-            "Claude Code hook working directory is invalid"
-        )
-
-    scope = resolve_scope(
-        "auto",
-        cwd=cwd,
+    return _hooks.receive_hook(
+        SPEC,
+        payload,
+        integration_id=integration_id,
+        git_executable=git_executable,
         agent_root=agent_root,
-        git_executable=resolved_git_executable,
     )
-    result = ingest_message(
-        scope,
-        prompt,
-        source="claude",
-        session_id=values["session_id"],
-        turn_id=prompt_id,
-        cwd=os.fspath(cwd.resolve()),
-    )
-    return result.to_dict()
 
 
 def receive_hook_main(
@@ -323,7 +250,8 @@ def receive_hook_main(
     """Run the stdout-silent Claude Code hook boundary.
 
     Failure exits 1, never 2: Claude Code treats exit 2 from a
-    ``UserPromptSubmit`` hook as a blocking error that erases the prompt.
+    ``UserPromptSubmit`` hook as a blocking error that erases the
+    prompt, and a capture failure must never block the user's prompt.
     """
 
     return _hooks.run_receive_hook_main(

@@ -507,7 +507,7 @@ class IntegrationCliTests(unittest.TestCase):
             str(self.git_executable),
             input_text="{",
         )
-        self.assertEqual(rejected.returncode, 2)
+        self.assertEqual(rejected.returncode, 1)
         self.assertEqual(rejected.stdout, "")
         self.assertEqual(len(rejected.stderr.splitlines()), 1)
         self.assertIn("AIQ prompt capture failed:", rejected.stderr)

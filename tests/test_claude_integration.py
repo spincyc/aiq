@@ -153,8 +153,11 @@ class ClaudeIntegrationTest(unittest.TestCase):
             repeated = uninstall_integration(environment=environment)
 
             self.assertEqual(removed["status"], "uninstalled")
+            self.assertEqual(removed["integration_id"], INTEGRATION_ID)
+            self.assertTrue(removed["deleted_file"])
             self.assertFalse(target.exists())
             self.assertEqual(repeated["action"], "none")
+            self.assertEqual(repeated["integration_id"], INTEGRATION_ID)
 
     def test_disable_all_hooks_blocks_plan_and_install(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -168,6 +171,18 @@ class ClaudeIntegrationTest(unittest.TestCase):
 
             self.assertEqual(plan["status"], "disabled")
             self.assertEqual(plan["action"], "block")
+            # The blocked plan keeps the stable public schema: the target
+            # was read once before preflight, and the mutation-only keys
+            # are present but unset.
+            self.assertIsNotNone(plan["before_sha256"])
+            for key in (
+                "after_sha256",
+                "plan_token",
+                "created_file",
+                "created_containers",
+            ):
+                self.assertIn(key, plan)
+                self.assertIsNone(plan[key])
             with self.assertRaisesRegex(
                 ClaudeIntegrationError,
                 "disableAllHooks",
@@ -320,6 +335,62 @@ class ClaudeIntegrationTest(unittest.TestCase):
                         json.dumps(payload),
                         git_executable=self.git_executable(),
                     )
+
+            with self.assertRaisesRegex(
+                ClaudeIntegrationError,
+                "Claude Code hook prompt_id must be a non-empty string",
+            ):
+                receive_hook(
+                    json.dumps(
+                        {
+                            "hook_event_name": "UserPromptSubmit",
+                            "session_id": "session",
+                            "prompt_id": 7,
+                            "cwd": str(repository),
+                            "prompt": "x",
+                        }
+                    ),
+                    git_executable=self.git_executable(),
+                )
+
+    def test_receive_hook_captures_changed_content_for_same_prompt_id(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(
+                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
+                check=True,
+            )
+            base = {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "session",
+                "prompt_id": "prompt-1",
+                "cwd": str(repository),
+                "prompt": "/expand",
+            }
+
+            first = receive_hook(
+                json.dumps(base),
+                git_executable=self.git_executable(),
+            )
+            replayed = receive_hook(
+                json.dumps(base),
+                git_executable=self.git_executable(),
+            )
+            expanded = receive_hook(
+                json.dumps({**base, "prompt": "expanded slash command"}),
+                git_executable=self.git_executable(),
+            )
+            scope = resolve_scope("repo", cwd=repository)
+            checked = check_journal(scope)
+
+            self.assertTrue(first["created"])
+            self.assertFalse(replayed["created"])
+            self.assertTrue(expanded["created"])
+            self.assertEqual(checked["messages"], 2)
 
     def test_receive_hook_main_is_silent_on_success_and_exit_one_on_failure(
         self,

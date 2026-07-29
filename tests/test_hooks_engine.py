@@ -151,6 +151,87 @@ class HooksEngineTest(unittest.TestCase):
         self.assertEqual(unparseable, 0)
         self.assertEqual(non_string, 0)
 
+    def test_missing_git_executable_is_reported_not_raised(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            environment["PATH"] = ""
+
+            plan = plan_integration(launcher=launcher, environment=environment)
+            checked = check_integration(
+                launcher=launcher,
+                environment=environment,
+            )
+
+            self.assertEqual(plan["status"], "unsafe")
+            self.assertEqual(plan["action"], "block")
+            self.assertIn("Git executable", plan["blocked_reason"])
+            self.assertIsNone(plan["desired_group"])
+            self.assertIsNone(plan["plan_token"])
+            self.assertEqual(checked["status"], "unsafe")
+            self.assertFalse(checked["ok"])
+            with self.assertRaisesRegex(
+                CodexIntegrationError,
+                "Git executable",
+            ):
+                install_integration(launcher=launcher, environment=environment)
+
+    def test_repair_replaces_manifest_recorded_group_without_duplicates(
+        self,
+    ) -> None:
+        recorded = {"hooks": [{"type": "command", "command": "recorded"}]}
+        desired = {"hooks": [{"type": "command", "command": "desired"}]}
+        unrelated = {"hooks": [{"type": "command", "command": "unrelated"}]}
+        document = {"hooks": {"UserPromptSubmit": [unrelated, recorded]}}
+
+        replaced_document, replaced_created, replaced = (
+            hooks_engine._repair_missing_group(document, recorded, desired)
+        )
+        appended_document, appended_created, appended = (
+            hooks_engine._repair_missing_group(
+                {"hooks": {"UserPromptSubmit": [unrelated]}},
+                recorded,
+                desired,
+            )
+        )
+
+        self.assertTrue(replaced)
+        self.assertEqual(replaced_created, [])
+        self.assertEqual(
+            replaced_document["hooks"]["UserPromptSubmit"],
+            [unrelated, desired],
+        )
+        self.assertFalse(appended)
+        self.assertEqual(appended_created, [])
+        self.assertEqual(
+            appended_document["hooks"]["UserPromptSubmit"],
+            [unrelated, desired],
+        )
+
+    def test_missing_managed_group_repair_appends_exactly_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            environment, launcher = self.fixture(root)
+            install_integration(launcher=launcher, environment=environment)
+            target = Path(environment["CODEX_HOME"]) / "hooks.json"
+            document = json.loads(target.read_text())
+            document["hooks"]["UserPromptSubmit"] = []
+            target.write_text(json.dumps(document))
+
+            plan = plan_integration(launcher=launcher, environment=environment)
+            self.assertEqual(plan["status"], "drifted")
+            self.assertIn("missing", plan["blocked_reason"])
+
+            repaired = install_integration(
+                launcher=launcher,
+                environment=environment,
+                repair=True,
+            )
+            groups = json.loads(target.read_text())["hooks"]["UserPromptSubmit"]
+
+            self.assertEqual(repaired["status"], "installed")
+            self.assertEqual(len(groups), 1)
+
     def test_interrupted_install_is_recoverable_with_explicit_repair(
         self,
     ) -> None:

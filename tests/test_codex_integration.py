@@ -78,9 +78,31 @@ class CodexIntegrationTest(unittest.TestCase):
             self.assertIn(" integration receive codex ", command)
             self.assertNotIn(str(launcher), command)
 
-    def test_relative_explicit_launcher_is_rejected(self) -> None:
-        with self.assertRaisesRegex(CodexIntegrationError, "absolute"):
-            print_integration(launcher=Path("bin/aiq"))
+    def test_relative_explicit_launcher_blocks_plan_and_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            environment, _ = self.fixture(Path(temporary_directory))
+
+            plan = plan_integration(
+                launcher=Path("bin/aiq"),
+                environment=environment,
+            )
+
+            self.assertEqual(plan["status"], "unsafe")
+            self.assertEqual(plan["action"], "block")
+            self.assertIn("absolute", plan["blocked_reason"])
+            with self.assertRaisesRegex(CodexIntegrationError, "absolute"):
+                install_integration(
+                    launcher=Path("bin/aiq"),
+                    environment=environment,
+                )
+
+    def test_print_does_not_require_a_launcher(self) -> None:
+        rendered = print_integration(
+            git_executable=self.git_executable(),
+            environment={},
+        )
+
+        self.assertIn(" integration receive codex ", rendered)
 
     def test_relative_explicit_git_executable_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -275,6 +297,7 @@ class CodexIntegrationTest(unittest.TestCase):
                 },
             }
             target.write_text(json.dumps(original))
+            target.chmod(0o644)
 
             plan = plan_integration(launcher=launcher, environment=environment)
             result = install_integration(launcher=launcher, environment=environment)
@@ -449,7 +472,10 @@ class CodexIntegrationTest(unittest.TestCase):
             remaining = json.loads(target.read_text())
 
             self.assertEqual(first["action"], "uninstall")
+            self.assertEqual(first["integration_id"], INTEGRATION_ID)
+            self.assertFalse(first["deleted_file"])
             self.assertEqual(second["action"], "none")
+            self.assertEqual(second["integration_id"], INTEGRATION_ID)
             self.assertIn("Stop", remaining["hooks"])
             self.assertNotIn("UserPromptSubmit", remaining["hooks"])
 
@@ -470,6 +496,8 @@ class CodexIntegrationTest(unittest.TestCase):
 
             self.assertFalse(target.exists())
             self.assertEqual(result["status"], "uninstalled")
+            self.assertEqual(result["integration_id"], INTEGRATION_ID)
+            self.assertTrue(result["deleted_file"])
             self.assertEqual(len(backups), 1)
             self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
 
@@ -632,7 +660,72 @@ class CodexIntegrationTest(unittest.TestCase):
                 connection.close()
             self.assertEqual(source, "codex")
 
-    def test_receive_hook_main_is_silent_on_success_and_exit_two_on_failure(
+    def test_receive_hook_requires_turn_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            payload = json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "cwd": temporary_directory,
+                    "prompt": "capture",
+                }
+            )
+
+            with self.assertRaisesRegex(
+                CodexIntegrationError,
+                "Codex hook turn_id must be a non-empty string",
+            ):
+                receive_hook(payload, git_executable=self.git_executable())
+
+    def test_receive_hook_captures_changed_content_for_same_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(
+                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
+                check=True,
+            )
+            other = root / "other"
+            other.mkdir()
+            subprocess.run(
+                ["git", "-C", str(other), "init", "-q", "-b", "main"],
+                check=True,
+            )
+            base = {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "session",
+                "turn_id": "turn",
+                "cwd": str(repository),
+                "prompt": "original",
+            }
+
+            first = receive_hook(
+                json.dumps(base),
+                git_executable=self.git_executable(),
+            )
+            replayed = receive_hook(
+                json.dumps(base),
+                git_executable=self.git_executable(),
+            )
+            expanded = receive_hook(
+                json.dumps({**base, "prompt": "expanded slash command"}),
+                git_executable=self.git_executable(),
+            )
+            moved = receive_hook(
+                json.dumps({**base, "cwd": str(other)}),
+                git_executable=self.git_executable(),
+            )
+            scope = resolve_scope("repo", cwd=repository)
+            checked = check_journal(scope)
+
+            self.assertTrue(first["created"])
+            self.assertFalse(replayed["created"])
+            self.assertTrue(expanded["created"])
+            self.assertTrue(moved["created"])
+            self.assertEqual(checked["messages"], 2)
+
+    def test_receive_hook_main_is_silent_on_success_and_exit_one_on_failure(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -666,7 +759,7 @@ class CodexIntegrationTest(unittest.TestCase):
             )
 
             self.assertEqual(success, 0)
-            self.assertEqual(failure, 2)
+            self.assertEqual(failure, 1)
             self.assertIn("capture failed", errors.getvalue())
 
     def test_receive_hook_uses_reviewed_git_with_hostile_empty_path(self) -> None:

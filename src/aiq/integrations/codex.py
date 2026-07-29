@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import shlex
@@ -11,7 +10,6 @@ from typing import Any, BinaryIO, Mapping, TextIO
 
 from aiq.integrations import _hooks
 from aiq.integrations._hooks import HookIntegrationError
-from aiq.journal import ingest_message, resolve_scope
 
 
 CONTRACT_VERSION = 1
@@ -90,6 +88,7 @@ def _inline_configuration_status(codex_home: Path) -> dict[str, bool]:
 def _preflight(
     environment: Mapping[str, str],
     target: Path,
+    document: dict[str, Any],
 ) -> dict[str, str] | None:
     inline = _inline_configuration_status(target.parent)
     if inline["disabled"]:
@@ -119,6 +118,14 @@ SPEC = _hooks.HookIntegrationSpec(
     hook_group=_hook_group,
     created_file_preamble={"description": HOOK_DESCRIPTION},
     preflight=_preflight,
+    receive=_hooks.ReceivePayloadSpec(
+        source="codex",
+        input_label="Codex hook input",
+        event="UserPromptSubmit",
+        required_fields=("session_id", "turn_id", "cwd"),
+        turn_field="turn_id",
+        turn_required=True,
+    ),
 )
 
 
@@ -244,67 +251,13 @@ def receive_hook(
 ) -> dict[str, Any]:
     """Validate and durably ingest one Codex ``UserPromptSubmit`` payload."""
 
-    if integration_id != INTEGRATION_ID:
-        raise CodexIntegrationError("unsupported Codex integration id")
-    if git_executable is None:
-        raise CodexIntegrationError(
-            "Codex hook requires an absolute Git executable"
-        )
-    resolved_git_executable = _hooks.git_executable_path(
-        git_executable,
-        error_class=CodexIntegrationError,
-    )
-    if isinstance(payload, str):
-        raw = payload.encode()
-    else:
-        raw = payload
-    if len(raw) > HOOK_INPUT_MAX_BYTES:
-        raise CodexIntegrationError(
-            f"Codex hook input exceeds {HOOK_INPUT_MAX_BYTES} bytes"
-        )
-    try:
-        document = json.loads(
-            raw,
-            object_pairs_hook=_hooks.object_without_duplicates_hook(
-                CodexIntegrationError
-            ),
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise CodexIntegrationError("Codex hook input is invalid JSON") from error
-    if not isinstance(document, dict):
-        raise CodexIntegrationError("Codex hook input must be a JSON object")
-    if document.get("hook_event_name") != "UserPromptSubmit":
-        raise CodexIntegrationError("Codex hook is not a UserPromptSubmit event")
-    prompt = document.get("prompt")
-    if not isinstance(prompt, str) or not prompt:
-        raise CodexIntegrationError("Codex hook has no non-empty string prompt")
-    values: dict[str, str | None] = {}
-    for field in ("session_id", "turn_id", "cwd"):
-        value = document.get(field)
-        if not isinstance(value, str) or not value:
-            raise CodexIntegrationError(
-                f"Codex hook {field} must be a non-empty string"
-            )
-        values[field] = value
-    cwd = Path(values["cwd"])
-    if not cwd.is_absolute() or not cwd.is_dir():
-        raise CodexIntegrationError("Codex hook working directory is invalid")
-
-    scope = resolve_scope(
-        "auto",
-        cwd=cwd,
+    return _hooks.receive_hook(
+        SPEC,
+        payload,
+        integration_id=integration_id,
+        git_executable=git_executable,
         agent_root=agent_root,
-        git_executable=resolved_git_executable,
     )
-    result = ingest_message(
-        scope,
-        prompt,
-        source="codex",
-        session_id=values["session_id"],
-        turn_id=values["turn_id"],
-        cwd=os.fspath(cwd.resolve()),
-    )
-    return result.to_dict()
 
 
 def receive_hook_main(
@@ -315,7 +268,13 @@ def receive_hook_main(
     git_executable: str | Path | None = None,
     agent_root: Path | None = None,
 ) -> int:
-    """Run the fail-closed, stdout-silent Codex hook boundary."""
+    """Run the stdout-silent Codex hook boundary.
+
+    Failure exits 1, never 2: Codex treats a non-zero blocking exit
+    code from a ``UserPromptSubmit`` hook as denying the prompt, and a
+    capture failure must never block the user's prompt. The failure is
+    still visible as a one-line stderr diagnostic.
+    """
 
     return _hooks.run_receive_hook_main(
         lambda payload: receive_hook(
@@ -326,7 +285,7 @@ def receive_hook_main(
         ),
         error_class=CodexIntegrationError,
         input_label="Codex hook input",
-        failure_exit_code=2,
+        failure_exit_code=1,
         input_stream=input_stream,
         error_stream=error_stream,
     )

@@ -22,7 +22,7 @@ import sys
 import time
 from typing import Any, Callable, Mapping
 
-from aiq.journal import JournalError
+from aiq.journal import JournalError, ingest_message, resolve_scope
 
 
 HOOK_INPUT_MAX_BYTES = 1_048_576
@@ -71,6 +71,18 @@ def run_receive_hook_main(
 
 
 @dataclass(frozen=True)
+class ReceivePayloadSpec:
+    """Adapter-specific shape of one received hook payload."""
+
+    source: str
+    input_label: str
+    event: str
+    required_fields: tuple[str, ...]
+    turn_field: str
+    turn_required: bool
+
+
+@dataclass(frozen=True)
 class HookIntegrationSpec:
     """Everything adapter-specific the shared engine needs."""
 
@@ -83,9 +95,11 @@ class HookIntegrationSpec:
     target_path: Callable[[Mapping[str, str]], Path]
     hook_group: Callable[[Path, Path], dict[str, Any]]
     created_file_preamble: dict[str, Any] = field(default_factory=dict)
-    preflight: Callable[[Mapping[str, str], Path], dict[str, str] | None] = (
-        lambda environment, target: None
-    )
+    preflight: Callable[
+        [Mapping[str, str], Path, dict[str, Any]],
+        dict[str, str] | None,
+    ] = lambda environment, target, document: None
+    receive: ReceivePayloadSpec | None = None
 
 
 def home_directory(
@@ -170,11 +184,7 @@ def installed_manifest(
 def _ensure_private_directory(spec: HookIntegrationSpec, path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     status = path.lstat()
-    if (
-        not stat.S_ISDIR(status.st_mode)
-        or stat.S_ISLNK(status.st_mode)
-        or status.st_uid != os.getuid()
-    ):
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
         raise spec.error_class(
             f"integration state directory is unsafe: {path}"
         )
@@ -608,7 +618,6 @@ def _read_manifest(
         ) from error
     if status is not None and (
         not stat.S_ISDIR(status.st_mode)
-        or stat.S_ISLNK(status.st_mode)
         or status.st_uid != os.getuid()
         or stat.S_IMODE(status.st_mode) & 0o077
     ):
@@ -734,6 +743,22 @@ def _append_group(
     return result, created
 
 
+def _repair_missing_group(
+    document: dict[str, Any],
+    manifest_group: dict[str, Any],
+    desired_group: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], bool]:
+    """Replace the manifest-recorded group in place; append only when absent."""
+
+    for index, group in enumerate(_groups(document)):
+        if group == manifest_group:
+            result = json.loads(json.dumps(document))
+            result["hooks"][_EVENT][index] = desired_group
+            return result, [], True
+    after_document, created = _append_group(document, desired_group)
+    return after_document, created, False
+
+
 def _replace_managed_group(
     spec: HookIntegrationSpec,
     document: dict[str, Any],
@@ -763,14 +788,14 @@ def render_fragment(
     invoked_launcher: str | Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> str:
-    """Render an externally managed configuration fragment."""
+    """Render an externally managed configuration fragment.
 
-    launcher_path(
-        launcher,
-        error_class=spec.error_class,
-        invoked_launcher=invoked_launcher,
-        environment=environment,
-    )
+    The printed fragment never references the AIQ launcher, so no
+    launcher is required or validated here; ``launcher`` and
+    ``invoked_launcher`` are accepted only for signature compatibility.
+    """
+
+    del launcher, invoked_launcher
     resolved_git_executable = git_executable_path(
         git_executable,
         error_class=spec.error_class,
@@ -806,50 +831,63 @@ def _build_plan(
         effective_environment,
         target,
     )
-    resolved_launcher = launcher_path(
-        launcher,
-        error_class=spec.error_class,
-        invoked_launcher=invoked_launcher,
-        environment=effective_environment,
-    )
-    resolved_git_executable = git_executable_path(
-        git_executable,
-        error_class=spec.error_class,
-        environment=effective_environment,
-    )
-    resolved_python_executable = python_executable_path(
-        python_executable,
-        error_class=spec.error_class,
-    )
-    desired_group = spec.hook_group(
-        resolved_python_executable,
-        resolved_git_executable,
-    )
     result: dict[str, Any] = {
         "v": 1,
         "integration": spec.integration,
         "integration_id": spec.integration_id,
         "target": os.fspath(target),
         "state_directory": os.fspath(state_directory),
-        "desired_group": desired_group,
+        "desired_group": None,
         "status": "unknown",
         "action": "block",
         "blocked_reason": None,
         "changes": [],
-        "_launcher": os.fspath(resolved_launcher),
-        "_git_executable": os.fspath(resolved_git_executable),
-        "_python_executable": os.fspath(resolved_python_executable),
+        "before_sha256": None,
+        "after_sha256": None,
+        "plan_token": None,
+        "created_file": None,
+        "created_containers": None,
     }
     try:
-        blocked = spec.preflight(effective_environment, target)
-        before, document, _ = _load_target(spec, target)
+        resolved_launcher = launcher_path(
+            launcher,
+            error_class=spec.error_class,
+            invoked_launcher=invoked_launcher,
+            environment=effective_environment,
+        )
+        resolved_git_executable = git_executable_path(
+            git_executable,
+            error_class=spec.error_class,
+            environment=effective_environment,
+        )
+        resolved_python_executable = python_executable_path(
+            python_executable,
+            error_class=spec.error_class,
+        )
+        before, document, before_status = _load_target(spec, target)
+        blocked = spec.preflight(effective_environment, target, document)
         manifest = _read_manifest(spec, state_directory, target=target)
     except JournalError as error:
         result["status"] = "unsafe"
         result["blocked_reason"] = str(error)
         return result
 
-    result["before_sha256"] = sha256_or_none(before)
+    desired_group = spec.hook_group(
+        resolved_python_executable,
+        resolved_git_executable,
+    )
+    result.update(
+        {
+            "desired_group": desired_group,
+            "before_sha256": sha256_or_none(before),
+            "_launcher": os.fspath(resolved_launcher),
+            "_git_executable": os.fspath(resolved_git_executable),
+            "_python_executable": os.fspath(resolved_python_executable),
+            "_before": before,
+            "_before_status": before_status,
+            "_manifest": manifest,
+        }
+    )
     if blocked is not None:
         result["status"] = blocked["status"]
         result["blocked_reason"] = blocked["blocked_reason"]
@@ -905,8 +943,19 @@ def _build_plan(
                 f"the manifest-owned {spec.display_name} hook is missing"
             )
             return result
-        after_document, created = _append_group(document, desired_group)
-        action = "repair" if manifest_active else "install"
+        if manifest_active:
+            after_document, created, replaced = _repair_missing_group(
+                document,
+                manifest["managed_group"],
+                desired_group,
+            )
+            if replaced:
+                created_file = manifest["created_file"]
+                created = list(manifest["created_containers"])
+            action = "repair"
+        else:
+            after_document, created = _append_group(document, desired_group)
+            action = "install"
     elif managed[0] != desired_group:
         if not repair:
             result["status"] = "drifted"
@@ -1060,12 +1109,9 @@ def install_integration(
         if plan["action"] == "none":
             return _public_plan(plan)
 
-        before, _, before_status = _load_target(spec, target)
-        if sha256_or_none(before) != plan["before_sha256"]:
-            raise spec.error_class(
-                f"{spec.target_label} changed while installing"
-            )
-        previous_manifest = _read_manifest(spec, state_directory, target=target)
+        before = plan["_before"]
+        before_status = plan["_before_status"]
+        previous_manifest = plan["_manifest"]
         backups = (
             list(previous_manifest.get("backups", []))
             if isinstance(previous_manifest, dict)
@@ -1166,7 +1212,7 @@ def _remove_managed_group(
     ]
     if len(indexes) != 1:
         raise spec.error_class(
-            f"expected exactly one manifest-owned {spec.display_name} hook"
+            f"expected exactly one AIQ {spec.display_name} hook"
         )
     index = indexes[0]
     if groups[index] != manifest.get("managed_group"):
@@ -1216,6 +1262,7 @@ def uninstall_integration(
             return {
                 "v": 1,
                 "integration": spec.integration,
+                "integration_id": spec.integration_id,
                 "status": "uninstalled",
                 "action": "none",
                 "target": os.fspath(target),
@@ -1275,9 +1322,11 @@ def uninstall_integration(
         return {
             "v": 1,
             "integration": spec.integration,
+            "integration_id": spec.integration_id,
             "status": "uninstalled",
             "action": "uninstall",
             "target": os.fspath(target),
+            "deleted_file": delete_file,
             "backup": backup,
             "changes": [
                 {
@@ -1287,3 +1336,141 @@ def uninstall_integration(
                 }
             ],
         }
+
+
+def _hook_idempotency_key(
+    *,
+    source: str,
+    session_id: str,
+    turn_id: str,
+    cwd: str,
+    content: str,
+) -> str:
+    """Derive one idempotency key from the full received message identity.
+
+    The key covers the content and resolved working directory in addition
+    to the session and turn identifiers, so a host that re-delivers the
+    same turn with different content (for example after slash-command
+    expansion) or from a different directory captures a new message
+    instead of failing with an identity conflict; only byte-identical
+    redelivery replays.
+    """
+
+    identity = json.dumps(
+        [source, session_id, turn_id, cwd, content],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"hook-identity-v1:{hashlib.sha256(identity).hexdigest()}"
+
+
+def receive_hook(
+    spec: HookIntegrationSpec,
+    payload: str | bytes,
+    *,
+    integration_id: str,
+    git_executable: str | Path | None = None,
+    agent_root: Path | None = None,
+) -> dict[str, Any]:
+    """Validate and durably ingest one received hook payload."""
+
+    receive = spec.receive
+    if receive is None:
+        raise spec.error_class(
+            f"the {spec.display_name} integration does not receive payloads"
+        )
+    if integration_id != spec.integration_id:
+        raise spec.error_class(
+            f"unsupported {spec.display_name} integration id"
+        )
+    if git_executable is None:
+        raise spec.error_class(
+            f"{spec.display_name} hook requires an absolute Git executable"
+        )
+    resolved_git_executable = git_executable_path(
+        git_executable,
+        error_class=spec.error_class,
+    )
+    raw = payload.encode() if isinstance(payload, str) else payload
+    if len(raw) > HOOK_INPUT_MAX_BYTES:
+        raise spec.error_class(
+            f"{receive.input_label} exceeds {HOOK_INPUT_MAX_BYTES} bytes"
+        )
+    try:
+        document = json.loads(
+            raw,
+            object_pairs_hook=object_without_duplicates_hook(spec.error_class),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise spec.error_class(
+            f"{receive.input_label} is invalid JSON"
+        ) from error
+    if not isinstance(document, dict):
+        raise spec.error_class(
+            f"{receive.input_label} must be a JSON object"
+        )
+    if document.get("hook_event_name") != receive.event:
+        raise spec.error_class(
+            f"{spec.display_name} hook is not a {receive.event} event"
+        )
+    prompt = document.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise spec.error_class(
+            f"{spec.display_name} hook has no non-empty string prompt"
+        )
+    values: dict[str, str] = {}
+    for field_name in receive.required_fields:
+        value = document.get(field_name)
+        if not isinstance(value, str) or not value:
+            raise spec.error_class(
+                f"{spec.display_name} hook {field_name} must be a "
+                "non-empty string"
+            )
+        values[field_name] = value
+    if receive.turn_required:
+        turn_id: str | None = values[receive.turn_field]
+    else:
+        turn_id = document.get(receive.turn_field)
+        if turn_id is not None and (
+            not isinstance(turn_id, str) or not turn_id
+        ):
+            raise spec.error_class(
+                f"{spec.display_name} hook {receive.turn_field} must be a "
+                "non-empty string"
+            )
+    cwd = Path(values["cwd"])
+    if not cwd.is_absolute() or not cwd.is_dir():
+        raise spec.error_class(
+            f"{spec.display_name} hook working directory is invalid"
+        )
+
+    resolved_cwd = os.fspath(cwd.resolve())
+    # Without a turn identity there is no safe replay identity: pass no
+    # idempotency key, so each delivered event is captured separately.
+    idempotency_key = (
+        None
+        if turn_id is None
+        else _hook_idempotency_key(
+            source=receive.source,
+            session_id=values["session_id"],
+            turn_id=turn_id,
+            cwd=resolved_cwd,
+            content=prompt,
+        )
+    )
+    scope = resolve_scope(
+        "auto",
+        cwd=cwd,
+        agent_root=agent_root,
+        git_executable=resolved_git_executable,
+    )
+    result = ingest_message(
+        scope,
+        prompt,
+        source=receive.source,
+        idempotency_key=idempotency_key,
+        session_id=values["session_id"],
+        turn_id=turn_id,
+        cwd=resolved_cwd,
+    )
+    return result.to_dict()
