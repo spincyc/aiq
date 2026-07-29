@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-import fcntl
 import hashlib
 from importlib import resources
 import json
@@ -11,8 +9,15 @@ import os
 from pathlib import Path
 import stat
 import time
-from typing import Any, Iterator, Mapping
+from typing import Any, Mapping
 
+from aiq.integrations import _hooks
+from aiq.integrations._hooks import (
+    object_without_duplicates_hook,
+    read_bounded,
+    read_bounded_with_status,
+    sha256_or_none,
+)
 from aiq.journal import JournalError
 
 
@@ -27,26 +32,26 @@ class GuidanceIntegrationError(JournalError):
     """The guidance integration cannot be inspected or changed safely."""
 
 
-def _home(environment: Mapping[str, str]) -> Path:
-    configured = environment.get("HOME")
-    if not configured:
-        return Path.home()
-    path = Path(configured)
-    if not path.is_absolute():
-        raise GuidanceIntegrationError("HOME must be an absolute path")
-    return path
+class _EngineSpec:
+    """Minimal spec view for reused ``_hooks`` engine helpers.
+
+    The shared helpers taking a spec-shaped first argument only read
+    ``error_class``; guidance manages a text block rather than a hook
+    group, so it has no full ``HookIntegrationSpec``.
+    """
+
+    error_class = GuidanceIntegrationError
 
 
-def _state_home(environment: Mapping[str, str]) -> Path:
-    configured = environment.get("XDG_STATE_HOME")
-    if configured:
-        path = Path(configured)
-        if not path.is_absolute():
-            raise GuidanceIntegrationError(
-                "XDG_STATE_HOME must be an absolute path"
-            )
-        return path
-    return _home(environment) / ".local" / "state"
+_SPEC = _EngineSpec()
+
+# Shared engine internals reused verbatim (same-package internals).
+# ``_atomic_write`` creates missing parents, which is correct for the
+# AIQ-owned state paths; target writes are guarded first by
+# ``_require_target_directory`` so a user-chosen parent is never created.
+_atomic_write = _hooks._atomic_write
+_manifest_path = _hooks._manifest_path
+_valid_digest = _hooks._valid_digest
 
 
 def _target_path(target: str | Path | None) -> Path:
@@ -66,13 +71,37 @@ def _target_path(target: str | Path | None) -> Path:
     return path
 
 
+def _require_target_directory(target: Path) -> None:
+    """Refuse to plan or mutate under a missing or unusable parent.
+
+    The parent directory is user-chosen, so it is never created here; a
+    missing or non-directory parent blocks the integration instead.
+    """
+
+    parent = target.parent
+    try:
+        status = parent.stat()
+    except FileNotFoundError as error:
+        raise GuidanceIntegrationError(
+            f"guidance target directory does not exist: {parent}"
+        ) from error
+    except OSError as error:
+        raise GuidanceIntegrationError(
+            f"guidance target directory is unsafe: {parent}"
+        ) from error
+    if not stat.S_ISDIR(status.st_mode):
+        raise GuidanceIntegrationError(
+            f"guidance target directory is not a directory: {parent}"
+        )
+
+
 def _integration_state_directory(
     environment: Mapping[str, str],
     target: Path,
 ) -> Path:
     target_id = hashlib.sha256(os.fsencode(target)).hexdigest()[:16]
     return (
-        _state_home(environment)
+        _hooks._state_home(environment, error_class=GuidanceIntegrationError)
         / "aiq"
         / "integrations"
         / "guidance"
@@ -81,137 +110,11 @@ def _integration_state_directory(
 
 
 def _ensure_private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    status = path.lstat()
-    if (
-        not stat.S_ISDIR(status.st_mode)
-        or stat.S_ISLNK(status.st_mode)
-        or status.st_uid != os.getuid()
-    ):
-        raise GuidanceIntegrationError(
-            f"integration state directory is unsafe: {path}"
-        )
-    path.chmod(0o700)
+    _hooks._ensure_private_directory(_SPEC, path)
 
 
-def _read_bounded_with_status(
-    path: Path,
-    maximum_bytes: int,
-    *,
-    label: str,
-) -> tuple[bytes, os.stat_result]:
-    flags = os.O_RDONLY | os.O_CLOEXEC
-    if hasattr(os, "O_NONBLOCK"):
-        flags |= os.O_NONBLOCK
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags)
-    except FileNotFoundError:
-        raise
-    except OSError as error:
-        raise GuidanceIntegrationError(
-            f"{label} is not a safe regular file: {path}"
-        ) from error
-    try:
-        status = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(status.st_mode)
-            or status.st_uid != os.getuid()
-            or status.st_nlink != 1
-        ):
-            raise GuidanceIntegrationError(
-                f"{label} is not a safe regular file: {path}"
-            )
-        if status.st_size > maximum_bytes:
-            raise GuidanceIntegrationError(
-                f"{label} exceeds {maximum_bytes} bytes"
-            )
-        chunks: list[bytes] = []
-        remaining = maximum_bytes + 1
-        while remaining:
-            chunk = os.read(descriptor, min(remaining, 65_536))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-        if len(data) > maximum_bytes:
-            raise GuidanceIntegrationError(
-                f"{label} exceeds {maximum_bytes} bytes"
-            )
-        return data, status
-    finally:
-        os.close(descriptor)
-
-
-def _atomic_write(path: Path, data: bytes, *, mode: int) -> None:
-    temporary = path.parent / (
-        f".{path.name}.aiq-{os.getpid()}-{time.time_ns()}"
-    )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, mode)
-    try:
-        os.fchmod(descriptor, mode)
-        with os.fdopen(descriptor, "wb", closefd=False) as output_file:
-            output_file.write(data)
-            output_file.flush()
-            os.fsync(output_file.fileno())
-        os.replace(temporary, path)
-        directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_CLOEXEC)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    finally:
-        os.close(descriptor)
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
-@contextmanager
-def _integration_lock(state_directory: Path) -> Iterator[None]:
-    _ensure_private_directory(state_directory)
-    lock_path = state_directory / "integration.lock"
-    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(lock_path, flags, 0o600)
-    try:
-        status = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(status.st_mode)
-            or status.st_uid != os.getuid()
-            or status.st_nlink != 1
-        ):
-            raise GuidanceIntegrationError(
-                f"integration lock is unsafe: {lock_path}"
-            )
-        os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(descriptor)
-
-
-def _sha256(data: bytes | None) -> str | None:
-    if data is None:
-        return None
-    return hashlib.sha256(data).hexdigest()
-
-
-def _valid_digest(value: Any, *, optional: bool = False) -> bool:
-    if optional and value is None:
-        return True
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
+def _integration_lock(state_directory: Path):
+    return _hooks._integration_lock(_SPEC, state_directory)
 
 
 def _bootstrap_block() -> str:
@@ -229,10 +132,11 @@ def _load_target(
     target: Path,
 ) -> tuple[bytes | None, os.stat_result | None]:
     try:
-        data, status = _read_bounded_with_status(
+        data, status = read_bounded_with_status(
             target,
             GUIDANCE_MAX_BYTES,
             label="guidance target",
+            error_class=GuidanceIntegrationError,
         )
     except FileNotFoundError:
         return None, None
@@ -262,6 +166,7 @@ def _locate_block(data: bytes, *, target: Path) -> tuple[int, int] | None:
         stop < start
         or (start and not data[:start].endswith(b"\n"))
         or data[start + len(begin) : start + len(begin) + 1] != b"\n"
+        or not data[:stop].endswith(b"\n")
     ):
         raise GuidanceIntegrationError(
             f"guidance markers are malformed: {target}"
@@ -274,21 +179,6 @@ def _locate_block(data: bytes, *, target: Path) -> tuple[int, int] | None:
             )
         stop += 1
     return start, stop
-
-
-def _manifest_path(state_directory: Path) -> Path:
-    return state_directory / "manifest.json"
-
-
-def _object_without_duplicates(
-    pairs: list[tuple[str, Any]],
-) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise GuidanceIntegrationError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
 
 
 def _validate_manifest(
@@ -341,14 +231,16 @@ def _validate_manifest(
         )
     if (
         not _valid_digest(manifest["managed_block_sha256"])
-        or manifest["managed_block_sha256"] != _sha256(block.encode())
+        or manifest["managed_block_sha256"] != sha256_or_none(block.encode())
         or not _valid_digest(manifest["config_sha256"], optional=True)
         or (
             manifest["status"] == "installed"
             and manifest["config_sha256"] is None
         )
     ):
-        raise GuidanceIntegrationError("integration manifest digest is invalid")
+        raise GuidanceIntegrationError(
+            "integration manifest digest is invalid"
+        )
     backups = manifest["backups"]
     if not isinstance(backups, list):
         raise GuidanceIntegrationError(
@@ -374,29 +266,44 @@ def _read_manifest(
     *,
     target: Path,
 ) -> dict[str, Any] | None:
-    if state_directory.exists() or state_directory.is_symlink():
-        status = state_directory.lstat()
-        if (
-            not stat.S_ISDIR(status.st_mode)
-            or stat.S_ISLNK(status.st_mode)
-            or status.st_uid != os.getuid()
-            or stat.S_IMODE(status.st_mode) & 0o077
-        ):
-            raise GuidanceIntegrationError(
-                f"integration state directory is unsafe: {state_directory}"
-            )
-    path = _manifest_path(state_directory)
-    if not path.exists() and not path.is_symlink():
-        return None
-    data, _ = _read_bounded_with_status(
-        path,
-        262_144,
-        label="integration manifest",
-    )
     try:
-        manifest = json.loads(data, object_pairs_hook=_object_without_duplicates)
+        status = state_directory.lstat()
+    except FileNotFoundError:
+        status = None
+    except OSError as error:
+        raise GuidanceIntegrationError(
+            f"integration state directory is unsafe: {state_directory}"
+        ) from error
+    if status is not None and (
+        not stat.S_ISDIR(status.st_mode)
+        or stat.S_ISLNK(status.st_mode)
+        or status.st_uid != os.getuid()
+        or stat.S_IMODE(status.st_mode) & 0o077
+    ):
+        raise GuidanceIntegrationError(
+            f"integration state directory is unsafe: {state_directory}"
+        )
+    path = _manifest_path(state_directory)
+    try:
+        data = read_bounded(
+            path,
+            262_144,
+            label="integration manifest",
+            error_class=GuidanceIntegrationError,
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        manifest = json.loads(
+            data,
+            object_pairs_hook=object_without_duplicates_hook(
+                GuidanceIntegrationError
+            ),
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise GuidanceIntegrationError("integration manifest is invalid") from error
+        raise GuidanceIntegrationError(
+            "integration manifest is invalid"
+        ) from error
     return _validate_manifest(
         manifest,
         state_directory=state_directory,
@@ -406,10 +313,17 @@ def _read_manifest(
 
 def _write_manifest(state_directory: Path, manifest: dict[str, Any]) -> None:
     _ensure_private_directory(state_directory)
-    data = (
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode()
-    _atomic_write(_manifest_path(state_directory), data, mode=0o600)
+    serialized = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    _atomic_write(
+        _manifest_path(state_directory),
+        (serialized + "\n").encode(),
+        mode=0o600,
+    )
 
 
 def _assert_target_unchanged(
@@ -418,23 +332,30 @@ def _assert_target_unchanged(
     expected_status: os.stat_result | None,
 ) -> None:
     try:
-        current, status = _read_bounded_with_status(
+        current, status = read_bounded_with_status(
             target,
             GUIDANCE_MAX_BYTES,
             label="guidance target",
+            error_class=GuidanceIntegrationError,
         )
     except FileNotFoundError:
         if expected is None and expected_status is None:
             return
-        raise GuidanceIntegrationError("guidance target changed before mutation")
+        raise GuidanceIntegrationError(
+            "guidance target changed before mutation"
+        )
     if expected is None or expected_status is None:
-        raise GuidanceIntegrationError("guidance target changed before mutation")
+        raise GuidanceIntegrationError(
+            "guidance target changed before mutation"
+        )
     if (
         current != expected
         or status.st_dev != expected_status.st_dev
         or status.st_ino != expected_status.st_ino
     ):
-        raise GuidanceIntegrationError("guidance target changed before mutation")
+        raise GuidanceIntegrationError(
+            "guidance target changed before mutation"
+        )
 
 
 def _build_plan(
@@ -459,7 +380,7 @@ def _build_plan(
         "integration_id": INTEGRATION_ID,
         "target": os.fspath(resolved_target),
         "state_directory": os.fspath(state_directory),
-        "block_sha256": _sha256(desired),
+        "block_sha256": sha256_or_none(desired),
         "status": "unknown",
         "action": "block",
         "blocked_reason": None,
@@ -467,6 +388,7 @@ def _build_plan(
         "_block": block,
     }
     try:
+        _require_target_directory(resolved_target)
         before, _ = _load_target(resolved_target)
         manifest = _read_manifest(state_directory, target=resolved_target)
     except GuidanceIntegrationError as error:
@@ -474,7 +396,7 @@ def _build_plan(
         result["blocked_reason"] = str(error)
         return result
 
-    result["before_sha256"] = _sha256(before)
+    result["before_sha256"] = sha256_or_none(before)
     try:
         region = (
             None
@@ -499,7 +421,9 @@ def _build_plan(
     if current is not None and not manifest_active:
         result["status"] = "unmanaged"
         result["blocked_reason"] = (
-            "an AIQ-marked guidance block exists without an active AIQ manifest"
+            "an AIQ-marked guidance block exists without an active AIQ "
+            "manifest; remove the markers manually or restore the AIQ "
+            "manifest"
         )
         return result
 
@@ -512,6 +436,11 @@ def _build_plan(
                 "the manifest-owned guidance block is missing"
             )
             return result
+        # The add path recomputes created_file/separator even during a
+        # repair: the block is inserted into the file as it exists now,
+        # so the manifest's recorded layout no longer describes this
+        # insertion.  The replace branches below keep the manifest values
+        # because there the block stays exactly where it was installed.
         if before:
             if not before.endswith(b"\n"):
                 separator = "\n"
@@ -524,7 +453,8 @@ def _build_plan(
         if not repair:
             result["status"] = "drifted"
             result["blocked_reason"] = (
-                "the AIQ-owned guidance block differs from the packaged content"
+                "the AIQ-owned guidance block differs from the packaged "
+                "content"
             )
             return result
         after = before[: region[0]] + desired + before[region[1] :]
@@ -549,17 +479,17 @@ def _build_plan(
             {
                 "status": "installed",
                 "action": "none",
-                "after_sha256": _sha256(before),
+                "after_sha256": sha256_or_none(before),
                 "plan_token": hashlib.sha256(
-                    f"{resolved_target}\0{_sha256(before)}\0"
-                    f"{_sha256(before)}".encode()
+                    f"{resolved_target}\0{sha256_or_none(before)}\0"
+                    f"{sha256_or_none(before)}".encode()
                 ).hexdigest(),
             }
         )
         return result
 
-    before_sha = _sha256(before)
-    after_sha = _sha256(after)
+    before_sha = sha256_or_none(before)
+    after_sha = sha256_or_none(after)
     result.update(
         {
             "status": "absent" if action == "install" else "drifted",
@@ -584,7 +514,11 @@ def _build_plan(
 
 
 def _public_plan(plan: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in plan.items() if not key.startswith("_")}
+    return {
+        key: value
+        for key, value in plan.items()
+        if not key.startswith("_")
+    }
 
 
 def plan_integration(
@@ -605,7 +539,7 @@ def _backup(state_directory: Path, data: bytes | None) -> str | None:
         return None
     backup_directory = state_directory / "backups"
     _ensure_private_directory(backup_directory)
-    digest = _sha256(data)
+    digest = sha256_or_none(data)
     path = backup_directory / f"{time.time_ns()}-{digest}.guidance.md"
     _atomic_write(path, data, mode=0o600)
     return os.fspath(path)
@@ -633,14 +567,16 @@ def install_integration(
             repair=repair,
         )
         if plan_token is not None and plan.get("plan_token") != plan_token:
-            raise GuidanceIntegrationError("reviewed integration plan is stale")
+            raise GuidanceIntegrationError(
+                "reviewed integration plan is stale"
+            )
         if plan["action"] == "block":
             raise GuidanceIntegrationError(plan["blocked_reason"])
         if plan["action"] == "none":
             return _public_plan(plan)
 
         before, before_status = _load_target(resolved_target)
-        if _sha256(before) != plan["before_sha256"]:
+        if sha256_or_none(before) != plan["before_sha256"]:
             raise GuidanceIntegrationError(
                 "guidance target changed while installing"
             )
@@ -673,6 +609,8 @@ def install_integration(
             "managed_block": plan["_block"],
             "managed_block_sha256": plan["block_sha256"],
             "separator": plan["separator"],
+            # config_sha256 is the digest of the whole target file after
+            # mutation, not of the owned block alone.
             "config_sha256": plan["after_sha256"],
             "created_file": plan["created_file"],
             "backups": backups,
@@ -693,6 +631,9 @@ def check_integration(
 
     plan = _build_plan(target=target, environment=environment)
     result = _public_plan(plan)
+    # The owned block is fully digest-verified, so no manual trust review
+    # applies; the key exists for cross-adapter result-shape stability.
+    result["trust"] = "not_applicable"
     result["ok"] = plan["status"] == "installed" and plan["action"] == "none"
     return result
 
@@ -743,7 +684,15 @@ def uninstall_integration(
                 "the AIQ-owned guidance block has drifted; refusing uninstall"
             )
         separator = manifest["separator"].encode()
-        if separator and before[start - len(separator) : start] == separator:
+        if (
+            separator
+            and stop == len(before)
+            and before[start - len(separator) : start] == separator
+        ):
+            # The recorded separator was inserted at install time to join
+            # the original content to the appended block, so it is removed
+            # only while the block is still terminal.  Once content follows
+            # the block, that newline separates user content and stays.
             start -= len(separator)
         after = before[:start] + before[stop:]
         delete_file = manifest["created_file"] and after == b""
@@ -751,7 +700,7 @@ def uninstall_integration(
         backup = _backup(state_directory, before)
         backups = list(manifest.get("backups", []))
         if backup is not None:
-            backups.append({"path": backup, "sha256": _sha256(before)})
+            backups.append({"path": backup, "sha256": sha256_or_none(before)})
 
         _assert_target_unchanged(resolved_target, before, before_status)
         if delete_file:
@@ -774,7 +723,9 @@ def uninstall_integration(
         manifest.update(
             {
                 "status": "uninstalled",
-                "config_sha256": None if delete_file else _sha256(after),
+                "config_sha256": (
+                    None if delete_file else sha256_or_none(after)
+                ),
                 "backups": backups,
             }
         )
