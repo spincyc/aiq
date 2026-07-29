@@ -180,8 +180,8 @@ aiq doctor [--scope SCOPE] [--cwd PATH] [--no-repo-config] [--json]
 
 Each check reports `check`, `status`, and `detail`. `status` is `ok`, `warn`,
 `fail`, or `skipped`. The stable check order is `python`, `sqlite`, `config`,
-`git`, `scope`, `journal`, `journal.deep`, `integration.claude`, and
-`integration.codex`.
+`git`, `scope`, `journal`, `journal.deep`, `integration.claude`,
+`integration.codex`, and `report`.
 
 - `python` and `sqlite` compare the runtime against the supported minimums.
 - `config` validates the effective configuration layers.
@@ -467,11 +467,34 @@ replacement runtime paths.
 `integration receive INTEGRATION --integration-id ID --git-executable PATH` is
 an adapter-only host entry point. The absolute Git path is required. It reads
 the host event from standard input, is silent on success, and uses a concise
-host-visible error rather than the normal JSON protocol. Capture failure exits
-1 for both adapters: a visible single-line stderr diagnostic that never blocks
-the host prompt. Neither adapter exits 2, because Claude Code treats exit 2
-from a `UserPromptSubmit` hook as a blocking error that erases the user's
-prompt, and a journal problem must never block prompting.
+host-visible error rather than the normal JSON protocol. The same command is
+installed under both managed events and dispatches on the payload's
+`hook_event_name`:
+
+| Event | Behavior | Exit codes |
+|---|---|---|
+| `UserPromptSubmit` | Capture the prompt into the journal | 0 success; 1 failure |
+| `Stop` | Completion gate over the scope resolved from the payload `cwd` | 0 allow; 2 block |
+
+Capture failure exits 1 for both adapters: a visible single-line stderr
+diagnostic that never blocks the host prompt. Capture never exits 2, because
+Claude Code treats exit 2 from a `UserPromptSubmit` hook as a blocking error
+that erases the user's prompt, and a journal problem must never block
+prompting.
+
+The `Stop` completion gate enforces the AGENTS.md practice that no required
+runnable work may remain at completion. It performs one read-only journal
+snapshot — a missing journal counts as nothing runnable and creates no
+storage — and blocks with exit 2 and exactly one stderr line, for example
+`AIQ: runnable work remains: 2 ready tasks, 1 active claim — run aiq status`,
+when ready tasks, unexpired active claims, or unapplied (`received` or
+`needs_input`) messages remain and the payload's `stop_hook_active` loop
+guard is falsy. Both hosts feed that stderr line back to the model and
+continue the turn. When the loop guard is set, or nothing is runnable, the
+gate exits 0 silently. The gate fails open: any error on the gate path
+(unresolvable scope, invalid payload, locked or unreadable journal) exits 0
+with a single stderr diagnostic, so an AIQ defect never blocks stopping —
+the inverse of capture, which fails visibly with exit 1.
 
 ## Post-upgrade reconciliation
 

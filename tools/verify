@@ -189,8 +189,8 @@ def check_bootstrap() -> None:
     if source != packaged:
         raise RuntimeError("packaged AGENTS.md differs from the canonical file")
     words = len(source.decode().split())
-    if words > 150:
-        raise RuntimeError(f"AGENTS.md has {words} words; maximum is 150")
+    if words > 200:
+        raise RuntimeError(f"AGENTS.md has {words} words; maximum is 200")
 
 
 def check_public_paths() -> None:

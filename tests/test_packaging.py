@@ -71,7 +71,7 @@ class PackagingTest(unittest.TestCase):
         )
 
         self.assertEqual(packaged, canonical)
-        self.assertLessEqual(len(canonical.decode("utf-8").split()), 150)
+        self.assertLessEqual(len(canonical.decode("utf-8").split()), 200)
 
 
 if __name__ == "__main__":

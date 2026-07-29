@@ -82,7 +82,7 @@ class ReadmeTests(unittest.TestCase):
         self.assertEqual(root_guidance, PACKAGED_AGENTS.read_bytes())
 
         word_count = len(root_guidance.decode("utf-8").split())
-        self.assertLessEqual(word_count, 150, f"AGENTS.md has {word_count} words")
+        self.assertLessEqual(word_count, 200, f"AGENTS.md has {word_count} words")
 
     def test_marked_shell_blocks_have_valid_syntax(self) -> None:
         blocks = marked_shell_blocks(README.read_text(encoding="utf-8"))

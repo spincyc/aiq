@@ -11,8 +11,9 @@ with `aiq capability list`; load only the relevant contract with
 
 At scheduling boundaries, check `aiq status` for runnable work. Before
 declaring completion, record outcomes and verify no required runnable work
-remains. Keep AIQ runtime state local and untracked; never commit journals,
-leases, exports, or snapshots. File AIQ defects with `aiq report`.
+remains. Installed hooks enforce this at session stop. Keep AIQ runtime state
+local and untracked; never commit journals, leases, exports, or snapshots.
+File AIQ defects with `aiq report` (requires a configured `dev_report_repo`).
 
 When reasoning becomes repeatable, encode it in the smallest deterministic
 tool, test, check, or configuration, then point guidance there; build

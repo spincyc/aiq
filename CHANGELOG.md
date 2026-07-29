@@ -45,6 +45,9 @@ effects documents, capability contracts, and integration manifests.
 
 ### Changed
 
+- Bootstrap `AGENTS.md` word budget raised from 150 to 200; the guidance now
+  notes the `aiq report` prerequisite (`dev_report_repo`) and that installed
+  hooks enforce completion recording at session stop.
 - `aiq reconcile --user` defaults to a strictly read-only journal inspection;
   validation and migration now require `--apply`. `integration print` no
   longer requires a resolvable AIQ launcher.
