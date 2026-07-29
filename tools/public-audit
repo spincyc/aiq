@@ -29,6 +29,7 @@ ALLOWED_TOP_LEVEL = frozenset(
         "make",
         "pyproject.toml",
         "schemas",
+        "site",
         "src",
         "tests",
         "tools",
