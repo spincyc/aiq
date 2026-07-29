@@ -14,16 +14,9 @@ from aiq import __version__
 from aiq.capabilities import list_capabilities, show_capability
 from aiq.config import Config, ConfigError, resolve_config
 from aiq.events import EVENT_JSON_MAX_BYTES, EventError, parse_event_json
-from aiq.integrations.codex import (
-    INTEGRATION_ID,
-    CodexIntegrationError,
-    check_integration,
-    install_integration,
-    plan_integration,
-    print_integration,
-    receive_hook_main,
-    uninstall_integration,
-)
+from aiq.integrations import claude as claude_integration
+from aiq.integrations import codex as codex_integration
+from aiq.integrations._hooks import HookIntegrationError
 from aiq.journal import (
     JournalError,
     check_journal,
@@ -694,19 +687,29 @@ def _capability_show(arguments: argparse.Namespace) -> int:
     return 0
 
 
+_INTEGRATION_MODULES = {
+    "claude": claude_integration,
+    "codex": codex_integration,
+}
+_INTEGRATION_CHOICES = tuple(sorted(_INTEGRATION_MODULES))
+
+
 def _integration_list(arguments: argparse.Namespace) -> int:
     integrations = [
         {
-            "id": "codex",
-            "purpose": "Capture Codex UserPromptSubmit events.",
-            "version": 1,
-        },
+            "id": integration_id,
+            "purpose": module.PURPOSE,
+            "version": module.CONTRACT_VERSION,
+        }
+        for integration_id, module in sorted(_INTEGRATION_MODULES.items())
+    ]
+    integrations.append(
         {
             "id": "generic",
             "purpose": "Ingest canonical provider-neutral event JSON.",
             "version": 1,
-        },
-    ]
+        }
+    )
     if arguments.json:
         _emit({"integrations": integrations}, as_json=True)
     else:
@@ -731,7 +734,7 @@ def _invoked_python_executable() -> Path:
 
 def _integration_plan(arguments: argparse.Namespace) -> int:
     _emit(
-        plan_integration(
+        _INTEGRATION_MODULES[arguments.integration_id].plan_integration(
             launcher=arguments.launcher,
             invoked_launcher=_invoked_console_launcher(),
             python_executable=_invoked_python_executable(),
@@ -745,7 +748,7 @@ def _integration_plan(arguments: argparse.Namespace) -> int:
 
 def _integration_install(arguments: argparse.Namespace) -> int:
     _emit(
-        install_integration(
+        _INTEGRATION_MODULES[arguments.integration_id].install_integration(
             launcher=arguments.launcher,
             invoked_launcher=_invoked_console_launcher(),
             python_executable=_invoked_python_executable(),
@@ -760,7 +763,7 @@ def _integration_install(arguments: argparse.Namespace) -> int:
 
 def _integration_check(arguments: argparse.Namespace) -> int:
     _emit(
-        check_integration(
+        _INTEGRATION_MODULES[arguments.integration_id].check_integration(
             launcher=arguments.launcher,
             invoked_launcher=_invoked_console_launcher(),
             python_executable=_invoked_python_executable(),
@@ -772,7 +775,10 @@ def _integration_check(arguments: argparse.Namespace) -> int:
 
 
 def _integration_uninstall(arguments: argparse.Namespace) -> int:
-    _emit(uninstall_integration(), as_json=arguments.json)
+    _emit(
+        _INTEGRATION_MODULES[arguments.integration_id].uninstall_integration(),
+        as_json=arguments.json,
+    )
     return 0
 
 
@@ -792,7 +798,8 @@ def _integration_print(arguments: argparse.Namespace) -> int:
             sys.stdout.write(guidance)
         return 0
 
-    rendered = print_integration(
+    module = _INTEGRATION_MODULES[arguments.integration_id]
+    rendered = module.print_integration(
         launcher=arguments.launcher,
         invoked_launcher=_invoked_console_launcher(),
         python_executable=_invoked_python_executable(),
@@ -801,7 +808,7 @@ def _integration_print(arguments: argparse.Namespace) -> int:
     if arguments.json:
         _emit(
             {
-                "integration": "codex",
+                "integration": arguments.integration_id,
                 "fragment": json.loads(rendered),
             },
             as_json=True,
@@ -812,8 +819,14 @@ def _integration_print(arguments: argparse.Namespace) -> int:
 
 
 def _integration_receive(arguments: argparse.Namespace) -> int:
-    return receive_hook_main(
-        integration_id=arguments.integration_id,
+    module = _INTEGRATION_MODULES[arguments.integration]
+    integration_id = (
+        module.INTEGRATION_ID
+        if arguments.integration_id is None
+        else arguments.integration_id
+    )
+    return module.receive_hook_main(
+        integration_id=integration_id,
         git_executable=arguments.git_executable,
     )
 
@@ -973,7 +986,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration_list.add_argument("--json", action="store_true")
     integration_list.set_defaults(handler=_integration_list)
     integration_plan = integration_commands.add_parser("plan")
-    integration_plan.add_argument("integration_id", choices=("codex",))
+    integration_plan.add_argument("integration_id", choices=_INTEGRATION_CHOICES)
     _add_user_selector(integration_plan, required=True)
     integration_plan.add_argument("--launcher", type=Path)
     integration_plan.add_argument("--git-executable", type=Path)
@@ -981,7 +994,10 @@ def build_parser() -> argparse.ArgumentParser:
     integration_plan.add_argument("--json", action="store_true")
     integration_plan.set_defaults(handler=_integration_plan)
     integration_install = integration_commands.add_parser("install")
-    integration_install.add_argument("integration_id", choices=("codex",))
+    integration_install.add_argument(
+        "integration_id",
+        choices=_INTEGRATION_CHOICES,
+    )
     _add_user_selector(integration_install, required=True)
     integration_install.add_argument("--launcher", type=Path)
     integration_install.add_argument("--git-executable", type=Path)
@@ -990,21 +1006,24 @@ def build_parser() -> argparse.ArgumentParser:
     integration_install.add_argument("--json", action="store_true")
     integration_install.set_defaults(handler=_integration_install)
     integration_check = integration_commands.add_parser("check")
-    integration_check.add_argument("integration_id", choices=("codex",))
+    integration_check.add_argument("integration_id", choices=_INTEGRATION_CHOICES)
     _add_user_selector(integration_check, required=True)
     integration_check.add_argument("--launcher", type=Path)
     integration_check.add_argument("--git-executable", type=Path)
     integration_check.add_argument("--json", action="store_true")
     integration_check.set_defaults(handler=_integration_check)
     integration_uninstall = integration_commands.add_parser("uninstall")
-    integration_uninstall.add_argument("integration_id", choices=("codex",))
+    integration_uninstall.add_argument(
+        "integration_id",
+        choices=_INTEGRATION_CHOICES,
+    )
     _add_user_selector(integration_uninstall, required=True)
     integration_uninstall.add_argument("--json", action="store_true")
     integration_uninstall.set_defaults(handler=_integration_uninstall)
     integration_print = integration_commands.add_parser("print")
     integration_print.add_argument(
         "integration_id",
-        choices=("agents", "codex"),
+        choices=("agents", *_INTEGRATION_CHOICES),
     )
     _add_user_selector(integration_print)
     integration_print.add_argument("--launcher", type=Path)
@@ -1012,11 +1031,8 @@ def build_parser() -> argparse.ArgumentParser:
     integration_print.add_argument("--json", action="store_true")
     integration_print.set_defaults(handler=_integration_print)
     integration_receive = integration_commands.add_parser("receive")
-    integration_receive.add_argument("integration", choices=("codex",))
-    integration_receive.add_argument(
-        "--integration-id",
-        default=INTEGRATION_ID,
-    )
+    integration_receive.add_argument("integration", choices=_INTEGRATION_CHOICES)
+    integration_receive.add_argument("--integration-id")
     integration_receive.add_argument(
         "--git-executable",
         type=Path,
@@ -1112,7 +1128,7 @@ def _classify_error(error: Exception) -> tuple[str, int]:
         return "invalid_config", 2
     if isinstance(error, EventError):
         return "invalid_document", 2
-    if isinstance(error, CodexIntegrationError):
+    if isinstance(error, HookIntegrationError):
         message = str(error).lower()
         if "launcher must be an absolute path" in message:
             return "invalid_argument", 2

@@ -111,8 +111,8 @@ The tables list fields in addition to top-level `v`.
 | `capability show NAME --json` | capability `id`, `version`, purpose, command, and selected contract |
 | `integration list --json` | sorted `integrations`, each with `id`, `version`, and `purpose` |
 | `integration print agents --json` | `artifact: "agents"`, `content` |
-| `integration print codex --json` | `integration: "codex"`, `fragment` |
-| Codex lifecycle command with `--json` | integration status, action, target, changes, and operation-specific fields |
+| `integration print (claude\|codex) --json` | `integration` naming the adapter, `fragment` |
+| Integration lifecycle command with `--json` | integration status, action, target, changes, and operation-specific fields |
 
 `inbox claim` returns exact message content only in its separate `message`
 object. `queue next` does not duplicate a claim inside the task. Event IDs and
@@ -209,25 +209,31 @@ Discovery and manual artifact output are read-only:
 ```text
 aiq integration list
 aiq integration print agents
-aiq integration print codex [--launcher PATH] [--git-executable PATH]
+aiq integration print (claude|codex) [--launcher PATH] [--git-executable PATH]
 ```
 
 Without `--json`, `print agents` emits the packaged `AGENTS.md` bytes and
-`print codex` emits the JSON hook fragment. Their JSON forms use the fields in
-the command-results table.
+`print` with an adapter name emits that adapter's JSON hook fragment. Their
+JSON forms use the fields in the command-results table.
 
-The supported managed lifecycle is explicitly user-scoped:
+The supported managed lifecycle is explicitly user-scoped. `INTEGRATION` is
+`claude` or `codex`:
 
 ```text
-aiq integration plan codex --user [--launcher PATH]
-                           [--git-executable PATH] [--repair]
-aiq integration install codex --user [--launcher PATH]
-                              [--git-executable PATH] [--repair]
-                              [--plan-token TOKEN]
-aiq integration check codex --user [--launcher PATH]
-                            [--git-executable PATH]
-aiq integration uninstall codex --user
+aiq integration plan INTEGRATION --user [--launcher PATH]
+                                 [--git-executable PATH] [--repair]
+aiq integration install INTEGRATION --user [--launcher PATH]
+                                    [--git-executable PATH] [--repair]
+                                    [--plan-token TOKEN]
+aiq integration check INTEGRATION --user [--launcher PATH]
+                                  [--git-executable PATH]
+aiq integration uninstall INTEGRATION --user
 ```
+
+| Adapter | Managed target | Event identity |
+|---|---|---|
+| `claude` | `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` | `session_id` and optional `prompt_id` |
+| `codex` | `${CODEX_HOME:-~/.codex}/hooks.json` | `session_id` and `turn_id` |
 
 Launcher selection is deterministic:
 
@@ -246,7 +252,7 @@ The hook runtime is the absolute `sys.executable` of the invoked AIQ
 installation. Its command begins with:
 
 ```text
-/absolute/python -I -m aiq integration receive codex
+/absolute/python -I -m aiq integration receive INTEGRATION
 ```
 
 Isolated mode excludes user site-packages and `PYTHON*` environment variables
@@ -263,7 +269,7 @@ runs:
 Relative explicit paths and paths containing control characters are rejected.
 The selected path must name an executable regular file and is not resolved
 through symlinks. The hook command embeds the absolute Python and Git paths, so
-capture never searches Codex's `PATH` for AIQ, Python, or Git.
+capture never searches the host agent's `PATH` for AIQ, Python, or Git.
 
 Omitting `--user` is invalid. `plan` and `check` are read-only. Lifecycle
 results identify `integration`, `target`, `status`, and `action`; they add
@@ -281,10 +287,13 @@ recorded Python or Git executable later becomes unavailable, capture fails
 visibly and does not mutate the journal; install with `--repair` records the
 replacement runtime paths.
 
-`integration receive codex --integration-id ID --git-executable PATH` is an
-adapter-only host entry point. The absolute Git path is required. It reads the
-Codex event from standard input, is silent on success, and uses a concise
-host-visible error rather than the normal JSON protocol.
+`integration receive INTEGRATION --integration-id ID --git-executable PATH` is
+an adapter-only host entry point. The absolute Git path is required. It reads
+the host event from standard input, is silent on success, and uses a concise
+host-visible error rather than the normal JSON protocol. Capture failure exits
+2 for `codex` and 1 for `claude`: Claude Code treats exit 2 from a
+`UserPromptSubmit` hook as a blocking error that erases the user's prompt, so
+the Claude adapter fails visibly without blocking.
 
 ## Deterministic ordering
 

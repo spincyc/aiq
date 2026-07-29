@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from aiq.integrations import _hooks as hooks_engine
 from aiq.integrations import codex as codex_module
 from aiq.integrations.codex import (
     CodexIntegrationError,
@@ -567,14 +568,14 @@ class CodexIntegrationTest(unittest.TestCase):
             environment, launcher = self.fixture(root)
             install_integration(launcher=launcher, environment=environment)
             target = Path(environment["CODEX_HOME"]) / "hooks.json"
-            original_assertion = codex_module._assert_target_unchanged
+            original_assertion = hooks_engine._assert_target_unchanged
 
-            def change_then_check(path, expected, expected_status):
+            def change_then_check(spec, path, expected, expected_status):
                 path.write_text('{"changed_by_other_process":true}\n')
-                original_assertion(path, expected, expected_status)
+                original_assertion(spec, path, expected, expected_status)
 
             with patch.object(
-                codex_module,
+                hooks_engine,
                 "_assert_target_unchanged",
                 side_effect=change_then_check,
             ):

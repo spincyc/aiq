@@ -149,9 +149,9 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="safe retry for the same claim and outcome",
     ),
     "integration.check": _capability(
-        "Detect whether the user-level Codex integration is installed or drifted.",
+        "Detect whether a user-level hook integration is installed or drifted.",
         (
-            "aiq integration check codex --user [--launcher PATH] "
+            "aiq integration check (claude|codex) --user [--launcher PATH] "
             "[--git-executable PATH] [--json]"
         ),
         mutates=False,
@@ -159,9 +159,9 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         version=2,
     ),
     "integration.install": _capability(
-        "Install or explicitly repair the user-level Codex integration.",
+        "Install or explicitly repair a user-level hook integration.",
         (
-            "aiq integration install codex --user "
+            "aiq integration install (claude|codex) --user "
             "[--launcher PATH] [--git-executable PATH] "
             "[--plan-token TOKEN] [--repair] [--json]"
         ),
@@ -176,9 +176,9 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="read-only",
     ),
     "integration.plan": _capability(
-        "Preview a sanitized user-level Codex integration change.",
+        "Preview a sanitized user-level hook integration change.",
         (
-            "aiq integration plan codex --user "
+            "aiq integration plan (claude|codex) --user "
             "[--launcher PATH] [--git-executable PATH] [--repair] [--json]"
         ),
         mutates=False,
@@ -186,9 +186,9 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         version=2,
     ),
     "integration.print": _capability(
-        "Print an AGENTS bootstrap or Codex hook fragment for external management.",
+        "Print an AGENTS bootstrap or hook fragment for external management.",
         (
-            "aiq integration print (agents|codex) "
+            "aiq integration print (agents|claude|codex) "
             "[--user] [--launcher PATH] [--git-executable PATH] [--json]"
         ),
         mutates=False,
@@ -196,8 +196,8 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         version=2,
     ),
     "integration.uninstall": _capability(
-        "Remove unchanged AIQ-owned Codex integration material.",
-        "aiq integration uninstall codex --user [--json]",
+        "Remove unchanged AIQ-owned integration material.",
+        "aiq integration uninstall (claude|codex) --user [--json]",
         mutates=True,
         idempotency="safe retry when no owned material remains",
     ),

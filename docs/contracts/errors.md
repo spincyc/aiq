@@ -76,12 +76,12 @@ a compatible AIQ version; they must never be silently retried as mutations.
 | Any ingest form | Idempotency identity reused with different content | `state_conflict` |
 | `journal export OUTPUT` | Output already exists | `state_conflict` |
 | `journal destroy --confirm` | Missing, wrong, or stale inventory token | `state_conflict` |
-| Codex install/uninstall | Owned configuration or manifest has drifted | `integration_drift` |
-| Codex lifecycle | Explicit `--launcher` is relative | `invalid_argument` |
-| Codex lifecycle | Explicit `--git-executable` is relative or contains control characters | `invalid_argument` |
-| Codex lifecycle | Required launcher or host facility is unavailable | `unsupported_environment` |
-| Codex lifecycle | Required Python runtime is unavailable or not executable | `unsupported_environment` |
-| Codex lifecycle | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
+| Integration install/uninstall | Owned configuration or manifest has drifted | `integration_drift` |
+| Integration lifecycle | Explicit `--launcher` is relative | `invalid_argument` |
+| Integration lifecycle | Explicit `--git-executable` is relative or contains control characters | `invalid_argument` |
+| Integration lifecycle | Required launcher or host facility is unavailable | `unsupported_environment` |
+| Integration lifecycle | Required Python runtime is unavailable or not executable | `unsupported_environment` |
+| Integration lifecycle | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
 | Automatic or repo scope | Git is unavailable or repository discovery fails unexpectedly | `unsupported_environment` |
 | Configuration loading | Unknown, forbidden, malformed, or out-of-range setting | `invalid_config` |
 

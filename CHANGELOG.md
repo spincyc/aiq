@@ -19,6 +19,10 @@ effects documents, capability contracts, and integration manifests.
 - Installer-neutral pipx and virtual-environment workflows.
 - Codex hooks bound to recorded absolute Python and Git executables.
 - Codex lifecycle capability descriptors v2 with explicit Git selection.
+- Claude Code `UserPromptSubmit` integration managing the user-level
+  `settings.json` with `prompt_id` deduplication and non-blocking failure.
+- Shared reversible hook-integration engine parameterizing the Claude Code and
+  Codex adapters.
 - Fail-closed automatic scope selection when Git is unavailable or fails.
 
 [Unreleased]: https://github.com/spincyc/aiq/commits/main

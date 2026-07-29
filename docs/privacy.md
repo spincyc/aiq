@@ -41,13 +41,14 @@ retention. Copies made outside AIQ are not tracked or removed by AIQ.
 
 ### Integration backups
 
-Codex install and uninstall keep exact pre-change copies of the complete
-`hooks.json`. Those files may contain unrelated hooks or secrets. They are
-stored with mode `0600` below
-`${XDG_STATE_HOME:-$HOME/.local/state}/aiq/integrations/codex/<target-id>/backups/`
+Integration install and uninstall keep exact pre-change copies of the complete
+managed file (Codex `hooks.json`, Claude Code `settings.json`). Those files may
+contain unrelated hooks, settings, or secrets. They are stored with mode `0600`
+below
+`${XDG_STATE_HOME:-$HOME/.local/state}/aiq/integrations/<integration>/<target-id>/backups/`
 and are retained indefinitely.
 
-Journal destruction, package uninstall, and Codex integration uninstall do not
+Journal destruction, package uninstall, and integration uninstall do not
 remove these backups. AIQ has no integration-backup purge command yet. To
 remove them manually, first uninstall the integration and verify the owned hook
 is absent; then identify the exact `state_directory` reported by the

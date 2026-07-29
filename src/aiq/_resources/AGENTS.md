@@ -7,7 +7,7 @@ answers drift.
 Use AIQ as durable local memory and a work queue. Capture new requests and
 material changes before relying on conversation context. Discover operations
 with `aiq capability list`; inspect only the relevant contract with
-`aiq capability show <name>`. Do not infer commands or database details.
+`aiq capability show <id>`. Do not infer commands or database details.
 
 At scheduling boundaries, inspect AIQ for runnable work. Before declaring
 completion, record outcomes and verify no required runnable work remains. Keep

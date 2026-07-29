@@ -11,15 +11,15 @@ operations do not infer ownership from mutable user configuration.
 | Mutation | Written atomically by integration commands |
 | User editing | Unsupported; drift fails closed |
 
-## Codex fields
+## Adapter fields
 
 | Field | Meaning |
 |---|---|
 | `v` | Manifest contract version |
 | `status` | `installed` or `uninstalled` |
-| `integration` | Adapter name: `codex` |
+| `integration` | Adapter name: `claude` or `codex` |
 | `integration_id` | Stable marker embedded in the owned hook |
-| `target` | Absolute managed `hooks.json` path |
+| `target` | Absolute managed configuration path (`hooks.json` for Codex, `settings.json` for Claude Code) |
 | `launcher` | Lexical absolute AIQ console shim retained from install or repair as installation identity |
 | `python_executable` | Absolute Python runtime used by the owned hook |
 | `git_executable` | Lexical absolute Git executable embedded in the hook |
@@ -31,7 +31,8 @@ operations do not infer ownership from mutable user configuration.
 | `backups` | Private pre-change copies and their digests |
 
 The target-specific state directory includes a digest of the absolute target
-path, allowing distinct Codex homes without sharing ownership state.
+path, allowing distinct host configuration homes without sharing ownership
+state.
 
 The launcher is selected by explicit absolute `--launcher`, then the actual
 absolute `aiq` console invocation, then `PATH`. Relative paths are invalid.
@@ -47,7 +48,7 @@ The Git executable is selected by explicit absolute `--git-executable`, then
 `git` on the install command's `PATH`. The selected executable is validated
 and stored as a lexical absolute path without resolving symlinks. The owned
 hook passes that path back to AIQ explicitly, so capture does not discover Git
-from the Codex process environment.
+from the host agent's process environment.
 
 ## Safety semantics
 

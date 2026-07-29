@@ -166,14 +166,16 @@ committed.
 | Integration | Alpha status |
 |---|---|
 | [Generic input](docs/integrations/generic.md) | Message, stdin, and canonical event JSON ingestion |
+| [Claude Code](docs/integrations/claude.md) | Reversible user-level prompt hook |
 | [Codex](docs/integrations/codex.md) | Reversible user-level prompt hook |
 | Manual guidance | The terse canonical bootstrap is [`AGENTS.md`](AGENTS.md) |
 
 AIQ never replaces an entire agent configuration. Integration installers use
 preview, minimal mutation, ownership records, drift checks, and targeted
-uninstall. The Codex integration records its launcher identity and absolute
-Python and Git executables. Its hook runs Python with `-I`, so dotfiles,
-`PATH`, `PYTHONPATH`, and `PYTHONHOME` cannot redirect the runtime.
+uninstall. The Claude Code and Codex integrations record their launcher
+identity and absolute Python and Git executables. Their hooks run Python with
+`-I`, so dotfiles, `PATH`, `PYTHONPATH`, and `PYTHONHOME` cannot redirect the
+runtime.
 
 ## Documentation
 
