@@ -132,6 +132,14 @@ def _invocation_wants_json(arguments: Sequence[str]) -> bool:
         return False
 
 
+def _wants_json(arguments: argparse.Namespace) -> bool:
+    """JSON selection for commands that deliberately avoid config loading."""
+    return bool(
+        getattr(arguments, "json", False)
+        or os.environ.get("AIQ_OUTPUT") == "json"
+    )
+
+
 def _single_line(value: str) -> str:
     return "".join(
         character
@@ -142,6 +150,13 @@ def _single_line(value: str) -> str:
 
 
 def _versioned(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if "v" in payload and payload["v"] != PROTOCOL_VERSION:
+        raise AssertionError(
+            f"internal error: payload version {payload['v']!r} conflicts "
+            f"with protocol envelope version {PROTOCOL_VERSION}; a "
+            "diverging payload contract version requires a new envelope "
+            "field"
+        )
     return {"v": PROTOCOL_VERSION, **payload}
 
 
@@ -801,7 +816,7 @@ def _status(arguments: argparse.Namespace) -> int:
 
 def _capability_list(arguments: argparse.Namespace) -> int:
     capabilities = list_capabilities()
-    if arguments.json:
+    if _wants_json(arguments):
         _emit({"capabilities": capabilities}, as_json=True)
         return 0
     for capability in capabilities:
@@ -814,7 +829,7 @@ def _capability_list(arguments: argparse.Namespace) -> int:
 
 def _capability_show(arguments: argparse.Namespace) -> int:
     capability = show_capability(arguments.capability_id)
-    if arguments.json:
+    if _wants_json(arguments):
         _emit(capability, as_json=True)
     else:
         print(
@@ -858,7 +873,7 @@ def _integration_list(arguments: argparse.Namespace) -> int:
             "version": 1,
         }
     )
-    if arguments.json:
+    if _wants_json(arguments):
         _emit({"integrations": integrations}, as_json=True)
     else:
         for integration in integrations:
@@ -908,13 +923,14 @@ def _hook_selector(arguments: argparse.Namespace) -> None:
 
 
 def _integration_plan(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
     if arguments.integration_id == "guidance":
         _emit(
             guidance.plan_integration(
                 target=_guidance_target(arguments),
                 repair=arguments.repair,
             ),
-            as_json=arguments.json,
+            as_json=as_json,
         )
         return 0
     _hook_selector(arguments)
@@ -926,12 +942,13 @@ def _integration_plan(arguments: argparse.Namespace) -> int:
             git_executable=arguments.git_executable,
             repair=arguments.repair,
         ),
-        as_json=arguments.json,
+        as_json=as_json,
     )
     return 0
 
 
 def _integration_install(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
     if arguments.integration_id == "guidance":
         _emit(
             guidance.install_integration(
@@ -939,7 +956,7 @@ def _integration_install(arguments: argparse.Namespace) -> int:
                 repair=arguments.repair,
                 plan_token=arguments.plan_token,
             ),
-            as_json=arguments.json,
+            as_json=as_json,
         )
         return 0
     _hook_selector(arguments)
@@ -952,16 +969,17 @@ def _integration_install(arguments: argparse.Namespace) -> int:
             repair=arguments.repair,
             plan_token=arguments.plan_token,
         ),
-        as_json=arguments.json,
+        as_json=as_json,
     )
     return 0
 
 
 def _integration_check(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
     if arguments.integration_id == "guidance":
         _emit(
             guidance.check_integration(target=_guidance_target(arguments)),
-            as_json=arguments.json,
+            as_json=as_json,
         )
         return 0
     _hook_selector(arguments)
@@ -972,36 +990,38 @@ def _integration_check(arguments: argparse.Namespace) -> int:
             python_executable=_invoked_python_executable(),
             git_executable=arguments.git_executable,
         ),
-        as_json=arguments.json,
+        as_json=as_json,
     )
     return 0
 
 
 def _integration_uninstall(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
     if arguments.integration_id == "guidance":
         _emit(
             guidance.uninstall_integration(
                 target=_guidance_target(arguments),
             ),
-            as_json=arguments.json,
+            as_json=as_json,
         )
         return 0
     _hook_selector(arguments)
     _emit(
         _INTEGRATION_MODULES[arguments.integration_id].uninstall_integration(),
-        as_json=arguments.json,
+        as_json=as_json,
     )
     return 0
 
 
 def _integration_print(arguments: argparse.Namespace) -> int:
+    as_json = _wants_json(arguments)
     if arguments.integration_id == "agents":
         guidance = (
             resources.files("aiq._resources")
             .joinpath("AGENTS.md")
             .read_text(encoding="utf-8")
         )
-        if arguments.json:
+        if as_json:
             _emit(
                 {"artifact": "agents", "content": guidance},
                 as_json=True,
@@ -1017,7 +1037,7 @@ def _integration_print(arguments: argparse.Namespace) -> int:
         python_executable=_invoked_python_executable(),
         git_executable=arguments.git_executable,
     )
-    if arguments.json:
+    if as_json:
         _emit(
             {
                 "integration": arguments.integration_id,
@@ -1434,7 +1454,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Stable machine-readable codes set at JournalError raise sites, mapped to
+# their (code, exit) classification. Codes take precedence over the substring
+# fallback rules below.
+_JOURNAL_ERROR_CODE_EXITS: dict[str, tuple[str, int]] = {
+    "invalid_argument": ("invalid_argument", 2),
+    "invalid_document": ("invalid_document", 2),
+}
+
+
 def _classify_journal_error(error: JournalError) -> tuple[str, int]:
+    explicit = _JOURNAL_ERROR_CODE_EXITS.get(getattr(error, "code", None))
+    if explicit is not None:
+        return explicit
     message = str(error).lower()
     if "not found" in message or "does not exist" in message:
         return "not_found", 3
@@ -1581,18 +1613,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         ValueError,
     ) as error:
         code, exit_code = _classify_error(error)
-        _emit_error(
-            code,
-            str(error),
-            as_json=getattr(arguments, "json", False)
-            or os.environ.get("AIQ_OUTPUT") == "json",
-        )
+        _emit_error(code, str(error), as_json=_wants_json(arguments))
         return exit_code
     except Exception as error:
         _emit_error(
             "internal_error",
             str(error) or error.__class__.__name__,
-            as_json=getattr(arguments, "json", False)
-            or os.environ.get("AIQ_OUTPUT") == "json",
+            as_json=_wants_json(arguments),
         )
         return 70

@@ -22,7 +22,16 @@ SQLITE_MINIMUM_VERSION = (3, 37, 0)
 
 
 class JournalError(RuntimeError):
-    """Journal operation failed."""
+    """Journal operation failed.
+
+    ``code`` optionally carries a stable machine-readable error code from
+    the raise site so the CLI can classify the failure without matching
+    message substrings.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class _NotGitRepository(JournalError):

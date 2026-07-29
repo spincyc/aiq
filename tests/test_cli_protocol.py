@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from aiq.cli import _classify_error, build_parser
+from aiq.cli import _classify_error, _versioned, build_parser
 from aiq.integrations.codex import CodexIntegrationError
 
 
@@ -395,6 +395,71 @@ class CliProtocolTests(unittest.TestCase):
             6,
             "unsupported_environment",
         )
+
+    def test_envelope_rejects_conflicting_payload_version(self) -> None:
+        self.assertEqual(
+            _versioned({"v": 1, "status": "installed"}),
+            {"v": 1, "status": "installed"},
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "conflicts with protocol envelope version",
+        ):
+            _versioned({"v": 2, "status": "installed"})
+
+    def test_export_argument_validation_is_invalid_argument(self) -> None:
+        self.assert_error(
+            self.run_aiq("journal", "export", ".", *self.scope),
+            2,
+            "invalid_argument",
+        )
+
+    def test_unknown_effects_alias_is_invalid_document(self) -> None:
+        self.run_aiq("journal", "init", *self.scope)
+        ingested = json.loads(
+            self.run_aiq(
+                "ingest", "--message", "Unknown alias coverage", *self.scope,
+            ).stdout
+        )
+        message_id = str(ingested["message_id"])
+        claimed = json.loads(
+            self.run_aiq(
+                "inbox", "claim", message_id,
+                "--owner", "protocol-test", *self.scope,
+            ).stdout
+        )
+        effects = json.dumps(
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["update", "$missing", {"title": "New"}]],
+            },
+            separators=(",", ":"),
+        )
+        self.assert_error(
+            self.run_aiq(
+                "inbox", "apply", message_id,
+                "--claim", claimed["claim"]["claim_id"],
+                "--effects", "-", *self.scope, input_text=effects,
+            ),
+            2,
+            "invalid_document",
+        )
+
+    def test_environment_output_selects_json_for_uncfg_commands(self) -> None:
+        environment = {**self.environment, "AIQ_OUTPUT": "json"}
+        for arguments, key in (
+            (("capability", "list"), "capabilities"),
+            (("integration", "list"), "integrations"),
+        ):
+            with self.subTest(command=arguments):
+                completed = self.run_aiq(*arguments, environment=environment)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(completed.stdout.count("\n"), 1)
+                payload = json.loads(completed.stdout)
+                self.assertEqual(payload["v"], 1)
+                self.assertIn(key, payload)
 
     def test_python_runtime_errors_are_environment_errors(self) -> None:
         self.assertEqual(

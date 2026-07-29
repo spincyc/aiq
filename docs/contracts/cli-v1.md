@@ -7,9 +7,16 @@ This document defines AIQ's first public machine-facing CLI protocol.
 ## Common rules
 
 - JSON output mode, selected by configuration or `--json`, produces one
-  compact, key-sorted UTF-8 JSON object followed by one newline.
+  compact, key-sorted UTF-8 JSON object followed by one newline. The
+  `capability` and `integration` command families deliberately avoid
+  configuration loading; they select JSON output through `--json` or the
+  `AIQ_OUTPUT` environment variable only.
 - Success uses standard output only. Failure uses standard error only.
-- Every JSON result contains top-level integer `"v": 1`.
+- Every JSON result contains top-level integer `"v": 1`. Payload contract
+  versions that also surface as top-level `v` (integration lifecycle and
+  manifest results) coincide with the protocol envelope version at v1; a
+  future divergence requires a new dedicated envelope field, never a
+  reinterpretation of `v`.
 - An empty inbox or queue is successful and returns an empty array or `null`.
 - Object consumers ignore unknown fields. Required field removal or changed
   meaning requires a new protocol version.

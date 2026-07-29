@@ -1490,7 +1490,10 @@ def _resolve(reference: str, aliases: dict[str, str]) -> str:
         try:
             return aliases[reference]
         except KeyError as error:
-            raise JournalError(f"unknown local task alias: {reference}") from error
+            raise JournalError(
+                f"unknown local task alias: {reference}",
+                code="invalid_document",
+            ) from error
     return reference
 
 
