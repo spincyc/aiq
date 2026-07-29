@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import stat
 import sys
@@ -353,19 +354,32 @@ def python_executable_path(
     )
 
 
+def _command_has_marker(command: str, *, integration_id: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    return any(
+        token == "--integration-id" and tokens[index + 1] == integration_id
+        for index, token in enumerate(tokens[:-1])
+    )
+
+
 def marker_count(group: Any, *, integration_id: str) -> int:
     if not isinstance(group, dict):
         return 0
     handlers = group.get("hooks")
     if not isinstance(handlers, list):
         return 0
-    marker = f"--integration-id {integration_id}"
     return sum(
         1
         for handler in handlers
         if isinstance(handler, dict)
         and isinstance(handler.get("command"), str)
-        and marker in handler["command"]
+        and _command_has_marker(
+            handler["command"],
+            integration_id=integration_id,
+        )
     )
 
 
@@ -505,13 +519,11 @@ def _validate_manifest(
             "integration manifest created containers are invalid"
         )
     group = manifest["managed_group"]
+    handlers = group.get("hooks") if isinstance(group, dict) else None
     if (
         not isinstance(group, dict)
-        or group
-        != spec.hook_group(
-            Path(manifest["python_executable"]),
-            Path(manifest["git_executable"]),
-        )
+        or not isinstance(handlers, list)
+        or not all(isinstance(handler, dict) for handler in handlers)
         or marker_count(group, integration_id=spec.integration_id) != 1
     ):
         raise spec.error_class("integration manifest owned hook is invalid")
@@ -550,26 +562,33 @@ def _read_manifest(
     *,
     target: Path,
 ) -> dict[str, Any] | None:
-    if state_directory.exists() or state_directory.is_symlink():
+    try:
         status = state_directory.lstat()
-        if (
-            not stat.S_ISDIR(status.st_mode)
-            or stat.S_ISLNK(status.st_mode)
-            or status.st_uid != os.getuid()
-            or stat.S_IMODE(status.st_mode) & 0o077
-        ):
-            raise spec.error_class(
-                f"integration state directory is unsafe: {state_directory}"
-            )
+    except FileNotFoundError:
+        status = None
+    except OSError as error:
+        raise spec.error_class(
+            f"integration state directory is unsafe: {state_directory}"
+        ) from error
+    if status is not None and (
+        not stat.S_ISDIR(status.st_mode)
+        or stat.S_ISLNK(status.st_mode)
+        or status.st_uid != os.getuid()
+        or stat.S_IMODE(status.st_mode) & 0o077
+    ):
+        raise spec.error_class(
+            f"integration state directory is unsafe: {state_directory}"
+        )
     path = _manifest_path(state_directory)
-    if not path.exists() and not path.is_symlink():
+    try:
+        data = read_bounded(
+            path,
+            262_144,
+            label="integration manifest",
+            error_class=spec.error_class,
+        )
+    except FileNotFoundError:
         return None
-    data = read_bounded(
-        path,
-        262_144,
-        label="integration manifest",
-        error_class=spec.error_class,
-    )
     try:
         manifest = json.loads(
             data,
@@ -830,13 +849,16 @@ def _build_plan(
             f"{spec.display_name} hook"
         )
         return result
+    adopt = False
     if managed and not manifest_active:
-        result["status"] = "unmanaged"
-        result["blocked_reason"] = (
-            f"an AIQ-marked {spec.display_name} hook exists without an "
-            "active AIQ manifest"
-        )
-        return result
+        if not repair:
+            result["status"] = "unmanaged"
+            result["blocked_reason"] = (
+                f"an AIQ-marked {spec.display_name} hook exists without an "
+                "active AIQ manifest; rerun with repair to adopt it"
+            )
+            return result
+        adopt = True
 
     created: list[str] = []
     created_file = before is None
@@ -862,6 +884,9 @@ def _build_plan(
         if manifest_active:
             created_file = manifest["created_file"]
             created = list(manifest["created_containers"])
+    elif adopt:
+        after_document = _replace_managed_group(spec, document, desired_group)
+        action = "repair"
     elif manifest_group_mismatch:
         after_document = document
         action = "repair"
@@ -889,9 +914,15 @@ def _build_plan(
     after = _encode_hooks(after_document)
     before_sha = sha256_or_none(before)
     after_sha = sha256_or_none(after)
+    if action == "install":
+        planned_status = "absent"
+    elif adopt:
+        planned_status = "unmanaged"
+    else:
+        planned_status = "drifted"
     result.update(
         {
-            "status": "absent" if action == "install" else "drifted",
+            "status": planned_status,
             "action": action,
             "created_file": created_file,
             "created_containers": created,

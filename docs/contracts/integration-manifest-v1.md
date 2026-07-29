@@ -65,5 +65,23 @@ hook. If the recorded Python or Git executable becomes unavailable, hook
 capture fails closed until the installation is repaired.
 
 A reader must reject an unsupported future `v` without mutating either the
-manifest or target. The current v1 manifest has an exact field set; missing or
-unknown fields are treated as drift and fail without mutation.
+manifest or target. The v1 manifest has a required field set; a missing or
+invalid required field fails closed without mutation. Unknown additional
+fields are preserved verbatim across operations so a newer AIQ can extend the
+manifest without invalidating it for v1 readers.
+
+`managed_group` is validated structurally — a hook group object whose `hooks`
+list contains exactly one AIQ-marked command and whose canonical digest
+matches `managed_group_sha256` — not by equality with the hook template of
+the running AIQ version. A manifest written by an older AIQ therefore remains
+valid after hook-template changes; the difference between the owned group and
+the currently desired definition surfaces as drift at plan or check time and
+is resolved by explicit repair.
+
+If an AIQ-marked hook group exists in the target but no manifest records it
+as installed (for example after an install interrupted between writing the
+target and writing the manifest), plan and install report the state as
+`unmanaged` and block. Running install with explicit repair adopts the marked
+group: it replaces that group with the desired definition and writes a fresh
+manifest recording `created_file` as `false` and `created_containers` as
+empty, because AIQ cannot prove it created the file or containers.
