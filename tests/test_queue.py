@@ -32,6 +32,7 @@ from aiq.queue import (
     list_tasks,
     next_tasks,
     parse_effect_document,
+    read_status,
     release_claim,
     show_task,
 )
@@ -1090,6 +1091,151 @@ class QueueTest(unittest.TestCase):
         for result in completed:
             self.assertNotIn("\u001b", result.stdout)
             self.assertIn("\\u001b", result.stdout)
+
+    def test_read_status_reports_bounded_counts_without_content(self) -> None:
+        self.assertEqual(
+            read_status(self.scope),
+            {
+                "messages": {
+                    "received": 0,
+                    "processing": 0,
+                    "applied": 0,
+                    "needs_input": 0,
+                    "failed": 0,
+                },
+                "tasks": {
+                    "queued": 0,
+                    "ready": 0,
+                    "active": 0,
+                    "blocked": 0,
+                    "done": 0,
+                    "canceled": 0,
+                    "superseded": 0,
+                },
+                "claims": {"active": 0},
+                "ready": [],
+            },
+        )
+
+        created = self.apply(
+            self.ingest("Create ready and dependent work").message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [
+                    ["create", "$ready", {"title": "Ready work", "priority": 5}],
+                    [
+                        "create",
+                        "$queued",
+                        {"title": "Dependent work", "requires": ["$ready"]},
+                    ],
+                ],
+            },
+        )
+        ready_id = created["aliases"]["$ready"]
+        self.ingest("Pending message")
+        processing = self.ingest("Processing message")
+        claim_message(
+            self.scope,
+            owner_id="status-test",
+            message_id=processing.message_id,
+        )
+        for content, disposition in (
+            ("Parked message", "needs_input"),
+            ("Broken message", "failed"),
+        ):
+            receipt = self.ingest(content)
+            claim = claim_message(
+                self.scope,
+                owner_id="status-test",
+                message_id=receipt.message_id,
+            )
+            assert claim is not None
+            dispose_message(
+                self.scope,
+                receipt.message_id,
+                claim_id=claim["claim_id"],
+                disposition=disposition,
+                reason="status coverage",
+            )
+
+        status = read_status(self.scope)
+        self.assertEqual(
+            status["messages"],
+            {
+                "received": 1,
+                "processing": 1,
+                "applied": 1,
+                "needs_input": 1,
+                "failed": 1,
+            },
+        )
+        self.assertEqual(status["tasks"]["ready"], 1)
+        self.assertEqual(status["tasks"]["queued"], 1)
+        self.assertEqual(status["claims"], {"active": 1})
+        self.assertEqual(
+            status["ready"],
+            [{"task_id": ready_id, "priority": 5, "title": "Ready work"}],
+        )
+
+        claimed = claim_next_tasks(self.scope, owner_id="status-test")
+        self.assertEqual(claimed[0]["task"]["task_id"], ready_id)
+        active_status = read_status(self.scope)
+        self.assertEqual(active_status["tasks"]["active"], 1)
+        self.assertEqual(active_status["tasks"]["ready"], 0)
+        self.assertEqual(active_status["ready"], [])
+        self.assertEqual(active_status["claims"], {"active": 2})
+
+    def test_read_status_counts_expired_message_lease_as_received(self) -> None:
+        message = self.ingest("Expiring message")
+        claim_message(
+            self.scope,
+            owner_id="status-test",
+            message_id=message.message_id,
+            lease_seconds=1,
+            now_us=1_000_000,
+        )
+
+        status = read_status(self.scope)
+
+        self.assertEqual(status["messages"]["processing"], 0)
+        self.assertEqual(status["messages"]["received"], 1)
+        self.assertEqual(status["claims"], {"active": 0})
+
+    def test_read_status_bounds_ready_tasks_by_priority(self) -> None:
+        self.apply(
+            self.ingest("Create many ready tasks").message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [
+                    [
+                        "create",
+                        f"$task{index}",
+                        {"title": f"Task {index}", "priority": index},
+                    ]
+                    for index in range(7)
+                ],
+            },
+        )
+
+        status = read_status(self.scope)
+
+        self.assertEqual(status["tasks"]["ready"], 7)
+        self.assertEqual(len(status["ready"]), 5)
+        self.assertEqual(
+            [task["priority"] for task in status["ready"]],
+            [6, 5, 4, 3, 2],
+        )
+        self.assertEqual(
+            [
+                task["priority"]
+                for task in read_status(self.scope, ready_limit=1)["ready"]
+            ],
+            [6],
+        )
+        with self.assertRaisesRegex(JournalError, "queue limit"):
+            read_status(self.scope, ready_limit=0)
 
 
 if __name__ == "__main__":

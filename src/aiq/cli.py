@@ -40,6 +40,7 @@ from aiq.privacy import (
 )
 from aiq.queue import (
     EFFECT_DOCUMENT_MAX_BYTES,
+    MESSAGE_STATES,
     TASK_STATES,
     apply_effects,
     claim_message,
@@ -48,6 +49,7 @@ from aiq.queue import (
     list_tasks,
     next_tasks,
     parse_effect_document,
+    read_status,
     release_claim,
     show_task,
 )
@@ -111,6 +113,7 @@ def _invocation_wants_json(arguments: Sequence[str]) -> bool:
         "ingest",
         "journal",
         "queue",
+        "status",
         "task",
     }:
         return False
@@ -665,6 +668,30 @@ def _queue_next(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _status(arguments: argparse.Namespace) -> int:
+    scope = _scope(arguments)
+    result = read_status(scope)
+    if arguments.json:
+        _emit({**result, "scope": scope.to_dict()}, as_json=True)
+        return 0
+    for label, states in (
+        ("messages", MESSAGE_STATES),
+        ("tasks", TASK_STATES),
+    ):
+        counts = result[label]
+        print(
+            f"{label:<8}  "
+            + "  ".join(f"{state}={counts[state]}" for state in states)
+        )
+    print(f"{'claims':<8}  active={result['claims']['active']}")
+    for task in result["ready"]:
+        print(
+            f"{'ready':<8}  {task['task_id']}\tp{task['priority']}\t"
+            f"{_single_line(task['title'])}"
+        )
+    return 0
+
+
 def _capability_list(arguments: argparse.Namespace) -> int:
     capabilities = list_capabilities()
     if arguments.json:
@@ -950,6 +977,10 @@ def build_parser() -> argparse.ArgumentParser:
     claim_release = _scope_parser(claim_commands, "release")
     claim_release.add_argument("claim_id")
     claim_release.set_defaults(handler=_claim_release)
+
+    status = commands.add_parser("status")
+    _add_config_arguments(status)
+    status.set_defaults(load_config=True, handler=_status)
 
     capability = commands.add_parser("capability")
     capability_commands = capability.add_subparsers(

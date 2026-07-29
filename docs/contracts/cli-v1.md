@@ -107,6 +107,7 @@ The tables list fields in addition to top-level `v`.
 | `queue peek --json` | `tasks` containing task summaries |
 | `queue next --json` | `items`, each containing separate `task` summary and `claim` |
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
+| `status --json` | `messages`, `tasks`, `claims`, `ready`, `scope` |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
 | `capability show NAME --json` | capability `id`, `version`, purpose, command, and selected contract |
 | `integration list --json` | sorted `integrations`, each with `id`, `version`, and `purpose` |
@@ -153,6 +154,25 @@ setting to `cli`, an `env:NAME`, a configuration path, or `default`. `check`
 validates discovered layers without initializing a journal. Configuration
 precedence and allowed repository keys are defined in
 [`configuration.md`](../configuration.md).
+
+## Status
+
+The status dashboard is read-only and reads one journal snapshot:
+
+```text
+aiq status [--scope SCOPE] [--cwd PATH] [--json]
+```
+
+| Field | Meaning |
+|---|---|
+| `messages` | Message counts keyed by `received`, `processing`, `applied`, `needs_input`, and `failed` |
+| `tasks` | Effective task-state counts keyed by every task state |
+| `claims` | `active`: unreleased, unexpired message and task leases |
+| `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, and `title` |
+
+A processing message whose lease has expired counts as `received`. Message and
+prompt content never appears. A missing journal reports zero counts and an
+empty `ready` array without creating storage.
 
 ## Generic event ingestion
 
@@ -291,7 +311,7 @@ host-visible error rather than the normal JSON protocol.
 | Result | Order |
 |---|---|
 | Inbox | oldest current lifecycle event first |
-| Task list and queue | priority descending, then creation order |
+| Task list, queue, and status `ready` | priority descending, then creation order |
 | Dependencies, blockers, waiters | task ID ascending |
 | Applied tasks | task number ascending |
 | Capabilities | capability ID ascending |
