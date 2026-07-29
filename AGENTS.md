@@ -15,7 +15,8 @@ AIQ runtime state local and untracked; never commit journals, leases, exports,
 or snapshots.
 
 When reasoning becomes repeatable, encode it in the smallest deterministic
-tool, test, check, or configuration, then point guidance to that artifact.
+tool, test, check, or configuration, then point guidance to that artifact;
+make repo-local tools with `tmt` and discover them in `tmt.json`.
 
 When contributing to AIQ, follow `CONTRIBUTING.md` and load only the
 documentation relevant to the change.
