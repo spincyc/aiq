@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import re
+import sys
+import tomllib
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+UNRELEASED = "Unreleased"
+
+SECTION_PATTERN = re.compile(r"^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}))?$")
+SUBSECTION_PATTERN = re.compile(r"^### +(.+?) *$")
+LINK_PATTERN = re.compile(r"^\[([^\]]+)\]: +(\S+)$")
+FENCE_PATTERN = re.compile(r"^ {0,3}(?:`{3,}|~{3,})")
+SOURCE_VERSION_PATTERN = re.compile(
+    r"^_SOURCE_VERSION = \"([^\"]+)\"$", re.MULTILINE
+)
+
+# CHANGELOG.md structure problems that are known, already shipped, and owned
+# by a separate restructuring change.  They are reported on every run but do
+# not fail it.  An entry that no longer reproduces fails the run instead, so
+# this list cannot outlive the defect it documents.
+KNOWN_CHANGELOG_ISSUES = frozenset(
+    {
+        "[0.2.0a1]: duplicate heading: ### Fixed",
+    }
+)
+
+
+def read_project_version() -> str:
+    path = REPO_ROOT / "pyproject.toml"
+    with path.open("rb") as configuration:
+        document = tomllib.load(configuration)
+    try:
+        version = document["project"]["version"]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError("pyproject.toml declares no project version") from error
+    if not isinstance(version, str) or not version:
+        raise RuntimeError(f"pyproject.toml version is not a string: {version!r}")
+    return version
+
+
+def read_source_version() -> str:
+    path = REPO_ROOT / "src" / "aiq" / "__init__.py"
+    match = SOURCE_VERSION_PATTERN.search(path.read_text(encoding="utf-8"))
+    if match is None:
+        raise RuntimeError(
+            "src/aiq/__init__.py declares no canonical _SOURCE_VERSION literal"
+        )
+    return match.group(1)
+
+
+def parse_changelog(text: str) -> tuple[list[tuple[str, list[str]]], list[str], list[str]]:
+    """Return the version sections, their link references, and any defects.
+
+    Sections are returned newest-first in file order, each as its version name
+    (``Unreleased`` included) paired with its level-three headings.
+    """
+
+    sections: list[tuple[str, list[str]]] = []
+    links: list[str] = []
+    violations: list[str] = []
+    fenced = False
+    for number, line in enumerate(text.splitlines(), start=1):
+        if FENCE_PATTERN.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        if line.startswith("## "):
+            match = SECTION_PATTERN.match(line)
+            if match is None:
+                violations.append(
+                    f"line {number}: malformed version heading: {line.strip()}"
+                )
+                continue
+            sections.append((match.group(1), []))
+            continue
+        subsection = SUBSECTION_PATTERN.match(line)
+        if subsection is not None:
+            if not sections:
+                violations.append(
+                    f"line {number}: heading precedes every version section: "
+                    f"{line.strip()}"
+                )
+                continue
+            sections[-1][1].append(f"### {subsection.group(1)}")
+            continue
+        link = LINK_PATTERN.match(line)
+        if link is not None:
+            links.append(link.group(1))
+    return sections, links, violations
+
+
+def changelog_violations(
+    sections: list[tuple[str, list[str]]],
+    links: list[str],
+    project_version: str,
+) -> list[str]:
+    violations: list[str] = []
+
+    seen: list[str] = []
+    for name, _headings in sections:
+        if name in seen:
+            violations.append(f"[{name}]: duplicate version section")
+        else:
+            seen.append(name)
+
+    for name, headings in sections:
+        reported: set[str] = set()
+        for index, heading in enumerate(headings):
+            if heading in headings[:index] and heading not in reported:
+                reported.add(heading)
+                violations.append(f"[{name}]: duplicate heading: {heading}")
+
+    for index, name in enumerate(links):
+        if name in links[:index]:
+            violations.append(f"[{name}]: duplicate link reference")
+    defined = set(links)
+    for name in seen:
+        if name not in defined:
+            violations.append(f"[{name}]: version has no link reference")
+    for name in links:
+        if name not in seen:
+            violations.append(f"[{name}]: link reference has no version section")
+
+    if not sections:
+        violations.append("no version section found")
+        return sorted(set(violations))
+
+    top = sections[0][0]
+    if UNRELEASED in seen and top != UNRELEASED:
+        violations.append(f"[{UNRELEASED}] must be the first section, not [{top}]")
+    if top != UNRELEASED and top != project_version:
+        violations.append(
+            f"top section [{top}] is neither [{UNRELEASED}] nor the "
+            f"pyproject.toml version [{project_version}]"
+        )
+    return sorted(set(violations))
+
+
+def released_version(sections: list[tuple[str, list[str]]]) -> str | None:
+    for name, _headings in sections:
+        if name != UNRELEASED:
+            return name
+    return None
+
+
+def coupling_failures(
+    project_version: str,
+    source_version: str,
+    sections: list[tuple[str, list[str]]],
+    tag: str | None,
+) -> list[str]:
+    failures: list[str] = []
+    if project_version != source_version:
+        failures.append(
+            f"pyproject.toml version {project_version} and src/aiq/__init__.py "
+            f"_SOURCE_VERSION {source_version} disagree"
+        )
+    newest = released_version(sections)
+    if newest is None:
+        failures.append(
+            "CHANGELOG.md has no released version section to compare against "
+            f"pyproject.toml version {project_version}"
+        )
+    elif newest != project_version:
+        failures.append(
+            f"pyproject.toml version {project_version} and the newest "
+            f"CHANGELOG.md version section [{newest}] disagree"
+        )
+    if tag:
+        if not tag.startswith("v"):
+            failures.append(
+                f"tag {tag} is not v-prefixed; the release tag for "
+                f"pyproject.toml version {project_version} is v{project_version}"
+            )
+        elif tag[1:] != project_version:
+            failures.append(
+                f"tag {tag} and pyproject.toml version {project_version} "
+                f"disagree; expected tag v{project_version}"
+            )
+        if sections and sections[0][0] == UNRELEASED:
+            failures.append(
+                f"tag {tag} and CHANGELOG.md disagree: the file still opens "
+                f"with [{UNRELEASED}]; rename that section to "
+                f"[{project_version}] before cutting the tag"
+            )
+    return failures
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Assert that pyproject.toml, src/aiq/__init__.py, CHANGELOG.md, "
+            "and an optional release tag all name one version."
+        )
+    )
+    parser.add_argument(
+        "--tag",
+        default="",
+        help="release tag to compare, for example v0.2.0a1",
+    )
+    arguments = parser.parse_args(argv)
+    tag = arguments.tag.strip()
+
+    try:
+        project_version = read_project_version()
+        source_version = read_source_version()
+        changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    except (OSError, RuntimeError, UnicodeError, tomllib.TOMLDecodeError) as error:
+        print(f"FAIL release-check: {error}", file=sys.stderr)
+        return 1
+
+    sections, links, parse_defects = parse_changelog(changelog)
+    structure = sorted(
+        set(parse_defects + changelog_violations(sections, links, project_version))
+    )
+    known = sorted(set(structure) & KNOWN_CHANGELOG_ISSUES)
+    unexpected = sorted(set(structure) - KNOWN_CHANGELOG_ISSUES)
+    stale = sorted(KNOWN_CHANGELOG_ISSUES - set(structure))
+
+    failures = [f"CHANGELOG.md: {item}" for item in unexpected]
+    failures.extend(
+        f"CHANGELOG.md: known issue no longer reproduces: {item}; drop it from "
+        "KNOWN_CHANGELOG_ISSUES in tools/release-check"
+        for item in stale
+    )
+    failures.extend(
+        coupling_failures(project_version, source_version, sections, tag or None)
+    )
+
+    for item in known:
+        print(f"KNOWN CHANGELOG.md: {item} (expected failure; not a release gate)")
+    sys.stdout.flush()
+    if failures:
+        for failure in failures:
+            print(f"FAIL release-check: {failure}", file=sys.stderr)
+        return 1
+    print(
+        f"Version {project_version} agrees across pyproject.toml, "
+        "src/aiq/__init__.py, and CHANGELOG.md"
+        + (f", and matches tag {tag}." if tag else ".")
+    )
+    print("Release check passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

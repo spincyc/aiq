@@ -32,10 +32,16 @@ the Python standard library. Its distribution contract is installer-neutral:
 
 | Method | Install | Resolve the launcher |
 |---|---|---|
-| `pipx` | `pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'` | `aiq_bin="$(pipx environment --value PIPX_BIN_DIR)/aiq"` |
-| Standard venv | `python3 -m venv ./aiq-venv`<br>`./aiq-venv/bin/python -m pip install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'` | `aiq_bin="$(pwd)/aiq-venv/bin/aiq"` |
+| `pipx` | `pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.2.0a1'` | `aiq_bin="$(pipx environment --value PIPX_BIN_DIR)/aiq"` |
+| Standard venv | `python3 -m venv ./aiq-venv`<br>`./aiq-venv/bin/python -m pip install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.2.0a1'` | `aiq_bin="$(pwd)/aiq-venv/bin/aiq"` |
 
-Direct GitHub installs require Git and network access.
+Direct GitHub installs require Git and network access. The ref after `@`
+selects the channel:
+
+| Channel | Ref | Contract |
+|---|---|---|
+| Release | `@v0.2.0a1` | Recommended; one fixed, tagged revision |
+| Development | `@main` | Unreleased work; changes without notice |
 
 ```sh
 "$aiq_bin" --version
@@ -82,22 +88,24 @@ Package fragments: [Arch](make/platforms/arch.mk) ·
 Unsupported platforms disable only `install-packages`; neutral targets such as
 `make verify` remain usable.
 
-The `main` ref is the development channel. Refresh it explicitly:
+Move to a newer release, or refresh the `main` development channel, by
+reinstalling over the existing install and naming the ref you want:
 
 ```sh
 pipx install --force \
-  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'
+  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.2.0a1'
 "$(pipx environment --value PIPX_BIN_DIR)/aiq" --version
 
 ./aiq-venv/bin/python -m pip install --force-reinstall \
-  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'
+  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.2.0a1'
 ./aiq-venv/bin/aiq --version
 ```
 
 AIQ never updates itself. Upgrading pipx or a host package manager does not
-implicitly update pipx-managed applications. `pipx upgrade-all` updates every
-unpinned pipx application when explicitly invoked; normal AIQ releases will
-bump the package version so `pipx upgrade aiq-workqueue` can update AIQ alone.
+implicitly update pipx-managed applications, and `pipx upgrade aiq-workqueue`
+does not move a Git install to a new release: it re-resolves the ref already
+recorded for the install, so a tag-pinned install stays on that tag. Naming
+the new ref in `pipx install --force` is what changes releases.
 
 After the installer refreshes AIQ, run `aiq reconcile --user` to report
 whether AIQ-owned integration hooks still match the current installation and

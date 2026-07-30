@@ -48,9 +48,16 @@ make ci
 ```
 
 `make ci` runs exactly what the CI policy leg runs: `verify` (which starts
-with `tools/sanity-check`), `public-audit`, `build`, and
+with `tools/sanity-check`), `public-audit`, `release-check`, `build`, and
 `tools/acceptance-install`. A passing `make ci` means the policy leg of CI
 will pass on the same inputs.
+
+`make release-check` asserts that `pyproject.toml`, `_SOURCE_VERSION` in
+`src/aiq/__init__.py`, and the newest version section of `CHANGELOG.md` all
+name one version, and that the changelog's sections, headings, and link
+references are well formed. When cutting a release, name the tag as well —
+`make release-check TAG=v0.3.0a1` — to check it against the same version.
+CI runs that form automatically on a `v*` tag push.
 
 ## Pull requests
 

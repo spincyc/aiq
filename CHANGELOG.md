@@ -100,6 +100,17 @@ effects documents, capability contracts, and integration manifests.
   `invalid_argument` (exit 2) rather than clamped, so a caller passing a larger
   value today — `--limit 100000` as a stand-in for "everything" — starts
   failing and must page instead. The default is unchanged at 20.
+- Installation guidance now recommends a pinned release tag
+  (`@v0.2.0a1`) and labels `@main` the development channel, and the refresh
+  instructions no longer suggest `pipx upgrade aiq-workqueue`, which
+  re-resolves the ref already recorded for a Git install and therefore never
+  moves a tag-pinned install to a new release; `pipx install --force` with the
+  new ref does. The release itself is now verified rather than asserted: CI
+  runs its full OS and Python matrix on `v*` tag pushes, and a new
+  `make release-check [TAG=vX.Y.Z]` fails loudly when `pyproject.toml`,
+  `_SOURCE_VERSION`, the newest `CHANGELOG.md` version section, and the tag
+  being cut do not all name one version, or when the changelog's section,
+  heading, and link-reference structure is malformed.
 
 ### Fixed
 

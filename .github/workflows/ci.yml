@@ -5,6 +5,10 @@ on:
   push:
     branches:
       - main
+    tags:
+      # Release tags run the same matrix as main, so a cut is verified on
+      # every supported OS and Python rather than on one local `make ci`.
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -57,6 +61,13 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python }}
+
+      - name: Check the release tag against the source
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: make release-check TAG="$RELEASE_TAG"
 
       - name: Install package
         run: |
