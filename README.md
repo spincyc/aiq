@@ -137,6 +137,10 @@ aiq journal check --scope repo
 state. `inbox claim` and `queue next` also take the scope's single reader role,
 so a second session consuming at the same time is refused with `reader_held`.
 
+`--owner` defaults to the OS user, and `task done` settles a task only under
+the owner that leased it. Pass the same `--owner` to both commands, or to
+neither; passing it to one alone leaves the task claimed by someone else.
+
 ## Find the right operation
 
 The CLI is the authoritative command reference. Capabilities let an agent load
@@ -155,7 +159,7 @@ one contract instead of carrying every tool description in context.
 | Create one task in one step | `aiq enqueue TITLE` |
 | List tasks, including finished ones | `aiq list --all` |
 | Preview ready work | `aiq queue peek` |
-| Lease ready work, taking the reader role | `aiq queue next --owner OWNER` (or `aiq dequeue`) |
+| Lease ready work, taking the reader role | `aiq dequeue` (or `aiq queue next`) |
 | Settle leased or ready tasks as done | `aiq task done TASK-1 --summary TEXT` |
 | Verify storage and history | `aiq journal check` |
 | Check local health read-only | `aiq doctor` |
