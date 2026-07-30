@@ -93,6 +93,20 @@ effects documents, capability contracts, and integration manifests.
 
 ### Changed
 
+- The `Stop` completion gate now blocks the reader rather than every session.
+  It derives its own reader identity exactly as the CLI does (configuration or
+  `AIQ_READER`, defaulting to the host plus POSIX session id) and stands down
+  only when a demonstrably different and still live session holds the scope's
+  reader lease, exiting 0 with one stderr notice naming that holder. A chat,
+  review, or agent session that only files work therefore stops freely, while
+  the session draining the queue must still finish. Every other reading of the
+  lease blocks exactly as before: the caller holding it, no lease at all, an
+  expired or released lease, and a lease whose holder is provably dead — a
+  harness may give each shell invocation its own POSIX session, so leases
+  outlive their sessions routinely and honoring an abandoned one would
+  silently stop enforcing completion. `status --json` gains an additive
+  `reader.live` field carrying that liveness answer.
+
 - Several concurrent workers draining one journal now fail. A session that is
   not the scope's reader gets the new stable error code `reader_held` and
   exit 4 from `inbox claim`, `queue next`, and `dequeue` — including when the

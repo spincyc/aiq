@@ -1782,6 +1782,18 @@ def gate_stop_hook(
     runnable the gate returns ``(False, notice)`` — one non-blocking
     stderr line naming the parked count — instead of full silence.
     ``None`` (silent allow) means nothing runnable and nothing parked.
+
+    Runnable work obligates the session that may drain it. When the
+    scope's reader lease is held by a demonstrably different and still
+    live session, this one is a writer only: it returns ``(False,
+    notice)`` and stops freely. Every other reading of the lease --
+    self-held, absent, expired, released, or held by a session proved
+    dead -- blocks exactly as before, because none of them names a live
+    reader who will do the work. That bias is deliberate: agent
+    harnesses can give each shell invocation its own POSIX session, so
+    leases outlive their sessions routinely, and treating an abandoned
+    one as an active reader would silently retire the gate.
+
     The check is one read-only snapshot; a missing journal counts as
     nothing runnable and never creates storage. Errors raise; the
     boundary in :func:`run_receive_hook_main` fails open on them (exit
@@ -1841,9 +1853,15 @@ def gate_stop_hook(
         agent_root=agent_root,
         git_executable=resolved_git_executable,
     )
+    from aiq.config import resolve_config
     from aiq.queue import read_status
 
-    status = read_status(scope)
+    # Derive this session's reader identity exactly as the CLI does, so
+    # the gate compares the same string the drain commands enforce on:
+    # configuration and AIQ_READER both apply, and the default is the
+    # POSIX session every process of one terminal inherits.
+    reader_id = resolve_config(cwd=cwd).reader
+    status = read_status(scope, reader_id=reader_id)
     ready_tasks = int(status["tasks"].get("ready", 0))
     active_claims = int(status["claims"].get("active", 0))
     # A parked needs_input message awaits the user, not the agent, so it
@@ -1869,6 +1887,28 @@ def gate_stop_hook(
     if unapplied_messages:
         parts.append(_count_noun(unapplied_messages, "unapplied message"))
     summary = ", ".join(parts)
+    parked_note = (
+        f"; {_parked_fragment(parked_messages)}" if parked_messages else ""
+    )
+    # Runnable work belongs to whoever holds the reader role. Stand down
+    # only for a holder proved to be someone else AND still alive: every
+    # other reading -- no lease, an expired or released one, or one left
+    # behind by a dead session -- means nobody is draining this queue, so
+    # this session is still accountable for the work and must block. In
+    # agent harnesses each shell invocation can be its own POSIX session,
+    # so abandoned leases are routine; treating one as "someone else's"
+    # would silently retire the gate. A patched or older status shape
+    # without the datum reads falsy and therefore blocks too.
+    reader = status.get("reader")
+    if not isinstance(reader, dict):
+        reader = {}
+    if reader.get("self") is False and reader.get("live"):
+        return (
+            False,
+            f"AIQ: not blocking: runnable work remains ({summary}) but "
+            f'reader "{reader.get("reader_id")}" holds the reader lease'
+            f"{parked_note} — aiq reader status",
+        )
     # Make the single block line actionable: name up to the first three
     # ready tasks and the exact settle command, so a model blocked once
     # per stop chain can act without another lookup. Tolerate patched or
@@ -1899,9 +1939,6 @@ def gate_stop_hook(
         if age is not None:
             fragment += f" (open {age})"
         fragments.append(fragment)
-    parked_note = (
-        f"; {_parked_fragment(parked_messages)}" if parked_messages else ""
-    )
     if not fragments:
         return (
             True,

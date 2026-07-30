@@ -92,6 +92,21 @@ aiq inbox list` — instead of full silence, so a session cannot end with a wait
 question unmentioned. Whether stderr from an exit-0 hook is displayed is
 host-dependent; Codex does not feed it back to the model.
 
+The gate blocks the reader. Runnable work belongs to whichever session may
+drain the queue, so the hook derives its own reader identity the same way the
+CLI does — configuration or `AIQ_READER`, defaulting to the host and POSIX
+session id — and consults the scope's
+[reader lease](../contracts/cli-v1.md#reader-lease). A session that only files
+work while another live session holds the role stops freely, with one exit-0
+stderr notice such as `AIQ: not blocking: runnable work remains (1 ready task)
+but reader "host-4242" holds the reader lease — aiq reader status`. In every
+other case the gate blocks as above, including when no lease exists at all,
+when it has expired or been released, and when its holder is provably dead.
+That last case matters: an agent harness can give each shell invocation its
+own POSIX session, so a lease routinely outlives the session that took it, and
+treating an abandoned lease as an active reader would silently stop enforcing
+completion.
+
 The gate honors the host loop guard: when the `Stop` payload carries a truthy
 `stop_hook_active` — Codex sets it while a turn was already continued by a
 stop hook — the gate exits 0 silently instead of blocking again, so it can

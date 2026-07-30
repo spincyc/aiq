@@ -680,10 +680,20 @@ def _reader_lease_public(
     }
 
 
-def _reader_status_summary(lease: dict[str, Any]) -> dict[str, Any]:
-    """Project the gate-relevant subset carried by :func:`read_status`."""
+def _reader_status_summary(
+    row: sqlite3.Row | None,
+    lease: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the gate-relevant subset carried by :func:`read_status`.
 
-    return {
+    ``live`` answers what ``status`` alone cannot: whether a held lease's
+    recorded holder is still running. A completion gate must treat a
+    lease abandoned by a crashed session as no reader at all, so the
+    liveness probe travels with this one snapshot rather than forcing a
+    second journal open.
+    """
+
+    summary = {
         key: lease[key]
         for key in (
             "status",
@@ -694,6 +704,12 @@ def _reader_status_summary(lease: dict[str, Any]) -> dict[str, Any]:
             "expires_at",
         )
     }
+    summary["live"] = (
+        lease["status"] == "held"
+        and row is not None
+        and not _reader_holder_is_dead(row)
+    )
+    return summary
 
 
 def read_reader_lease(
@@ -1657,7 +1673,8 @@ def read_status(
     ``reader`` reports the scope's reader lease from this same snapshot,
     so a caller deciding from one status read needs no second open. Its
     ``self`` field is null unless ``reader_id`` names whom to compare
-    the recorded holder against.
+    the recorded holder against, and its ``live`` field is true only for
+    a held lease whose recorded holder is not provably gone.
     """
 
     if ready_limit < 1 or ready_limit > 64:
@@ -1670,7 +1687,8 @@ def read_status(
         "tasks": task_counts,
         "claims": {"active": 0},
         "reader": _reader_status_summary(
-            _reader_lease_public(None, reader_id=reader_id, now_us=0)
+            None,
+            _reader_lease_public(None, reader_id=reader_id, now_us=0),
         ),
         "ready": [],
         "blocked": [],
@@ -1774,12 +1792,14 @@ def read_status(
             """,
             (effective_now,),
         ).fetchone()["total"]
+        reader_row = _read_reader_lease_row(connection)
         result["reader"] = _reader_status_summary(
+            reader_row,
             _reader_lease_public(
-                _read_reader_lease_row(connection),
+                reader_row,
                 reader_id=reader_id,
                 now_us=effective_now,
-            )
+            ),
         )
         return result
 

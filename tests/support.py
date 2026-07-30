@@ -13,6 +13,7 @@ import io
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,57 @@ def git_executable() -> Path:
     if discovered is None:
         raise AssertionError("test requires Git")
     return Path(discovered).absolute()
+
+
+def dead_session_id() -> int:
+    """A POSIX session id whose session has certainly exited.
+
+    The child is made its own session leader, so its pid is its session
+    id; waiting for it reaps the process and leaves that id unused.
+    """
+    process = subprocess.Popen(
+        [sys.executable, "-c", ""],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    process.wait()
+    return process.pid
+
+
+def hold_reader_lease_from_dead_session(
+    scope,
+    *,
+    owner_id: str = "dead-worker",
+    lease_seconds: int = 3600,
+) -> str:
+    """Record an unexpired reader lease whose holder session is gone.
+
+    This is the shape an agent harness leaves behind routinely: each
+    shell invocation can be its own POSIX session, so a lease outlives
+    the session that took it. Only a self-derived identity records a
+    holder locator, so both the identity and the locator are patched for
+    the acquisition; afterwards the real probe compares this host
+    against a reaped session id and proves the holder dead.
+    """
+    from unittest.mock import patch
+
+    from aiq.queue import acquire_reader_lease
+
+    host = socket.gethostname()
+    session = dead_session_id()
+    reader_id = f"{host}-{session}"
+    with (
+        patch("aiq.queue._default_reader", return_value=reader_id),
+        patch("aiq.queue._reader_locator", return_value=(host, session)),
+    ):
+        acquire_reader_lease(
+            scope,
+            owner_id=owner_id,
+            reader_id=reader_id,
+            lease_seconds=lease_seconds,
+        )
+    return reader_id
 
 
 def write_launcher(path: Path, *, mode: int = 0o755) -> Path:

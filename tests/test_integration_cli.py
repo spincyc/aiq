@@ -633,6 +633,54 @@ class IntegrationCliTests(unittest.TestCase):
             "— aiq inbox list\n",
         )
 
+    def test_receive_stop_gate_follows_the_reader_lease(self) -> None:
+        support.initialize_repo_journal(self.repository)
+        enqueued = self.run_aiq("enqueue", "Settle me", "--json")
+        self.assertEqual(enqueued.returncode, 0, enqueued.stderr)
+        stop_payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session",
+            "cwd": str(self.repository),
+        }
+
+        # Nobody holds the role yet, so this session owes the work.
+        unheld = self.receive_stop(stop_payload)
+        self.assertEqual(unheld.returncode, 2)
+        self.assertIn(
+            "AIQ: runnable work remains: 1 ready task", unheld.stderr
+        )
+
+        # A different live session takes the role. The hook derives its
+        # own identity from configuration exactly as the CLI does, so it
+        # now sees itself as a writer only and stops freely.
+        acquired = self.run_aiq(
+            "reader", "acquire", "--reader", "another-live-session", "--json"
+        )
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+
+        allowed = self.receive_stop(stop_payload)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertEqual(allowed.stdout, "")
+        self.assertEqual(
+            allowed.stderr,
+            "AIQ: not blocking: runnable work remains (1 ready task) but "
+            'reader "another-live-session" holds the reader lease — '
+            "aiq reader status\n",
+        )
+
+        # Releasing the role leaves nobody draining the queue, so the
+        # gate resumes holding this session to the work.
+        released = self.run_aiq(
+            "reader", "release", "--reader", "another-live-session", "--json"
+        )
+        self.assertEqual(released.returncode, 0, released.stderr)
+
+        blocked = self.receive_stop(stop_payload)
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn(
+            "AIQ: runnable work remains: 1 ready task", blocked.stderr
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +31,16 @@ from aiq.integrations.codex import (
     uninstall_integration,
 )
 from aiq.journal import check_journal, resolve_scope
+from aiq.queue import (
+    acquire_reader_lease,
+    enqueue_task,
+    release_reader_lease,
+)
+
+
+# The identity the gate itself resolves, and a different session's.
+GATE_READER = "gate-session"
+OTHER_READER = "another-live-session"
 
 
 class CodexIntegrationTest(unittest.TestCase):
@@ -792,6 +803,136 @@ class CodexIntegrationTest(unittest.TestCase):
             self.assertEqual(success, 0)
             self.assertEqual(failure, 1)
             self.assertIn("capture failed", errors.getvalue())
+
+    def _runnable_repository(self, root: Path) -> Path:
+        """An opted-in repository holding exactly one ready task."""
+
+        repository = support.init_repository(root / "repository")
+        support.initialize_repo_journal(repository)
+        enqueue_task(
+            resolve_scope("repo", cwd=repository),
+            title="Settle me",
+            owner_id="gate-test",
+        )
+        return repository
+
+    def _run_gate(self, repository: Path) -> tuple[int, str]:
+        """Run one Stop payload through the gate as GATE_READER."""
+
+        errors = io.StringIO()
+        with patch.dict(os.environ, {"AIQ_READER": GATE_READER}):
+            status = receive_hook_main(
+                input_stream=io.BytesIO(
+                    json.dumps(
+                        {
+                            "hook_event_name": "Stop",
+                            "session_id": "session",
+                            "cwd": str(repository),
+                        }
+                    ).encode()
+                ),
+                error_stream=errors,
+                git_executable=self.git_executable(),
+            )
+        return status, errors.getvalue()
+
+    def test_stop_gate_blocks_the_session_holding_the_reader_lease(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._runnable_repository(Path(temporary_directory))
+            acquire_reader_lease(
+                resolve_scope("repo", cwd=repository),
+                owner_id="gate-test",
+                reader_id=GATE_READER,
+                lease_seconds=3600,
+            )
+
+            status, errors = self._run_gate(repository)
+
+            # The reader owes the work, so the block line is unchanged.
+            self.assertEqual(status, 2)
+            lines = errors.splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("AIQ: runnable work remains: 1 ready task", lines[0])
+            self.assertIn('"Settle me"', lines[0])
+
+    def test_stop_gate_lets_a_writer_only_session_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._runnable_repository(Path(temporary_directory))
+            acquire_reader_lease(
+                resolve_scope("repo", cwd=repository),
+                owner_id="drainer",
+                reader_id=OTHER_READER,
+                lease_seconds=3600,
+            )
+
+            status, errors = self._run_gate(repository)
+
+            # Another live session is draining this queue, so a session
+            # that only files work stops freely with one exit-0 notice.
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                errors,
+                "AIQ: not blocking: runnable work remains (1 ready task) "
+                f'but reader "{OTHER_READER}" holds the reader lease — '
+                "aiq reader status\n",
+            )
+
+    def test_stop_gate_blocks_whenever_no_live_reader_holds_the_lease(
+        self,
+    ) -> None:
+        def absent(scope: object) -> None:
+            return None
+
+        def expired(scope: object) -> None:
+            acquire_reader_lease(
+                scope,
+                owner_id="drainer",
+                reader_id=OTHER_READER,
+                lease_seconds=60,
+                now_us=(time.time_ns() // 1000) - 3_600_000_000,
+            )
+
+        def released(scope: object) -> None:
+            acquire_reader_lease(
+                scope,
+                owner_id="drainer",
+                reader_id=OTHER_READER,
+                lease_seconds=3600,
+            )
+            release_reader_lease(scope, reader_id=OTHER_READER)
+
+        def dead_holder(scope: object) -> None:
+            support.hold_reader_lease_from_dead_session(scope)
+
+        # None of these names a live reader who will do the work, so the
+        # session that is stopping stays accountable for it. The dead
+        # holder is the load-bearing case: an agent harness leaves such
+        # leases behind routinely, and honoring one would silently
+        # retire the gate.
+        for lease, prepare in (
+            ("absent", absent),
+            ("expired", expired),
+            ("released", released),
+            ("dead holder", dead_holder),
+        ):
+            with self.subTest(lease=lease):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    repository = self._runnable_repository(
+                        Path(temporary_directory)
+                    )
+                    prepare(resolve_scope("repo", cwd=repository))
+
+                    status, errors = self._run_gate(repository)
+
+                    self.assertEqual(status, 2)
+                    lines = errors.splitlines()
+                    self.assertEqual(len(lines), 1)
+                    self.assertIn(
+                        "AIQ: runnable work remains: 1 ready task",
+                        lines[0],
+                    )
 
     def test_stop_gate_blocks_once_then_respects_loop_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -494,6 +494,8 @@ class ReaderLeaseTest(unittest.TestCase):
         self.assertEqual(fresh["reader"]["status"], "absent")
         self.assertFalse(fresh["reader"]["held"])
         self.assertFalse(fresh["reader"]["self"])
+        # No lease names no live reader, so the gate stays accountable.
+        self.assertFalse(fresh["reader"]["live"])
 
         self.enqueue("Work")
         self.dequeue(READER_A)
@@ -503,18 +505,53 @@ class ReaderLeaseTest(unittest.TestCase):
         self.assertTrue(held["reader"]["held"])
         self.assertTrue(held["reader"]["self"])
         self.assertEqual(held["reader"]["reader_id"], READER_A)
+        # An explicitly configured identity records no locator, so its
+        # holder is never provably dead and reads as live.
+        self.assertTrue(held["reader"]["live"])
 
         foreign = read_status(self.scope, reader_id=READER_B, now_us=self.now)
         self.assertTrue(foreign["reader"]["held"])
         self.assertFalse(foreign["reader"]["self"])
+        self.assertTrue(foreign["reader"]["live"])
+
+        # An expired lease names nobody currently draining the queue.
+        expired = read_status(
+            self.scope,
+            reader_id=READER_B,
+            now_us=self.now + 3600 * SECOND,
+        )
+        self.assertEqual(expired["reader"]["status"], "expired")
+        self.assertFalse(expired["reader"]["live"])
 
         # Without an identity to compare against there is no self.
         anonymous = read_status(self.scope, now_us=self.now)
         self.assertIsNone(anonymous["reader"]["self"])
         self.assertEqual(
             set(anonymous["reader"]),
-            {"status", "held", "self", "owner_id", "reader_id", "expires_at"},
+            {
+                "status",
+                "held",
+                "self",
+                "owner_id",
+                "reader_id",
+                "expires_at",
+                "live",
+            },
         )
+
+    def test_status_reports_a_dead_holders_lease_as_not_live(self) -> None:
+        reader_id = support.hold_reader_lease_from_dead_session(self.scope)
+
+        status = read_status(self.scope, reader_id=READER_A)
+
+        # The lease is unexpired, so it still reads as held by someone
+        # else -- but the session that took it is gone, so nothing is
+        # actually draining this queue.
+        self.assertEqual(status["reader"]["status"], "held")
+        self.assertTrue(status["reader"]["held"])
+        self.assertFalse(status["reader"]["self"])
+        self.assertEqual(status["reader"]["reader_id"], reader_id)
+        self.assertFalse(status["reader"]["live"])
 
 
 class ReaderLeaseScopeTest(unittest.TestCase):

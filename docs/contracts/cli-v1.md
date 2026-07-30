@@ -397,7 +397,7 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 | `tasks` | Effective task-state counts keyed by every task state |
 | `project` | The journal's [project label](#project-label) |
 | `claims` | `active`: unreleased, unexpired message and task leases |
-| `reader` | The [Reader lease](#reader-lease) object reduced to `status`, `held`, `self`, `owner_id`, `reader_id`, and `expires_at`, read from this same snapshot |
+| `reader` | The [Reader lease](#reader-lease) object reduced to `status`, `held`, `self`, `owner_id`, `reader_id`, and `expires_at`, read from this same snapshot, plus `live` |
 | `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, `title`, and `created_at` |
 | `blocked` | At most five blocked tasks in the same order, each with only `task_id`, `priority`, `title`, and `blocked_by` — the failed prerequisite task IDs causing the block, empty for a directly blocked task |
 | `scope` | The resolved [Scope](#scope) object |
@@ -407,7 +407,13 @@ prompt content never appears. A missing journal reports zero counts, empty
 `ready` and `blocked` arrays, an `absent` reader lease, and the derived project
 label without creating storage. `reader.self` compares the recorded holder
 against the caller's configured `reader` identity, so one status read answers
-both what work remains and whether this session may consume it. Human-readable `ready` and `blocked` lines render the task reference
+both what work remains and whether this session may consume it. `reader.live`
+is true only for a `held` lease whose recorded holder is not provably gone: a
+lease carries the holder's host and POSIX session id when the holder used a
+self-derived identity, and a matching host with a vanished session proves the
+holder dead. It is false for every other reading, including `absent`,
+`expired`, `released`, and any holder whose liveness cannot be established.
+Human-readable `ready` and `blocked` lines render the task reference
 as `[label: TASK-19]`; the `blocked by` causes stay bare IDs.
 
 ## Reader role
@@ -703,7 +709,25 @@ counts as runnable work, but the block line surfaces it: a fragment such as
 `; 2 parked messages await user input` is appended before the settle tail.
 Both hosts feed that stderr line back to the model
 and continue the turn. When the loop guard is set, the
-gate exits 0 silently. When nothing is runnable but parked `needs_input`
+gate exits 0 silently.
+
+Runnable work obligates the session that may drain it, so the gate follows
+the [reader lease](#reader-lease). It derives its own reader identity exactly
+as the CLI does — configuration or `AIQ_READER`, defaulting to the host and
+POSIX session id — and reads the lease from the same snapshot as the counts.
+Only one reading stands the gate down: `reader.self` false with `reader.live`
+true, meaning a demonstrably different session is alive and holding the role.
+That session is a writer only, and it stops with exit 0 and one stderr notice
+naming the holder, for example
+`AIQ: not blocking: runnable work remains (1 ready task) but reader
+"host-4242" holds the reader lease — aiq reader status`.
+Every other reading blocks exactly as above: the caller holding the lease
+itself, no lease at all, an expired or released lease, and — deliberately — a
+lease whose holder is provably dead. The bias is conservative because a
+harness may give each shell invocation its own POSIX session, so leases
+outlive their sessions routinely; honoring an abandoned one would silently
+stop enforcing completion. Nothing runnable is unaffected by the role: the
+parked notice and silent allow behave the same for holder and non-holder. When nothing is runnable but parked `needs_input`
 messages remain, the gate exits 0 with exactly one stderr notice —
 `AIQ: no runnable work; 2 parked messages await user input —
 aiq inbox list` — instead of full silence, so a session cannot end with a waiting

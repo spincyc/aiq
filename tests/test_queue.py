@@ -1663,6 +1663,7 @@ class QueueTest(unittest.TestCase):
                     "owner_id": None,
                     "reader_id": None,
                     "expires_at": None,
+                    "live": False,
                 },
                 "ready": [],
                 "blocked": [],
