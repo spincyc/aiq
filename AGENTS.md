@@ -5,7 +5,8 @@ or user time/stalls. Practice determinism: codified answers repeat; re-derived
 answers drift.
 
 Use AIQ as durable local memory and a work queue. Capture requests and
-material changes before relying on conversation context. Discover operations
+material changes before relying on conversation context. Hook capture misses
+mid-turn user messages; ingest each one manually with `aiq ingest --if-new`. Discover operations
 with `aiq capability list`; load only the relevant contract with
 `aiq capability show <id>`. Do not infer commands or database details.
 

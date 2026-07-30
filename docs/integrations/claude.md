@@ -168,6 +168,13 @@ policy settings are outside AIQ's ownership boundary and are neither inspected
 nor changed. `disableAllHooks` in any settings scope disables the installed
 hook; AIQ detects it only in the managed user-level file.
 
+Claude Code fires `UserPromptSubmit` only for the prompt that starts a turn.
+A message the user sends while a turn is running is surfaced to the model
+without the event, so the hook never sees it and nothing is captured. AIQ
+cannot close this gap host-side; the packaged bootstrap therefore obligates
+the agent to ingest each mid-turn message manually with
+`aiq ingest --if-new`, which deduplicates against any later re-capture.
+
 ## Verify capture
 
 After sending one prompt:

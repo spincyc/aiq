@@ -10,6 +10,9 @@ effects documents, capability contracts, and integration manifests.
 
 ### Added
 
+- Bootstrap and Claude Code integration documentation of the mid-turn capture
+  gap: hosts deliver mid-turn user messages without a capture event, so agents
+  must ingest them manually with `aiq ingest --if-new`.
 - Initial local SQLite journal and durable message inbox.
 - Deterministic task effects, dependency ordering, leases, and integrity
   checks.
