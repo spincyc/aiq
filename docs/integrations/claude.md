@@ -144,7 +144,9 @@ notice — `AIQ: not blocking: runnable work remains
 That is how a bounded run (one task, or a fixed batch) ends cleanly with ready
 work deliberately left behind. The release must be provably this session's own,
 under the same locator discipline: somebody else's release is not this session
-declaring anything.
+declaring anything. Performing one takes that same proof, so no other session
+can put the declaration there, and it lapses with the lease it was about, so a
+kept row cannot stand a later session's gate down.
 
 Releasing the role is not settling the work. Release deliberately leaves every
 per-item claim in place, so a session that dequeues a task, hands the role

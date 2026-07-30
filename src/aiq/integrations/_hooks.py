@@ -2100,10 +2100,19 @@ def gate_stop_hook(
     # abandonment. Honoring it needs the same proof as standing down for
     # a foreign reader, and for the same reason: only a release whose
     # recorded holder locator names this very session is this session
-    # declaring anything. A release by anyone else, and a release under
-    # an explicitly configured identity that recorded no locator, keeps
-    # blocking. A patched or older status shape without the datum reads
-    # falsy and therefore blocks too.
+    # declaring anything. A release by anyone else, a release under an
+    # explicitly configured identity that recorded no locator, and a
+    # lease broken with `reader release --force` all keep blocking. So
+    # does a declaration that has outlived the lease it was about: the
+    # reading is bounded by the lease's own expiry, so a kept row cannot
+    # stand down a later session that merely matches its locator. A
+    # patched or older status shape without the datum reads falsy and
+    # therefore blocks too.
+    #
+    # Nothing here has to defend against a forged declaration, because
+    # recording one now takes the same proof reading one does: a
+    # stranger who knows the holder's public `reader_id` is refused with
+    # `reader_held` rather than allowed to stand this gate down.
     if reader.get("released_by_self"):
         # Releasing the role is a statement about dispatch, not about the
         # items already taken: it deliberately leaves every per-item claim

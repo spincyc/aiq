@@ -162,7 +162,7 @@ cooperating workers drain one journal on purpose. See
 
 | Field | Type | Meaning |
 |---|---|---|
-| `status` | `absent`, `held`, `stale`, `expired`, or `released` | Lease state at the read instant. `stale` is an unexpired lease whose recorded holder is provably gone, which the next consumer may take |
+| `status` | `absent`, `held`, `stale`, `expired`, or `released` | Lease state at the read instant. `stale` is an unexpired lease whose recorded holder is provably gone, which the next consumer may take. Expiry is tested before release, so a released lease reads `released` only until its own `expires_at` and `expired` after |
 | `held` | boolean | Whether the lease is live; false for `stale` |
 | `self` | boolean or null | Whether the caller's reader identity is the recorded holder; null when the caller supplied none |
 | `owner_id` | string or null | Holder's owner at acquisition |
@@ -193,21 +193,45 @@ is the point. Under the POSIX-only locator the holder's command had usually
 exited within seconds, so any later command read a live session's lease as
 abandoned and took it.
 
-`reader release` never fails on state, and says which of three things it did:
+**Releasing requires proof of holding.** A `reader_id` is a public name, not a
+credential: `reader status` prints it and `--reader` accepts it, so accepting
+a matching string as authority would let any onlooker end a live lease — and,
+because release leaves the recorded holder locator in place, hand the rightful
+holder a `released_by_self` reading it never declared. What proves holding is
+what the lease recorded:
+
+- A lease that recorded a **holder locator** — every lease taken under a
+  derived `reader` identity, which names one session — may be released only by
+  a caller whose own session matches that locator, under exactly the
+  comparison rule [Status](#status) gives for `reader.live`. This is the proof,
+  and only a release carrying it records a declaration a completion gate reads.
+- A lease that recorded **no locator** — every lease taken under an explicitly
+  configured `--reader` or `AIQ_READER` identity, which may name any session on
+  any host and may be a deliberately shared fan-out name — is released by
+  presenting that configured identity, the only evidence that exists for it.
+  Treat such an identity as shared authority over the role: anyone configured
+  with it holds it. Consistently, such a release records no declaration either
+  — `released_by_self` is false for it, as it always has been.
+
+`reader release` never fails on state, and says which of four things it did:
 
 | `status` | Meaning |
 |---|---|
-| `released` | This call moved a lease held by the caller's `reader` identity to released. This, and only this, records the declaration a completion gate reads |
-| `already_released` | The recorded lease is the caller's and was already released; the earlier declaration still stands |
-| `not_held` | Nothing of the caller's was there to release — no lease, one recorded under a different `reader` identity, or the caller's own lease already lapsed. Nothing was recorded |
+| `released` | This call moved a lease the caller proved holding to released. This, and only this, records the declaration a completion gate reads |
+| `already_released` | The recorded lease is the caller's, was already released, and has not yet passed its own expiry; the earlier declaration still stands |
+| `forced` | `--force` broke a live lease the caller could not prove holding. The role is free and the holder locator is cleared, so the row records no declaration for anybody — not for the breaker, who never held it, and not for the former holder, who never gave it up |
+| `not_held` | Nothing of the caller's was there to release — no lease, one belonging to a session the caller cannot prove itself to be, an abandoned lease whose holder is provably gone, or the caller's own lease already lapsed. Nothing was recorded |
 
-`released` (boolean) is true only in the first case; `replayed` is its
-negation, for callers that only ask whether the call changed anything. All
-three exit 0, because release is a total, replayable declaration; `not_held`
-additionally prints one stderr line naming the identity that was tried, since
-an identity mismatch is the usual cause and a caller waiting for a recorded
-signal has to know none was written. Only another live holder is refused, with
-`reader_held` and exit 4.
+`released` (boolean) is true only in the first case: it means this caller's own
+declaration was recorded, which a forced break explicitly is not. `replayed`
+answers the narrower question of whether the call changed anything, so it is
+false for `forced` too. All four exit 0, because release is a total, replayable
+declaration; `not_held` additionally prints one stderr line naming the identity
+that was tried, since a caller waiting for a recorded signal has to know none
+was written, and `forced` prints one naming the lease it broke.
+
+A live lease the caller can neither prove holding nor show to be abandoned is
+refused with `reader_held` and exit 4 unless `--force` is passed.
 
 ### Task summary
 
@@ -269,7 +293,7 @@ The tables list fields in addition to top-level `v`.
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `reader status --json` | `reader` containing the [Reader lease](#reader-lease) object, `scope` |
 | `reader acquire --json` | `status: "acquired"`, `acquired`, `reader` |
-| `reader release --json` | `status`: `"released"`, `"already_released"`, or `"not_held"`; `released`, `replayed`, `claims_held`, `reader` |
+| `reader release --json` | `status`: `"released"`, `"already_released"`, `"forced"`, or `"not_held"`; `released`, `replayed`, `claims_held`, `reader` |
 | `status --json` | `messages`, `tasks`, `project`, `claims`, `reader`, `ready`, `blocked`, `scope` |
 | `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
@@ -580,10 +604,28 @@ Unprovable foreignness therefore never stands a gate down.
 `reader.released_by_self` answers the complementary question — did *this*
 session give the role up on purpose? — under the same discipline and the same
 comparison rule. It is true only when the lease is `released` and its recorded
-holder locator names this very session. A release by anyone else, and a
-release under an explicitly configured identity that recorded no locator, read
-false. The two fields are mutually exclusive: a lease cannot be both `held` and
-`released`.
+holder locator names this very session. A release by anyone else, a release
+under an explicitly configured identity that recorded no locator, and a lease
+broken with `reader release --force` all read false. The two fields are
+mutually exclusive: a lease cannot be both `held` and `released`.
+
+It is bounded by the lease's own expiry. A released row is deliberately kept —
+that is what keeps `epoch` monotonic and the last holder nameable — but a
+release is a statement about a lease and cannot outlive the lease it is about,
+so a released row past its `expires_at` reads `expired` rather than
+`released`, and stands nothing down. Without that bound a kept row would go on
+declaring "I am done" indefinitely, and since POSIX session ids restart low
+after a reboot, an unrelated later session could match a year-old locator by
+accident and begin with its completion gate already switched off. Nothing
+about dispatch changes: `released` and `expired` are both takeable and neither
+is `held`. A session that released, went on working, and only stopped after
+the lease would have lapsed re-declares by acquiring the role and releasing it
+again.
+
+Neither field runs a liveness probe and neither needs one: `reader.live` proves
+foreignness positively and is bounded by the lease TTL, and
+`reader.released_by_self` is bounded by that same TTL while the asking process
+is itself the proof that the named session is running.
 
 A caller that was *handed* its session identity rather than deriving one — a
 `Stop` hook, which receives `session_id` in its payload — is compared against
@@ -664,7 +706,7 @@ on a different identity with a different lifecycle:
 ```text
 aiq reader status [--scope SCOPE] [--cwd PATH] [--json]
 aiq reader acquire [--reader ID] [--owner OWNER] [--lease-seconds N]
-aiq reader release [--reader ID]
+aiq reader release [--reader ID] [--force]
 ```
 
 `status` is read-only and creates no storage. `acquire` holds the role
@@ -673,8 +715,22 @@ acquiring while already holding renews the same lease and reports
 `acquired: false`. `--lease-seconds` overrides `reader_lease_seconds` for that
 acquisition. `release` gives the role up: holding nothing, an already released
 lease, and an expired lease all replay with `replayed: true` and exit 0, while
-another live holder is `reader_held`. There is no force, steal, or revoke of a
-live lease; wait for its expiry instead.
+a live lease the caller cannot prove holding is `reader_held`. Naming the
+holder is never enough — see [Reader lease](#reader-lease) for what proves
+holding.
+
+`--force` is the one exception, and it is a deliberate operator act rather
+than a side effect of knowing a public string. It breaks a live lease this
+session cannot prove it holds, reporting `forced`. It exists because a holder
+that recorded a host-supplied session identity is never proved dead, so an
+abandoned lease is otherwise recoverable only by waiting out
+`reader_lease_seconds` — up to a day. It frees the role and clears the holder
+locator, so it hands no session a declaration: neither the breaker nor the
+former holder reads `released_by_self` afterwards, and both keep answering to
+the completion gate. Prefer having the holder release it, or waiting for
+`expires_at`; forcing risks two sessions draining one journal at once. Where
+the caller *can* prove holding, `--force` changes nothing: proof wins and the
+release stays an ordinary declaration.
 
 `release` never settles anything: it gives up the right to hand out new work
 and leaves every per-item claim exactly where it was. `claims_held` reports
@@ -1019,9 +1075,12 @@ This is what makes a bounded run — one task, or a fixed batch — end cleanly
 with ready work deliberately left behind, instead of absorbing a spurious
 block. The notice still names the remaining work, so nothing is hidden. The
 signal is a recorded act, never an ambient flag: it must be the lease this
-session itself released, proved by the recorded holder locator exactly as
-`reader.live` is proved, so a release by any other session is not this session
-declaring anything.
+session itself released, proved by the recorded holder locator under the same
+comparison rule `reader.live` uses and bounded by the same lease TTL, so a
+release by any other session is not this session declaring anything and a
+declaration cannot outlive the lease it was about. Performing the release
+takes that same proof, so no other session can put the declaration there in
+the first place.
 
 Every other reading blocks exactly as above: the caller holding the lease
 itself, no lease at all, an expired lease, a lease released by somebody else,

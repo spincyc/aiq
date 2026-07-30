@@ -177,7 +177,16 @@ def release_reader_lease_with_locator(
     Release leaves the recorded locator in place, so this is how a test
     names who deliberately gave the role up -- this very session, or a
     stranger -- without owning such a process.
+
+    The locator is patched across the release as well as the
+    acquisition, because releasing now demands proof of holding: an
+    unpatched release from the test process would be a stranger naming a
+    live lease, which is exactly what the command refuses. Patching
+    makes the helper honest -- the release is performed *as* the session
+    the locator names -- rather than smuggling one through.
     """
+    from unittest.mock import patch
+
     from aiq.queue import release_reader_lease
 
     reader_id = hold_reader_lease_with_locator(
@@ -186,7 +195,8 @@ def release_reader_lease_with_locator(
         session=session,
         owner_id=owner_id,
     )
-    release_reader_lease(scope, reader_id=reader_id)
+    with patch("aiq.queue._reader_locator", return_value=(host, session)):
+        release_reader_lease(scope, reader_id=reader_id)
     return reader_id
 
 

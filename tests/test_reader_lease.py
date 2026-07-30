@@ -691,7 +691,141 @@ class ReaderLeaseTest(unittest.TestCase):
                 # anything, so the gate it feeds keeps blocking.
                 self.assertFalse(status["reader"]["released_by_self"])
 
-    # 12. Whose claims are these? Releasing the role settles nothing, so
+    def test_a_release_stops_standing_a_gate_down_once_it_lapses(
+        self,
+    ) -> None:
+        """A declaration about a lease cannot outlive the lease.
+
+        The row survives release on purpose -- that is what keeps
+        `epoch` monotonic and the last holder nameable -- so without a
+        bound it would go on reading as a standing "I am done" forever.
+        POSIX session ids restart low after a reboot, so an unrelated
+        later session can match a kept locator by accident and start
+        life with its completion gate already switched off. The lease's
+        own expiry is the bound.
+        """
+        reader_id = support.release_reader_lease_from_this_session(self.scope)
+        now = _now_us()
+        lapsed = now + 3601 * SECOND
+
+        standing = read_status(self.scope, reader_id=reader_id, now_us=now)
+        self.assertEqual(standing["reader"]["status"], "released")
+        self.assertTrue(standing["reader"]["released_by_self"])
+
+        lapsed_status = read_status(
+            self.scope,
+            reader_id=reader_id,
+            now_us=lapsed,
+        )
+
+        # The same row, the same locator, and the same session asking --
+        # and it declares nothing now, because the lease it was about is
+        # long gone.
+        self.assertEqual(lapsed_status["reader"]["status"], "expired")
+        self.assertFalse(lapsed_status["reader"]["released_by_self"])
+
+    def test_a_lapsed_release_no_longer_replays_as_still_standing(
+        self,
+    ) -> None:
+        reader_id = support.release_reader_lease_from_this_session(self.scope)
+
+        replayed = release_reader_lease(
+            self.scope,
+            reader_id=reader_id,
+            now_us=_now_us() + 3601 * SECOND,
+        )
+
+        # `already_released` claims the earlier declaration still
+        # stands. Once the lease has lapsed it does not, so the honest
+        # answer is that there is nothing of this caller's here.
+        self.assertEqual(replayed["status"], "not_held")
+        self.assertTrue(replayed["replayed"])
+        self.assertFalse(replayed["released"])
+
+    # 12. Releasing takes proof of holding, and the one explicit
+    # override that may break that rule.
+
+    def test_naming_a_located_holder_is_refused_and_force_is_not(
+        self,
+    ) -> None:
+        """Proof of holding, and the deliberate operator exception.
+
+        The holder here is on another host, so it can be neither
+        impersonated nor proved dead from this process -- the shape a
+        release must refuse rather than perform.
+        """
+        reader_id = support.hold_reader_lease_with_locator(
+            self.scope,
+            host="other-host",
+            session=os.getsid(0),
+        )
+
+        # Naming the holder exactly is still not being the holder.
+        with self.assertRaises(JournalError) as raised:
+            release_reader_lease(self.scope, reader_id=reader_id)
+        self.assertEqual(raised.exception.code, "reader_held")
+        self.assertEqual(
+            read_reader_lease(self.scope, reader_id=reader_id)["status"],
+            "held",
+        )
+
+        forced = release_reader_lease(
+            self.scope,
+            reader_id=reader_id,
+            force=True,
+        )
+
+        self.assertEqual(forced["status"], "forced")
+        self.assertFalse(forced["released"])
+        self.assertFalse(forced["replayed"])
+        # The break clears the holder locator, so the broken lease
+        # declares nothing for the session it was taken from. Without
+        # that, the forbidden revocation would merely have moved behind
+        # a flag.
+        self.assertFalse(
+            read_status(self.scope, reader_id=reader_id)["reader"][
+                "released_by_self"
+            ]
+        )
+        # And the role really is free for the next session.
+        taken = acquire_reader_lease(
+            self.scope,
+            owner_id="worker",
+            reader_id=READER_B,
+            lease_seconds=60,
+        )
+        self.assertTrue(taken["acquired"])
+
+    def test_force_is_unnecessary_for_a_lease_this_caller_holds(
+        self,
+    ) -> None:
+        """Proof beats the flag: a rightful release stays a declaration.
+
+        Passing `--force` where it is not needed must not downgrade an
+        honest release into a break, or a bounded run that habitually
+        passed it would stop being able to stand its own gate down.
+        """
+        reader_id = support.hold_reader_lease_with_locator(
+            self.scope,
+            host=socket.gethostname(),
+            session=os.getsid(0),
+        )
+
+        released = release_reader_lease(
+            self.scope,
+            reader_id=reader_id,
+            force=True,
+        )
+
+        self.assertEqual(released["status"], "released")
+        self.assertTrue(released["released"])
+        self.assertTrue(
+            read_status(self.scope, reader_id=reader_id)["reader"][
+                "released_by_self"
+            ]
+        )
+
+    # 13. Whose claims are these? Releasing the role settles nothing, so
     # the gate needs a claim count it can hold *this* session to.
 
     def test_status_counts_this_sessions_own_claims_separately(self) -> None:

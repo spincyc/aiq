@@ -500,12 +500,32 @@ def _read_reader_lease_row(
 
 
 def _reader_lease_status(row: sqlite3.Row | None, now_us: int) -> str:
+    """Classify one reader lease row at one instant.
+
+    Expiry is tested *before* release, so a released row that has since
+    passed its own ``expires_at_us`` reads ``expired`` rather than
+    ``released``. A release is a statement about a lease and cannot
+    outlive the lease it is about. The row itself is deliberately kept
+    after release -- that is what keeps ``epoch`` monotonic and the last
+    holder nameable -- and without this bound that kept row would still
+    be read as a standing declaration arbitrarily far in the future,
+    standing down the completion gate of a session that never made it.
+    POSIX session ids restart low after a reboot, so an unrelated later
+    session can match a year-old locator by accident and inherit a
+    stranger's "I am done".
+
+    Nothing about dispatch changes: ``released`` and ``expired`` are
+    both takeable and neither is ``held``, so takeover, renewal, and the
+    reader-role refusal read the row exactly as before. What ages out is
+    only the declaration the lease carried.
+    """
+
     if row is None:
         return "absent"
-    if row["released_at_us"] is not None:
-        return "released"
     if row["expires_at_us"] <= now_us:
         return "expired"
+    if row["released_at_us"] is not None:
+        return "released"
     return "held"
 
 
@@ -707,6 +727,53 @@ def _reader_holder_is_this_session(
     """
 
     return _locator_is_this_session(row, token=token)
+
+
+def _reader_release_authority(
+    row: sqlite3.Row,
+    *,
+    reader_id: str,
+    token: str | None,
+) -> str:
+    """Say what, if anything, proves this caller holds ``row``'s lease.
+
+    Naming the holder is not proof. ``reader_id`` is public -- ``aiq
+    reader status`` prints it and ``--reader`` accepts it -- so a rule
+    that took a matching string as authority would let anyone who ran
+    one read command end somebody else's live lease. Worse, release
+    leaves the recorded holder locator in place, so the broken lease
+    would go on reading as ``released_by_self`` to its rightful holder:
+    a stranger could put a declaration of "I am done" into a session's
+    mouth. Releasing therefore demands the same evidence every other
+    "is this mine?" answer in this module demands.
+
+    ``"self"``
+        The recorded holder locator names this very session, decided by
+        :func:`_locator_is_this_session` on exactly the evidence
+        ``reader.live`` and ``claims.active_this_session`` use. This is
+        the proof, and only a release carrying it records the
+        declaration a completion gate reads.
+    ``"identity"``
+        The lease recorded no locator at all, and the caller's reader
+        identity is the recorded one. A lease taken under an explicitly
+        configured ``--reader`` or ``AIQ_READER`` stores no locator on
+        purpose, because such an identity may name any session on any
+        host and may be a deliberately shared fan-out name. The
+        configured identity is then the only evidence that exists, and
+        presenting it is what holding the role means -- authority over
+        the role rather than proof of a session. Such a release frees
+        the role and declares nothing, which is already what
+        ``released_by_self`` says about it.
+    ``"stranger"``
+        Neither. A live lease is refused; there is nothing of this
+        caller's to release otherwise.
+    """
+
+    if _reader_holder_is_this_session(row, token=token):
+        return "self"
+    if _recorded_locator(row) == (None, None, None):
+        return "identity" if row["reader_id"] == reader_id else "stranger"
+    return "stranger"
 
 
 def _count_active_claims_this_session(
@@ -1005,9 +1072,21 @@ def _reader_status_summary(
     session gave the role up on purpose. It is true only for a
     ``released`` lease whose recorded holder locator names this very
     session -- the recorded, deliberate act of an ``aiq reader release``
-    from this session. A release by anyone else, and a release under an
-    identity that recorded no locator, reads false, because neither is
-    this session declaring anything.
+    from this session, which now takes proof of holding to perform at
+    all. A release by anyone else, a release under an identity that
+    recorded no locator, and a lease broken with ``--force`` all read
+    false, because none is this session declaring anything.
+
+    It is bounded by the lease's own expiry, because
+    :func:`_reader_lease_status` ages a released row out into
+    ``expired``. A declaration about a lease stops standing when that
+    lease would have lapsed anyway, so a kept row cannot stand down a
+    future session that merely happens to match its locator.
+
+    Neither field runs a liveness probe, and neither needs one: ``live``
+    is bounded by the lease TTL and proves foreignness positively, and
+    ``released_by_self`` is bounded by the same TTL while the asking
+    process is itself the proof that the named session is running.
 
     ``token`` is this caller's host-supplied session identity, or
     ``None`` where no host supplies one and the POSIX locator is all
@@ -1117,37 +1196,49 @@ def release_reader_lease(
     scope: JournalScope,
     *,
     reader_id: str,
+    force: bool = False,
     now_us: int | None = None,
 ) -> dict[str, Any]:
     """Give up the reader role, leaving every held claim untouched.
 
-    Release never fails on state: holding nothing, an already released
-    lease, and an expired lease all succeed, and only another live holder
-    is refused. Losing the role never revokes a claim, which recovers on
-    its own schedule.
+    Releasing requires *proof of holding*, not merely naming the holder;
+    :func:`_reader_release_authority` decides what proves it and why.
+    Release never fails on state -- holding nothing, an already released
+    lease, and an expired lease all succeed -- but a live lease this
+    caller cannot prove holding is refused with ``reader_held`` unless
+    ``force`` is passed. Losing the role never revokes a claim, which
+    recovers on its own schedule.
 
-    It does, however, say plainly *what it did*, because "release
-    succeeded" and "a release was recorded" are not the same fact and
-    only the second one is a signal a completion gate can read.
-    ``status`` is one of:
+    It does say plainly *what it did*, because "release succeeded" and
+    "a release was recorded" are not the same fact and only the second
+    one is a signal a completion gate can read. ``status`` is one of:
 
     ``released``
-        This call moved a lease held by ``reader_id`` to released. This,
-        and only this, is the recorded declaration that this session has
-        stopped draining the queue.
+        This call moved a lease this caller proved holding to released.
+        This, and only this, is the recorded declaration that this
+        session has stopped draining the queue.
     ``already_released``
-        The recorded lease is ``reader_id``'s and was already released.
-        A true replay: the earlier declaration still stands.
+        The recorded lease is this caller's and was already released,
+        and has not yet passed its own expiry. A true replay: the
+        earlier declaration still stands.
+    ``forced``
+        ``force`` broke a live lease this caller could not prove
+        holding. The role is free and the holder locator is cleared, so
+        the row records no declaration for anybody -- not for the
+        breaker, who never held it, and not for the former holder, who
+        never gave it up. An operator act, never a completion signal.
     ``not_held``
-        There was nothing of this caller's to release -- no lease at all,
-        one recorded under a different reader identity, or this caller's
-        own lease already lapsed. Nothing was recorded and nothing will
-        read as a declaration, so a caller relying on release as a
-        completion signal has to know.
+        There was nothing of this caller's to release -- no lease at
+        all, one belonging to a session this caller cannot prove itself
+        to be, an abandoned lease whose holder is provably gone, or this
+        caller's own lease already lapsed. Nothing was recorded and
+        nothing will read as a declaration, so a caller relying on
+        release as a completion signal has to know.
 
-    ``released`` (boolean) is true only in the first case, and
-    ``replayed`` stays for callers that only ask "did this call change
-    anything", which is the negation of it.
+    ``released`` (boolean) is true only in the first case: it means this
+    caller's own declaration was recorded, which a forced break is
+    explicitly not. ``replayed`` stays for callers that only ask "did
+    this call change anything", so it is false for a force too.
 
     ``claims_held`` counts the caller's own live claims at the instant of
     release, so the caller learns immediately that giving the role back
@@ -1167,17 +1258,26 @@ def release_reader_lease(
     try:
         connection.execute("BEGIN IMMEDIATE")
         row = _read_reader_lease_row(connection)
-        holder = _reader_lease_conflict(
+        status = _reader_lease_status(row, effective_now)
+        mine = row is not None and _reader_release_authority(
             row,
             reader_id=reader,
-            now_us=effective_now,
-        )
-        if holder is not None:
-            _raise_reader_held(holder)
-        mine = row is not None and row["reader_id"] == reader
-        status = _reader_lease_status(row, effective_now)
-        held = mine and status == "held"
-        if held:
+            token=token,
+        ) in ("self", "identity")
+        outcome = "not_held"
+        if row is not None and status == "held":
+            if mine:
+                outcome = "released"
+            elif force:
+                outcome = "forced"
+            elif not _reader_holder_is_dead(row):
+                # Someone else's live lease. Refusing here is the whole
+                # point: the caller knew the holder's public name, which
+                # is not the same as being the holder.
+                _raise_reader_held(row)
+        elif mine and status == "released":
+            outcome = "already_released"
+        if outcome in ("released", "forced"):
             connection.execute(
                 """
                 UPDATE reader_leases
@@ -1186,12 +1286,26 @@ def release_reader_lease(
                 """,
                 (effective_now, READER_LEASE_SCOPE),
             )
+            if outcome == "forced":
+                # A break must record no declaration for anybody, and
+                # clearing the locator is what makes that true. Release
+                # otherwise leaves the locator in place, so a broken
+                # lease would still read as `released_by_self` to the
+                # session it was taken from -- the very false
+                # declaration this proof rule exists to prevent, merely
+                # moved behind a flag. The reader and owner identities
+                # stay, so the broken lease is still nameable.
+                connection.execute(
+                    """
+                    UPDATE reader_leases
+                    SET holder_host = NULL,
+                        holder_sid = NULL,
+                        holder_session = NULL
+                    WHERE lease_scope = ?
+                    """,
+                    (READER_LEASE_SCOPE,),
+                )
             row = _read_reader_lease_row(connection)
-            outcome = "released"
-        elif mine and status == "released":
-            outcome = "already_released"
-        else:
-            outcome = "not_held"
         lease_public = _reader_lease_public(
             row,
             reader_id=reader,
@@ -1205,8 +1319,8 @@ def release_reader_lease(
         connection.commit()
         return {
             "status": outcome,
-            "released": held,
-            "replayed": not held,
+            "released": outcome == "released",
+            "replayed": outcome in ("already_released", "not_held"),
             "claims_held": claims_held,
             "reader": lease_public,
         }

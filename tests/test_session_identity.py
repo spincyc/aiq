@@ -285,6 +285,144 @@ class SeparateSessionTest(unittest.TestCase):
         again, _ = self.json_run("dequeue", session_id=SESSION_ONE)
         self.assertEqual(len(again["items"]), 1)
 
+    def test_naming_the_holder_never_revokes_a_live_lease(self) -> None:
+        """A reader identity is a public name, not a credential.
+
+        `aiq reader status` prints the holder's identity and `--reader`
+        accepts it, so releasing on a matching string would let any
+        onlooker end a live lease -- and, because release leaves the
+        recorded holder locator in place, hand the rightful holder a
+        `released_by_self` reading it never declared. Releasing takes
+        proof of holding instead: the same locator comparison that
+        decides `reader.live`.
+        """
+        self.run_step("enqueue", "Write the release notes")
+        self.json_run("dequeue", session_id=SESSION_ONE)
+
+        # A second session reads the holder's identity straight out of
+        # the public status, then names it back.
+        published, _ = self.json_run(
+            "reader", "status", session_id=SESSION_TWO
+        )
+        self.assertEqual(published["reader"]["reader_id"], SESSION_ONE)
+        stolen = self.run_step(
+            "reader",
+            "release",
+            "--reader",
+            published["reader"]["reader_id"],
+            "--json",
+            session_id=SESSION_TWO,
+        )
+
+        self.assertEqual(stolen.returncode, 4, stolen.stdout)
+        self.assertIn("reader_held", stolen.stderr)
+
+        # The holder still holds the role and has declared nothing, so
+        # the gate the attempt would have switched off still blocks.
+        held = read_status(self.scope, session_id=SESSION_ONE)
+        self.assertEqual(held["reader"]["status"], "held")
+        self.assertFalse(held["reader"]["released_by_self"])
+        blocked = gate_hook(
+            self.stop_payload(SESSION_ONE),
+            git_executable=support.git_executable(),
+        )
+        self.assertIsNotNone(blocked)
+        self.assertTrue(blocked[0])
+
+        # The holder itself needs no flag and no argument: it releases
+        # from a third POSIX session again, and its own session identity
+        # is the whole proof.
+        released, _ = self.json_run(
+            "reader", "release", session_id=SESSION_ONE
+        )
+        self.assertEqual(released["status"], "released")
+        self.assertTrue(released["released"])
+
+    def test_a_forced_break_frees_the_role_and_declares_nothing(self) -> None:
+        """The operator override, and the two things it must not do.
+
+        A lease held by a host-identified session is never proved dead,
+        because nothing can probe such an identity, so an abandoned one
+        is otherwise recoverable only by waiting out
+        `reader_lease_seconds` -- up to a day. `--force` is the way to
+        take it back, and it is a deliberate, named act precisely so
+        that knowing a public identity string is not.
+        """
+        self.run_step("enqueue", "Write the release notes")
+        self.run_step("enqueue", "And the changelog")
+        self.json_run("dequeue", session_id=SESSION_ONE)
+
+        forced, result = self.json_run(
+            "reader", "release", "--force", session_id=SESSION_TWO
+        )
+
+        self.assertEqual(forced["status"], "forced")
+        # Breaking a lease is not this session declaring it finished, so
+        # `released` is false; it did change the row, so `replayed` is
+        # false too.
+        self.assertFalse(forced["released"])
+        self.assertFalse(forced["replayed"])
+        self.assertIn("broke the live reader lease", result.stderr)
+
+        # No session gets a declaration out of it: not the breaker, who
+        # never held the role, and not the former holder, who never gave
+        # it up. Both still answer to the gate.
+        for session in (SESSION_ONE, SESSION_TWO):
+            with self.subTest(session=session):
+                status = read_status(self.scope, session_id=session)
+                self.assertFalse(status["reader"]["released_by_self"])
+                reason = gate_hook(
+                    self.stop_payload(session),
+                    git_executable=support.git_executable(),
+                )
+                self.assertIsNotNone(reason)
+                self.assertTrue(reason[0])
+
+        # The role really is free for whoever asks next.
+        taken, _ = self.json_run("dequeue", session_id=SESSION_TWO)
+        self.assertEqual(len(taken["items"]), 1)
+
+    def test_a_bounded_run_still_ends_on_its_own_release(self) -> None:
+        """The documented "run one task, then stop" mode, end to end.
+
+        This is the shape that has to keep working now that releasing
+        demands proof: every step is its own POSIX session, and only the
+        host-supplied identity ties them together.
+        """
+        self.run_step("enqueue", "The one task")
+        self.run_step("enqueue", "Deliberately left behind")
+
+        dequeued, _ = self.json_run(
+            "dequeue", "--limit", "1", session_id=SESSION_ONE
+        )
+        self.json_run(
+            "task",
+            "done",
+            dequeued["items"][0]["task"]["task_id"],
+            "--summary",
+            "Drafted",
+            session_id=SESSION_ONE,
+        )
+        released, _ = self.json_run(
+            "reader", "release", session_id=SESSION_ONE
+        )
+        self.assertEqual(released["status"], "released")
+
+        # The documented stop predicate, read from one status call.
+        status, _ = self.json_run("status", session_id=SESSION_ONE)
+        self.assertEqual(status["reader"]["status"], "released")
+        self.assertTrue(status["reader"]["released_by_self"])
+        self.assertEqual(status["claims"]["active_this_session"], 0)
+        self.assertGreater(status["tasks"]["ready"], 0)
+
+        stood_down = gate_hook(
+            self.stop_payload(SESSION_ONE),
+            git_executable=support.git_executable(),
+        )
+        self.assertIsNotNone(stood_down)
+        self.assertFalse(stood_down[0])
+        self.assertIn("this session released the reader role", stood_down[1])
+
     def test_claims_from_a_dead_session_are_still_this_sessions(self) -> None:
         self.run_step("enqueue", "Write the release notes")
         self.json_run("dequeue", session_id=SESSION_ONE)

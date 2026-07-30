@@ -54,13 +54,17 @@ def _reader_acquire(arguments: argparse.Namespace) -> int:
 
 def _reader_release(arguments: argparse.Namespace) -> int:
     reader_id = arguments.effective_config.reader
-    result = release_reader_lease(_scope(arguments), reader_id=reader_id)
+    result = release_reader_lease(
+        _scope(arguments),
+        reader_id=reader_id,
+        force=arguments.force,
+    )
     # Say plainly when there was nothing of this caller's to give back.
     # A release that matched no lease records no declaration, so nothing
     # downstream -- the completion gate above all -- will read it as one,
     # and a caller told only "released" would stop expecting a signal
-    # that was never written. The usual cause is an identity mismatch, so
-    # the line names the identity that was tried.
+    # that was never written. The usual cause is that this session cannot
+    # prove it holds the role, so the line names the identity that tried.
     if result["status"] == "not_held":
         print(
             f'aiq: nothing to release: reader "{reader_id}" does not hold '
@@ -68,13 +72,28 @@ def _reader_release(arguments: argparse.Namespace) -> int:
             "it: aiq reader status",
             file=sys.stderr,
         )
+    # Breaking somebody else's live lease is an operator act with a
+    # consequence the caller must see: the former holder was not asked
+    # and may still be draining. Say so, and say that nothing was
+    # declared -- a forced break is deliberately not a completion signal
+    # for anyone.
+    if result["status"] == "forced":
+        print(
+            "aiq: forced: broke the live reader lease held by reader "
+            f'"{_single_line(result["reader"]["reader_id"] or "-")}"; the '
+            "role is now free, no release was recorded for any session, "
+            "and that holder may still be draining this queue",
+            file=sys.stderr,
+        )
     # Giving the role back is not settling the work: release leaves every
     # per-item claim in place. Warn rather than refuse, because release is
     # a total, replayable declaration and a handoff mid-item is legitimate;
     # the completion gate is what actually stops such a session. One line,
-    # on stderr, so machine callers reading stdout are unaffected.
+    # on stderr, so machine callers reading stdout are unaffected. A force
+    # is exempt: those claims are not this caller's obligation to settle,
+    # they are the broken holder's.
     held = result["claims_held"]
-    if held:
+    if held and result["status"] != "forced":
         print(
             f"aiq: released the reader role while still holding {held} "
             f"active claim{'' if held == 1 else 's'}; settle or release "
@@ -119,4 +138,12 @@ def register(
     reader_acquire.set_defaults(handler=_reader_acquire)
     reader_release = _scope_parser(reader_commands, "release")
     reader_release.add_argument("--reader")
+    reader_release.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "break a live lease this session cannot prove it holds; "
+            "frees the role and records no release for any session"
+        ),
+    )
     reader_release.set_defaults(handler=_reader_release)

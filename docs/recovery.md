@@ -64,8 +64,21 @@ gone away is reclaimed one of three ways, in order of preference: have the
 holder run `aiq reader release`; wait for `expires_at`, bounded by
 `reader_lease_seconds`; or, when the holder derived its identity on this host
 and its session is provably gone, the next consume takes over immediately.
-There is deliberately no force or steal — a live lease is refused rather than
-broken, because breaking one risks two sessions draining a journal at once.
+
+Releasing takes proof of holding, so naming the holder's identity is refused
+rather than honored: `aiq reader release --reader THEIR_ID` reports
+`reader_held` and exit 4. Breaking a live lease is a deliberate, named act:
+
+```sh
+aiq reader release --force
+```
+
+Reach for it only when the three ways above cannot work — most often a lease
+held by a host-identified session that is gone for good, which is never proved
+dead and so would otherwise wait out a `reader_lease_seconds` of up to a day.
+It frees the role and records no release for anybody, so no session's
+completion gate is stood down by it. It is a last resort because two sessions
+draining one journal at once is exactly what the role exists to prevent.
 
 Losing the role revokes nothing. Claims the old holder still holds recover on
 their own lease schedule, and the old holder can still apply, park, fail,

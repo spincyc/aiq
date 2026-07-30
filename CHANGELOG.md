@@ -180,6 +180,31 @@ effects documents, capability contracts, and integration manifests.
 
 ### Fixed
 
+- **Releasing the reader role now requires proof of holding it, and a release
+  ages out with the lease it was about.** A `reader_id` is public — `aiq
+  reader status` prints it and `--reader` accepts it — but release authorized
+  on a matching string, so anyone could run `aiq reader release --reader
+  THEIR_ID` against a live lease, and because release leaves the recorded
+  holder locator in place, the victim's `Stop` gate then read
+  `reader.released_by_self` true and stood down while it still held an active
+  claim and had released nothing. Release now demands the same locator proof
+  `reader.live` demands: a lease that recorded a holder locator may be
+  released only from the session that locator names, and a live lease the
+  caller cannot prove holding is refused with `reader_held` at exit 4. A lease
+  taken under an explicitly configured `--reader` or `AIQ_READER` records no
+  locator by design and is still released by presenting that identity, which
+  is shared authority over the role and, as before, records no declaration.
+  Separately, a released row never expired — `released` was tested before
+  expiry — so a year-old row still stood a gate down, and since POSIX session
+  ids restart low after a reboot an unrelated session could inherit a
+  stranger's "I am done"; expiry is now tested first, so a released lease
+  reads `expired` past its own `expires_at` and stands nothing down. The new
+  `aiq reader release --force` is the one deliberate override: it breaks a
+  live lease this session cannot prove holding — the only recourse for a lease
+  held by a host-identified session that is gone for good, which is never
+  proved dead — and it clears the holder locator so it hands no session a
+  declaration.
+
 - **A session is now identified by an identity that outlives its commands, so
   `aiq reader release` works on an agent host at all.** Session identity was
   derived from the POSIX session id, on the assumption that one session spans
