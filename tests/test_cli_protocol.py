@@ -36,6 +36,7 @@ from aiq.queue import (
     apply_effects,
     claim_message,
     claim_task,
+    dispose_message,
     release_claim,
     show_task,
 )
@@ -855,11 +856,17 @@ class JournalErrorCodeIdentityTests(unittest.TestCase):
             )
         self.assert_raise_site_code(raised.exception, "revision_conflict", 4)
 
-    def test_explicit_code_outranks_a_matching_message_substring(self) -> None:
+    def test_wording_never_classifies_and_an_unpinned_error_is_a_defect(
+        self,
+    ) -> None:
+        # This message reads exactly like a revision conflict. Nothing reads
+        # it: classification comes from ``code=`` alone, so an error that
+        # reaches the CLI without one is reported as an AIQ defect rather
+        # than guessed at.
         message = "task revision changed: TASK-1: expected 1, found 2"
         self.assertEqual(
             _classify_journal_error(JournalError(message)),
-            ("revision_conflict", 4),
+            ("internal_error", 70),
         )
         self.assertEqual(
             _classify_journal_error(JournalError(message, code="not_found")),
@@ -986,20 +993,92 @@ class JournalErrorCodeIdentityTests(unittest.TestCase):
             export_journal(self.scope, self.root / "export.jsonl")
         self.assert_raise_site_code(raised.exception, "schema_incompatible", 5)
 
+    # The classifications below moved in the TASK-54 contract correction.
+    # Each one pins the corrected code so the movement cannot silently
+    # regress to the classification the retired substring rules produced.
+
+    def test_stored_queue_invariant_is_an_integrity_failure(self) -> None:
+        # ``audit_queue`` reports stored-data violations. This one used to
+        # surface as ``state_conflict`` at exit 4, beside SQLite's own
+        # integrity checks at exit 5.
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        connection = sqlite3.connect(self.scope.journal_path)
+        try:
+            connection.execute("INSERT INTO task_numbers DEFAULT VALUES")
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(JournalError) as raised:
+            check_journal(self.scope)
+        self.assertIn("task number allocation", str(raised.exception))
+        self.assert_raise_site_code(raised.exception, "integrity_failed", 5)
+
+    def test_unusable_lock_path_is_an_io_error(self) -> None:
+        # A filesystem precondition on journal state used to report
+        # ``state_conflict`` at exit 4 rather than an exit-6 environment code.
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        lock_path = self.scope.journal_path.parent / "lifecycle.lock"
+        lock_path.unlink()
+        lock_path.mkdir()
+
+        with self.assertRaises(JournalError) as raised:
+            check_journal(self.scope)
+        self.assert_raise_site_code(raised.exception, "io_error", 6)
+
+    def test_effect_shape_violation_is_an_invalid_document(self) -> None:
+        # An effects document that violates its versioned contract used to
+        # report ``state_conflict`` at exit 4 instead of exit 2.
+        message_id, claim_id = self.claimed_message("apply a misshapen effect")
+        with self.assertRaises(JournalError) as raised:
+            apply_effects(
+                self.scope,
+                message_id,
+                {"v": 1, "expect": {}, "effects": [["create", "$task"]]},
+                claim_id=claim_id,
+            )
+        self.assertIn("must have 3 items", str(raised.exception))
+        self.assert_raise_site_code(raised.exception, "invalid_document", 2)
+
+    def test_rejected_disposition_argument_is_an_invalid_argument(self) -> None:
+        message_id, claim_id = self.claimed_message("dispose me wrongly")
+        with self.assertRaises(JournalError) as raised:
+            dispose_message(
+                self.scope,
+                message_id,
+                claim_id=claim_id,
+                disposition="abandoned",
+                reason="not a disposition",
+            )
+        self.assert_raise_site_code(raised.exception, "invalid_argument", 2)
+
+    def test_relative_state_home_is_an_unsupported_environment(self) -> None:
+        # "XDG_STATE_HOME" contains "state", which the retired rules read as
+        # ``state_conflict``.
+        with patch.dict(os.environ, {"XDG_STATE_HOME": "relative/state"}):
+            with self.assertRaises(JournalError) as raised:
+                resolve_scope("user", cwd=self.root)
+        self.assert_raise_site_code(
+            raised.exception, "unsupported_environment", 6
+        )
+
+    def test_wrapped_event_validation_is_an_invalid_document(self) -> None:
+        # The last site on the retired fallback: ingest re-raises the event
+        # layer's diagnostic, which was classified by wording alone.
+        with self.assertRaises(JournalError) as raised:
+            ingest_message(self.scope, "hello", source="Bad Source")
+        self.assert_raise_site_code(raised.exception, "invalid_document", 2)
+
     def test_pinned_code_beats_a_rival_phrase_in_its_own_message(self) -> None:
         # ``validate_project_label`` is pinned ``invalid_argument`` while its
-        # diagnostic contains "must be", the phrase the fallback rules read as
-        # ``invalid_document``. The raise-site code has to win.
+        # diagnostic contains "must be", which the retired fallback rules
+        # read as ``invalid_document``. The raise-site code decides.
         with self.assertRaises(JournalError) as raised:
             validate_project_label("   ")
         self.assert_raise_site_code(raised.exception, "invalid_argument", 2)
         self.assertIn("must be", str(raised.exception))
-        self.assertEqual(
-            _classify_journal_error(JournalError(str(raised.exception))),
-            ("invalid_document", 2),
-        )
-        # The same independence in the other direction: an earlier rule's
-        # phrase in the message does not outrank a later rule's pinned code.
+        # The same independence in the other direction: a phrase that used to
+        # name a different code does not outrank the pinned one.
         self.assertEqual(
             _classify_journal_error(
                 JournalError("task not found: TASK-1", code="state_conflict")
@@ -1011,16 +1090,13 @@ class JournalErrorCodeIdentityTests(unittest.TestCase):
 class JournalErrorRaiseSiteCoverageTests(unittest.TestCase):
     """Every ``JournalError`` raise site carries its own stable code.
 
-    The substring fallback in ``aiq.cli._errors`` is documented as
-    transitional. This test is what keeps it that way: a new raise site
-    without ``code=`` fails here rather than silently re-entering the
-    wording-dependent path.
+    The substring fallback in ``aiq.cli._errors`` is gone: an unpinned site
+    now classifies as ``internal_error``. This test is what keeps that
+    honest, failing on a new raise site without ``code=`` rather than
+    letting it reach users as an implementation defect.
     """
 
-    # ``_canonical_ingest_event`` re-raises the message of an ``EventError``
-    # built in ``aiq.events``; the code is not knowable at the wrapping site,
-    # so this one site is still classified by message.
-    EXEMPT = {("journal.py", "_canonical_ingest_event")}
+    EXEMPT: set[tuple[str, str]] = set()
     RAISED = {"JournalError", "_NotGitRepository"}
 
     def test_every_raise_site_sets_a_code(self) -> None:

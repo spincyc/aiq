@@ -129,7 +129,7 @@ def _export_rows(
         raise JournalError(
             "journal tables do not match export format "
             f"(missing={missing}, unexpected={unexpected})",
-            code="state_conflict",
+            code="integrity_failed",
         )
 
     for record_type, table, order_columns, json_columns in _EXPORT_RECORDS:
@@ -149,7 +149,7 @@ def _export_rows(
                     raise JournalError(
                         f"journal contains invalid JSON in "
                         f"{table}.{stored_name}",
-                        code="invalid_document",
+                        code="integrity_failed",
                     ) from error
             yield record_type, semantic_row
 
@@ -212,7 +212,7 @@ def _publish_new_file(temporary_path: Path, output_path: Path) -> None:
                 pass
         raise JournalError(
             f"cannot publish export: {output_path}",
-            code="state_conflict",
+            code="io_error",
         ) from error
 
 
@@ -272,7 +272,7 @@ def export_journal(
                     except ValueError as error:
                         raise JournalError(
                             "journal has an invalid schema version",
-                            code="state_conflict",
+                            code="integrity_failed",
                         ) from error
                     if schema_version != journal.SCHEMA_VERSION:
                         raise JournalError(
@@ -356,7 +356,7 @@ def _private_directory(path: Path, *, label: str) -> os.stat_result | None:
     ):
         raise JournalError(
             f"{label} is not a private directory: {path}",
-            code="state_conflict",
+            code="io_error",
         )
     return status
 
@@ -372,7 +372,7 @@ def _owned_regular_file(path: Path) -> os.stat_result:
     ):
         raise JournalError(
             f"managed journal path is unsafe: {path}",
-            code="state_conflict",
+            code="io_error",
         )
     return status
 
@@ -425,7 +425,7 @@ def _managed_inventory(scope: JournalScope) -> list[_ManagedEntry]:
             if not _is_backup_name(path.name):
                 raise JournalError(
                     f"backup directory contains an unmanaged entry: {path}",
-                    code="state_conflict",
+                    code="io_error",
                 )
             kind = (
                 "backup_temporary"
@@ -551,7 +551,7 @@ def _open_private_directory(
     except OSError as error:
         raise JournalError(
             f"{label} is not a private directory: {path}",
-            code="state_conflict",
+            code="io_error",
         ) from error
     status = os.fstat(descriptor)
     if (
@@ -562,7 +562,7 @@ def _open_private_directory(
         os.close(descriptor)
         raise JournalError(
             f"{label} is not a private directory: {path}",
-            code="state_conflict",
+            code="io_error",
         )
     return descriptor
 

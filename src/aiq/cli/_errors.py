@@ -11,16 +11,17 @@ from aiq.journal import JournalError
 
 
 # Stable machine-readable codes set at JournalError raise sites, mapped to
-# their (code, exit) classification. Codes take precedence over the substring
-# fallback rules below, so a diagnostic can be reworded without changing the
-# documented code.
+# their (code, exit) classification. Every raise site in the tree sets one, so
+# a diagnostic can be reworded without changing the documented code.
 _JOURNAL_ERROR_CODE_EXITS: dict[str, tuple[str, int]] = {
     "claim_expired": ("claim_expired", 4),
     "claim_mismatch": ("claim_mismatch", 4),
     "contention": ("contention", 4),
     "integrity_failed": ("integrity_failed", 5),
+    "internal_error": ("internal_error", 70),
     "invalid_argument": ("invalid_argument", 2),
     "invalid_document": ("invalid_document", 2),
+    "io_error": ("io_error", 6),
     "not_claimable": ("not_claimable", 4),
     "not_found": ("not_found", 3),
     "reader_held": ("reader_held", 4),
@@ -35,94 +36,12 @@ def _classify_journal_error(error: JournalError) -> tuple[str, int]:
     explicit = _JOURNAL_ERROR_CODE_EXITS.get(getattr(error, "code", None))
     if explicit is not None:
         return explicit
-    # TRANSITIONAL FALLBACK. Every `JournalError` raise site in the tree
-    # now sets `code=` explicitly, with exactly one exception:
-    # `aiq.journal._canonical_ingest_event`, which re-raises the message of
-    # an `EventError` built in `aiq.events` verbatim. That message is not
-    # known at the wrapping site, so the rules below still decide it — and
-    # they decide it inconsistently, splitting one validation failure
-    # between `invalid_document` and `state_conflict` on wording alone.
-    # Retiring the rules means giving that wrap a code of its own, which
-    # changes the classification of some ingest failures and so belongs in
-    # its own change. Prefer `code=` at any new raise site; these rules
-    # match the human diagnostic and must not be relied upon.
-    message = str(error).lower()
-    if "not found" in message or "does not exist" in message:
-        return "not_found", 3
-    if "expired" in message:
-        return "claim_expired", 4
-    if "revision" in message and (
-        "changed" in message or "stale" in message or "expected" in message
-    ):
-        return "revision_conflict", 4
-    if "claim" in message and (
-        "mismatch" in message
-        or "does not match" in message
-        or "not active" in message
-    ):
-        return "claim_mismatch", 4
-    if "not claimable" in message or "not ready" in message:
-        return "not_claimable", 4
-    if "integrity" in message or "foreign-key" in message:
-        return "integrity_failed", 5
-    if "schema" in message and (
-        "unsupported" in message
-        or "newer" in message
-        or "incompatible" in message
-    ):
-        return "schema_incompatible", 5
-    if any(
-        marker in message
-        for marker in (
-            "invalid task id",
-            "invalid claim id",
-            "limit must",
-            "must be positive",
-            "unsupported claim",
-            "unsupported task state",
-        )
-    ):
-        return "invalid_argument", 2
-    if any(
-        marker in message
-        for marker in (
-            "idempotency key",
-            "confirmation",
-            "transition",
-            "state",
-            "dependency",
-            "supersed",
-            "already ",
-        )
-    ):
-        return "state_conflict", 4
-    if any(
-        marker in message
-        for marker in (
-            "document",
-            "invalid json",
-            "input",
-            "must be",
-            "exceeds",
-            "unknown keys",
-            "missing keys",
-        )
-    ):
-        return "invalid_document", 2
-    if any(
-        marker in message
-        for marker in (
-            "sqlite",
-            "wal",
-            "git is unavailable",
-            "git could not resolve repository scope",
-            "git returned an empty repository path",
-            "not inside a git repository",
-            "unsupported journal scope",
-        )
-    ):
-        return "unsupported_environment", 6
-    return "state_conflict", 4
+    # Every `JournalError` raise site sets a known `code=`, which
+    # `JournalErrorRaiseSiteCoverageTests` enforces, so reaching here means
+    # a site was added without one or with a code missing from the table
+    # above. That is an AIQ defect, not a classifiable journal outcome, and
+    # it is reported as one rather than guessed at from the wording.
+    return "internal_error", 70
 
 
 def _classify_error(error: Exception) -> tuple[str, int]:

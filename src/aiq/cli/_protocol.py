@@ -170,7 +170,7 @@ def _decode_utf8(data: bytes, *, label: str) -> str:
     except UnicodeDecodeError as error:
         raise JournalError(
             f"{label} is not valid UTF-8",
-            code="state_conflict",
+            code="invalid_document",
         ) from error
 
 

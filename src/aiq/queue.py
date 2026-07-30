@@ -121,7 +121,7 @@ def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         if key in result:
             raise JournalError(
                 f"duplicate JSON key: {key}",
-                code="state_conflict",
+                code="invalid_document",
             )
         result[key] = value
     return result
@@ -149,7 +149,7 @@ def parse_effect_document(raw: str) -> dict[str, Any]:
     except (json.JSONDecodeError, RecursionError) as error:
         raise JournalError(
             f"invalid effects JSON: {error}",
-            code="state_conflict",
+            code="invalid_document",
         ) from error
     if not isinstance(document, dict):
         raise JournalError(
@@ -228,14 +228,14 @@ def _text(
     if "\x00" in value:
         raise JournalError(
             f"{path} must not contain NUL",
-            code="state_conflict",
+            code="invalid_document",
         )
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as error:
         raise JournalError(
             f"{path} is not valid UTF-8",
-            code="state_conflict",
+            code="invalid_document",
         ) from error
     return value
 
@@ -250,7 +250,7 @@ def _task_reference(value: Any, *, path: str) -> str:
         return value
     raise JournalError(
         f"{path} is not a canonical task ID or local alias",
-        code="state_conflict",
+        code="invalid_document",
     )
 
 
@@ -378,12 +378,12 @@ def _load_current_tasks(
         if task_id not in tasks:
             raise JournalError(
                 f"task claim references missing task: {task_id}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         if tasks[task_id]["claim"] is not None:
             raise JournalError(
                 f"task has multiple active claims: {task_id}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         if (
             claim["basis_revision"] != tasks[task_id]["revision"]
@@ -391,7 +391,7 @@ def _load_current_tasks(
         ):
             raise JournalError(
                 f"task has a stale active claim: {task_id}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         tasks[task_id]["claim"] = dict(claim)
     return tasks
@@ -448,7 +448,7 @@ def _effective_states(tasks: dict[str, dict[str, Any]]) -> dict[str, str]:
         unresolved = min(set(tasks) - set(states))
         raise JournalError(
             f"dependency cycle contains {unresolved}",
-            code="state_conflict",
+            code="integrity_failed",
         )
     return states
 
@@ -1667,7 +1667,7 @@ def dispose_message(
     if disposition not in {"needs_input", "failed"}:
         raise JournalError(
             f"invalid message disposition: {disposition}",
-            code="state_conflict",
+            code="invalid_argument",
         )
     if not CLAIM_ID_PATTERN.fullmatch(claim_id):
         raise JournalError(
@@ -1715,7 +1715,7 @@ def dispose_message(
             if event is None:
                 raise JournalError(
                     f"message disposition event is missing: {message_id}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
             payload = json.loads(event["payload_json"])
             if payload != {"claim_id": claim_id, "reason": explanation}:
@@ -2068,7 +2068,7 @@ def _explanation(
         )
     if state == "done":
         return "done"
-    raise JournalError(f"unknown task state: {state}", code="state_conflict")
+    raise JournalError(f"unknown task state: {state}", code="integrity_failed")
 
 
 def explain_task(
@@ -2162,7 +2162,7 @@ def _history_detail(
     if row["revision"] is None:
         raise JournalError(
             f"task event has no revision: {task_id}",
-            code="state_conflict",
+            code="integrity_failed",
         )
     detail: dict[str, Any] = {"revision": row["revision"]}
     if event_type == "task.created":
@@ -2504,7 +2504,7 @@ def _apply_effects_connected(
     if not isinstance(message_id, str) or not message_id.startswith("msg_"):
         raise JournalError(
             f"invalid message ID: {message_id}",
-            code="state_conflict",
+            code="invalid_argument",
         )
     if not CLAIM_ID_PATTERN.fullmatch(claim_id):
         raise JournalError(
@@ -2595,7 +2595,7 @@ def _apply_effects_connected(
         raise JournalError(
             f"message has an applied event without an application: "
             f"{message_id}",
-            code="state_conflict",
+            code="integrity_failed",
         )
     if message_state != "processing":
         raise JournalError(
@@ -2627,18 +2627,18 @@ def _apply_effects_connected(
         if len(effect) != 3:
             raise JournalError(
                 f"create effect {index} must have 3 items",
-                code="state_conflict",
+                code="invalid_document",
             )
         alias = effect[1]
         if not isinstance(alias, str) or not ALIAS_PATTERN.fullmatch(alias):
             raise JournalError(
                 f"create effect {index} has invalid alias",
-                code="state_conflict",
+                code="invalid_document",
             )
         if alias in aliases:
             raise JournalError(
                 f"duplicate local task alias: {alias}",
-                code="state_conflict",
+                code="invalid_document",
             )
         cursor = connection.execute(
             "INSERT INTO task_numbers DEFAULT VALUES"
@@ -2754,7 +2754,7 @@ def _apply_effects_connected(
             if len(dependencies) != len(set(dependencies)):
                 raise JournalError(
                     f"create effect {index} has duplicate dependencies",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             for dependency in dependencies:
                 require_expected(dependency)
@@ -2791,14 +2791,14 @@ def _apply_effects_connected(
             if len(effect) != 3:
                 raise JournalError(
                     f"update effect {index} must have 3 items",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             reference = _task_reference(effect[1], path=f"effects[{index}].task")
             task_id = existing_at(reference, index)
             if task_id in update_targets:
                 raise JournalError(
                     f"duplicate update effect for {task_id}",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             update_targets.add(task_id)
             current = tasks[task_id]
@@ -2828,7 +2828,7 @@ def _apply_effects_connected(
             if not patch:
                 raise JournalError(
                     f"update effect {index} patch must not be empty",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             revised = _copy_revision(current)
             if "title" in patch:
@@ -2887,14 +2887,14 @@ def _apply_effects_connected(
             if len(effect) not in {3, 4}:
                 raise JournalError(
                     f"transition effect {index} must have 3 or 4 items",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             reference = _task_reference(effect[1], path=f"effects[{index}].task")
             task_id = existing_at(reference, index)
             if task_id in transition_targets:
                 raise JournalError(
                     f"duplicate transition effect for {task_id}",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             transition_targets.add(task_id)
             destination = effect[2]
@@ -2902,13 +2902,13 @@ def _apply_effects_connected(
                 raise JournalError(
                     f"transition effect {index} has invalid state: "
                     f"{destination!r}",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             metadata = effect[3] if len(effect) == 4 else {}
             if not isinstance(metadata, dict):
                 raise JournalError(
                     f"transition effect {index} metadata must be an object",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             _exact_keys(
                 metadata,
@@ -2944,7 +2944,7 @@ def _apply_effects_connected(
             elif "claim" in metadata:
                 raise JournalError(
                     f"transition effect {index} allows claim only for done",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             if destination not in TRANSITIONS[current_effective]:
                 raise JournalError(
@@ -2971,7 +2971,7 @@ def _apply_effects_connected(
                 if "by" not in metadata:
                     raise JournalError(
                         f"transition effect {index} requires metadata.by",
-                        code="state_conflict",
+                        code="invalid_document",
                     )
                 replacement = resolved_before(
                     _task_reference(
@@ -2994,7 +2994,7 @@ def _apply_effects_connected(
             elif "by" in metadata:
                 raise JournalError(
                     f"transition effect {index} allows by only for superseded",
-                    code="state_conflict",
+                    code="invalid_document",
                 )
             revised = _copy_revision(current)
             revised["state"] = destination
@@ -3022,7 +3022,7 @@ def _apply_effects_connected(
         if len(effect) != 3:
             raise JournalError(
                 f"{operation} effect {index} must have 3 items",
-                code="state_conflict",
+                code="invalid_document",
             )
         task_reference = _task_reference(
             effect[1],
@@ -3038,7 +3038,7 @@ def _apply_effects_connected(
         if edge_key in edge_operations:
             raise JournalError(
                 f"duplicate dependency effect: {task_id} -> {dependency_id}",
-                code="state_conflict",
+                code="invalid_document",
             )
         edge_operations.add(edge_key)
         current = tasks[task_id]
@@ -3607,7 +3607,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
         raise JournalError(
             f"task effect has no sealed application: "
             f"{orphan_effect['message_id']}:{orphan_effect['effect_index']}",
-            code="state_conflict",
+            code="integrity_failed",
         )
     applications = connection.execute(
         """
@@ -3635,20 +3635,20 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
             raise JournalError(
                 f"invalid stored effects document for {application['message_id']}: "
                 f"{error}",
-                code="invalid_document",
+                code="integrity_failed",
             ) from error
         canonical = _canonical_json(document)
         if canonical != application["document_json"]:
             raise JournalError(
                 f"stored effects document is not canonical: "
                 f"{application['message_id']}",
-                code="invalid_document",
+                code="integrity_failed",
             )
         actual_hash = hashlib.sha256(canonical.encode()).hexdigest()
         if actual_hash != application["effects_sha256"]:
             raise JournalError(
                 f"effects document hash mismatch: {application['message_id']}",
-                code="invalid_document",
+                code="integrity_failed",
             )
         event = connection.execute(
             """
@@ -3665,7 +3665,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
         ):
             raise JournalError(
                 f"application event mismatch: {application['message_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         event_payload = json.loads(event["payload_json"])
         if (
@@ -3675,7 +3675,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
             raise JournalError(
                 f"application event hash mismatch: "
                 f"{application['message_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         effects = connection.execute(
             """
@@ -3690,19 +3690,19 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
             raise JournalError(
                 f"application effect count mismatch: "
                 f"{application['message_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         if [row["effect_index"] for row in effects] != list(range(len(effects))):
             raise JournalError(
                 f"application effects are not contiguous: "
                 f"{application['message_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         if len(document["effects"]) != len(effects):
             raise JournalError(
                 f"application document effect count mismatch: "
                 f"{application['message_id']}",
-                code="invalid_document",
+                code="integrity_failed",
             )
         for row, document_effect in zip(effects, document["effects"], strict=True):
             expected_payload = _event_payload(row["operation"], document_effect)
@@ -3710,14 +3710,14 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                 raise JournalError(
                     f"application effect payload mismatch: "
                     f"{application['message_id']}:{row['effect_index']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
         try:
             result = json.loads(application["result_json"])
         except json.JSONDecodeError as error:
             raise JournalError(
                 f"application result is invalid: {application['message_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             ) from error
         if (
             not isinstance(result, dict)
@@ -3729,7 +3729,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
         ):
             raise JournalError(
                 f"application result mismatch: {application['message_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         aliases = result["aliases"]
         if any(
@@ -3741,7 +3741,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
             raise JournalError(
                 f"application aliases are invalid: "
                 f"{application['message_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         for row, document_effect in zip(effects, document["effects"], strict=True):
             effect_context[row["event_sequence"]] = (document_effect, aliases)
@@ -3761,7 +3761,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
         if not applied_claim:
             raise JournalError(
                 f"application claim mismatch: {application['message_id']}",
-                code="claim_mismatch",
+                code="integrity_failed",
             )
 
     task_rows = connection.execute(
@@ -3782,13 +3782,13 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
     if allocated_numbers != {row["task_number"] for row in task_rows}:
         raise JournalError(
             "task number allocation does not match tasks",
-            code="state_conflict",
+            code="integrity_failed",
         )
     for row in task_rows:
         if row["task_number"] < 1 or row["task_id"] != f"TASK-{row['task_number']}":
             raise JournalError(
                 f"invalid task identity: {row['task_id']}",
-                code="invalid_argument",
+                code="integrity_failed",
             )
         revisions = connection.execute(
             """
@@ -3802,19 +3802,19 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
         if not revisions:
             raise JournalError(
                 f"task has no revisions: {row['task_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         if [revision["revision"] for revision in revisions] != list(
             range(1, len(revisions) + 1)
         ):
             raise JournalError(
                 f"task revisions are not contiguous: {row['task_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         if revisions[0]["event_sequence"] != row["created_sequence"]:
             raise JournalError(
                 f"task creation sequence mismatch: {row['task_id']}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         previous: sqlite3.Row | None = None
         for revision in revisions:
@@ -3833,7 +3833,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                 raise JournalError(
                     f"invalid task dependencies: "
                     f"{row['task_id']}:r{revision['revision']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
             effect = connection.execute(
                 """
@@ -3847,13 +3847,13 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                 raise JournalError(
                     f"task revision has no effect: "
                     f"{row['task_id']}:r{revision['revision']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
             if effect["task_id"] != row["task_id"]:
                 raise JournalError(
                     f"task effect target mismatch: "
                     f"{row['task_id']}:r{revision['revision']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
             payload = json.loads(effect["payload_json"])
             document_effect = payload.get("effect")
@@ -3861,7 +3861,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                 raise JournalError(
                     f"task effect payload is invalid: "
                     f"{row['task_id']}:r{revision['revision']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
             operation = effect["operation"]
             context = effect_context.pop(revision["event_sequence"], None)
@@ -3869,7 +3869,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                 raise JournalError(
                     f"task effect has no application context: "
                     f"{row['task_id']}:r{revision['revision']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
             aliases = context[1]
 
@@ -3887,7 +3887,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                 ):
                     raise JournalError(
                         f"task first revision is invalid: {row['task_id']}",
-                        code="state_conflict",
+                        code="integrity_failed",
                     )
                 spec = document_effect[2]
                 expected_dependencies = sorted(
@@ -3906,7 +3906,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                 if any(revision[field] != value for field, value in expected.items()):
                     raise JournalError(
                         f"task creation revision mismatch: {row['task_id']}",
-                        code="state_conflict",
+                        code="integrity_failed",
                     )
             else:
                 identity_fields = (
@@ -3932,7 +3932,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                         raise JournalError(
                             f"update changed lifecycle data: "
                             f"{row['task_id']}:r{revision['revision']}",
-                            code="state_conflict",
+                            code="integrity_failed",
                         )
                     patch = document_effect[2]
                     expected = {
@@ -3955,7 +3955,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                         raise JournalError(
                             f"task update revision mismatch: "
                             f"{row['task_id']}:r{revision['revision']}",
-                            code="state_conflict",
+                            code="integrity_failed",
                         )
                 elif operation == "transition":
                     if (
@@ -3970,7 +3970,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                         raise JournalError(
                             f"transition revision mismatch: "
                             f"{row['task_id']}:r{revision['revision']}",
-                            code="state_conflict",
+                            code="integrity_failed",
                         )
                     destination = revision["state"]
                     metadata = (
@@ -3992,13 +3992,13 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                         raise JournalError(
                             f"transition metadata mismatch: "
                             f"{row['task_id']}:r{revision['revision']}",
-                            code="state_conflict",
+                            code="integrity_failed",
                         )
                     if destination == "active":
                         raise JournalError(
                             f"active revision has no queue claim: "
                             f"{row['task_id']}:r{revision['revision']}",
-                            code="state_conflict",
+                            code="integrity_failed",
                         )
                     if destination == "done":
                         claim_id = metadata.get("claim")
@@ -4028,13 +4028,13 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                             raise JournalError(
                                 f"done revision has no completed claim: "
                                 f"{row['task_id']}:r{revision['revision']}",
-                                code="state_conflict",
+                                code="integrity_failed",
                             )
                     elif destination not in TRANSITIONS[previous["state"]]:
                         raise JournalError(
                             f"invalid stored transition: {row['task_id']}: "
                             f"{previous['state']} -> {destination}",
-                            code="state_conflict",
+                            code="integrity_failed",
                         )
                 elif operation in {"require", "unrequire"}:
                     if (
@@ -4049,7 +4049,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                         raise JournalError(
                             f"dependency effect changed task fields: "
                             f"{row['task_id']}:r{revision['revision']}",
-                            code="state_conflict",
+                            code="integrity_failed",
                         )
                     before = set(json.loads(previous["dependencies_json"]))
                     after = set(dependencies)
@@ -4063,12 +4063,12 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
                         raise JournalError(
                             f"dependency revision mismatch: "
                             f"{row['task_id']}:r{revision['revision']}",
-                            code="state_conflict",
+                            code="integrity_failed",
                         )
                 else:
                     raise JournalError(
                         f"invalid task operation after creation: {operation}",
-                        code="state_conflict",
+                        code="integrity_failed",
                     )
             previous = revision
 
@@ -4085,12 +4085,12 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
         if effect is None:
             raise JournalError(
                 f"sealed task effect is missing: event {event_sequence}",
-                code="state_conflict",
+                code="integrity_failed",
             )
         raise JournalError(
             f"sealed task effect has no task revision: "
             f"{effect['message_id']}:{effect['effect_index']}",
-            code="state_conflict",
+            code="integrity_failed",
         )
 
     tasks = _load_current_tasks(connection)
@@ -4114,7 +4114,7 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
             f"resource has multiple active claims: "
             f"{duplicate_claim['resource_kind']}:"
             f"{duplicate_claim['resource_id']}",
-            code="state_conflict",
+            code="integrity_failed",
         )
     for claim in connection.execute("SELECT * FROM claims"):
         if claim["resource_kind"] == "message":
@@ -4130,12 +4130,12 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
             if exists and claim["basis_revision"] > exists["revision"]:
                 raise JournalError(
                     f"task claim basis is in the future: {claim['claim_id']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
         if not exists:
             raise JournalError(
                 f"claim resource does not exist: {claim['claim_id']}",
-                code="not_found",
+                code="integrity_failed",
             )
     return {
         "applications": len(applications),

@@ -6,20 +6,17 @@ AIQ separates human diagnostics from stable machine classification. Error
 messages may improve without changing the error code: a code is chosen at the
 raise site that detects the failure and travels with the error, so it is
 independent of the wording, punctuation, and interpolated values of the
-diagnostic. Every journal-error raise site in AIQ now sets its own code, for
+diagnostic. Every journal-error raise site in AIQ sets its own code, for
 every code in the table below — `not_found`, `invalid_argument`,
 `invalid_document`, `not_claimable`, and `state_conflict` included, not only
 the fence and integrity codes.
 
-One residue remains, in exactly one place. Ingest validates its request as a
-canonical event first, and when that validation fails the event layer's own
-diagnostic is re-raised without a code, because the code is not known where
-the re-raise happens. A substring fallback still classifies that one message,
-so an ingest validation failure reports `invalid_document` or
-`state_conflict` depending on how the event layer worded it. That path is
-expected to settle on `invalid_document`; until it does, treat the
-distinction as unstable. No consumer should infer a code from message
-wording anywhere.
+Nothing is classified by wording any more. The substring rules that once
+decided uncoded errors are gone, including for the ingest path that re-raised
+the event layer's diagnostic: that wrap now pins `invalid_document`, matching
+an uncaught event-validation failure. An error that somehow reaches the CLI
+without a known code is an AIQ defect and reports `internal_error`, never a
+guess. No consumer should infer a code from message wording.
 
 ## JSON form
 
@@ -82,21 +79,33 @@ report they emit on standard output contains findings.
 | `contention` | A concurrent writer held the journal beyond the bounded retry window |
 | `integrity_failed` | Stored data fails structural or semantic integrity checks |
 | `schema_incompatible` | The journal is newer than or unsupported by this AIQ |
-| `io_error` | A required local filesystem or subprocess operation failed |
+| `io_error` | A required local filesystem, lock, or subprocess operation failed, or journal state is not a private file or directory this user owns |
 | `integration_drift` | Installed integration state differs from its manifest |
 | `unsupported_environment` | The host lacks a required supported facility |
 | `internal_error` | An uncategorized implementation defect escaped normal handling |
 
 Pinning a code at its raise site fixed how a code is carried, not which code
-each site deserves. Every site was pinned to the classification callers were
-already receiving, so no observable behavior changed, and some of those
-classifications are inherited accidents rather than judgments. The known
-ones, all of which need a deliberate contract change rather than a
-refactor: the journal and queue integrity audits behind `journal check`
-report `state_conflict` at exit 4 for most stored-data violations, while the
-SQLite integrity and foreign-key checks beside them report `integrity_failed`
-at exit 5; and filesystem, permission, and lock preconditions on journal
-state report `state_conflict` rather than an exit-6 environment code.
+each site deserved. Sites were first pinned to whatever the substring rules
+already produced, which preserved several inherited accidents; those have
+since been corrected, changing the code and exit status of the affected
+failures. The correction applied four rules:
+
+- A stored-data violation found by an audit or a read is `integrity_failed`
+  at exit 5, alongside the SQLite integrity and foreign-key checks it sits
+  beside. This covers every finding of `journal check`, the queue audit, and
+  the corrupt-row checks in task history, task loading, and export.
+- A filesystem, ownership, permission, or lock precondition on journal state
+  is `io_error` at exit 6, not a resource-state conflict.
+- A failure that depends only on the submitted document — arity, JSON type,
+  enum membership, a required or forbidden field, duplicate keys or aliases,
+  encoding — is `invalid_document` at exit 2. A failure that depends on
+  current task state, or that expresses a state-machine or graph rule about
+  the requested outcome, stays `state_conflict` at exit 4.
+- A malformed caller-supplied scalar is `invalid_argument` at exit 2.
+
+`state_conflict` therefore now means what its description says: a requested
+transition or mutation that the current state rejects. It is no longer the
+residue category it became by default.
 
 Retry behavior depends on the code. `revision_conflict` requires rereading task
 state. `claim_expired` requires acquiring a new claim. `not_claimable` may be a
@@ -109,15 +118,27 @@ is a single line naming the holder; the structured channel is
 `aiq reader status --json`, never extra envelope fields. Integrity and schema
 errors require repair or
 a compatible AIQ version; they must never be silently retried as mutations.
+`io_error` is not transient either: retrying repeats the same filesystem
+outcome until the path, its ownership, or its mode is fixed. `state_conflict`
+now always describes current state, so a caller that reads state and retries
+can make progress; `invalid_document` and `invalid_argument` never become
+valid on retry and require changing what was submitted.
 
 ## Operation-specific classification
 
 | Operation | Failure | Code |
 |---|---|---|
 | `ingest --event-json` | Malformed, duplicate-key, unknown-field, oversized, or unsupported event | `invalid_document` |
+| Any ingest form | Request fails canonical event validation | `invalid_document` |
 | Any ingest form | Idempotency identity reused with different content | `state_conflict` |
+| Any journal operation | Journal directory, file, or lock is absent, unopenable, not owned by this user, or not private | `io_error` |
+| `journal check` | Stored journal or queue data violates an invariant | `integrity_failed` |
 | `journal export OUTPUT` | Output path names no file, an invalid parent, or managed state | `invalid_argument` |
 | `journal export OUTPUT` | Output already exists | `state_conflict` |
+| `journal export OUTPUT` | Stored rows, table set, or schema version are corrupt | `integrity_failed` |
+| `inbox apply`, `enqueue`, `task done` | Effect has the wrong arity or types, an unknown state, a missing or forbidden field, or a duplicate alias or target | `invalid_document` |
+| `inbox apply` | Effect requests a transition the task's current state rejects | `state_conflict` |
+| `inbox fail`, `inbox needs-input` | Disposition is not a recognized value | `invalid_argument` |
 | `inbox claim`, `queue next`, `dequeue` | Another live session holds the reader lease, empty queue included | `reader_held` |
 | `reader acquire` | Another live session holds the reader lease | `reader_held` |
 | `task done` | A named task is merely `ready` and another live session holds the reader lease | `reader_held` |

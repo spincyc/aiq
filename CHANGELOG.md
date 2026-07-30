@@ -28,6 +28,46 @@ effects documents, capability contracts, and integration manifests.
 
 ### Changed
 
+- **Breaking: error codes and exit statuses are corrected.** Pinning each code
+  at its raise site deliberately preserved whatever the old substring matcher
+  produced, including classifications that were accidents of wording. Those
+  are now fixed, so scripts that branch on `code` or on the exit status of the
+  operations below must be updated. The substring matcher is gone: a code is
+  never inferred from a message, and an uncoded error reports `internal_error`
+  at exit 70 instead of defaulting to `state_conflict`.
+  - `journal check` now exits 5 with `integrity_failed` for every stored-data
+    violation it finds, instead of exiting 4 with `state_conflict` (or 2, or
+    3) for all but the SQLite integrity and foreign-key checks. A failing
+    `journal check` is now uniformly exit 5.
+  - Filesystem, ownership, permission, and lock failures on journal state now
+    exit 6 with `io_error` instead of exiting 4 with `state_conflict`. This
+    affects any command that opens the journal, its directory, or its
+    lifecycle lock, and the preconditions of `journal export` and
+    `journal destroy`. `io_error` was already a documented code; it is now
+    reachable from journal errors.
+  - Effects-document contract violations — wrong arity, wrong JSON type, an
+    unknown task state, a missing or forbidden metadata field, a duplicate
+    alias or a duplicate effect target — now exit 2 with `invalid_document`
+    instead of exiting 4 with `state_conflict`. `inbox apply`, `enqueue`, and
+    `task done` are affected. Genuine state-machine refusals — a terminal or
+    active task rejecting a mutation, an invalid transition, a self-dependency
+    or self-supersession, a dependency cycle, an already-applied message —
+    keep `state_conflict` at exit 4.
+  - `inbox fail` and `inbox needs-input` reject an unrecognized disposition
+    with `invalid_argument` at exit 2 instead of `state_conflict` at exit 4,
+    matching how they already rejected a malformed claim ID.
+  - A relative `XDG_STATE_HOME` now reports `unsupported_environment` at
+    exit 6 instead of `state_conflict` at exit 4.
+  - A relative `--git-executable`, or one containing control characters, now
+    reports `invalid_argument` at exit 2 for journal scope resolution, which
+    is what the integration commands already reported for the same input.
+  - `journal export` on a journal with corrupt rows, an unexpected table set,
+    or an unreadable schema version now exits 5 with `integrity_failed`
+    instead of exiting 4 or 2.
+  - An ingest request that fails canonical event validation now reports
+    `invalid_document` at exit 2 in every case. It previously reported
+    `invalid_document` or `state_conflict` depending on how the event layer
+    happened to word the diagnostic.
 - Contract documentation now matches the shipped surface. `cli-v1.md` states
   that both RFC 3339 UTC designators occur (`Z` from the internal clock,
   `+00:00` from stored timestamps) and that consumers must parse RFC 3339

@@ -81,14 +81,14 @@ def _ensure_private_directory(path: Path) -> None:
     except OSError as error:
         raise JournalError(
             f"journal directory is not a real directory: {path}",
-            code="state_conflict",
+            code="io_error",
         ) from error
     try:
         status = os.fstat(descriptor)
         if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
             raise JournalError(
                 f"journal directory is not private: {path}",
-                code="state_conflict",
+                code="io_error",
             )
         os.fchmod(descriptor, 0o700)
     finally:
@@ -105,7 +105,7 @@ def _validate_private_file(path: Path) -> None:
     ):
         raise JournalError(
             f"journal file is not a private regular file: {path}",
-            code="state_conflict",
+            code="io_error",
         )
 
 
@@ -118,7 +118,7 @@ def _chmod_private_file(path: Path) -> None:
     except OSError as error:
         raise JournalError(
             f"journal file is not a private regular file: {path}",
-            code="state_conflict",
+            code="io_error",
         ) from error
     try:
         status = os.fstat(descriptor)
@@ -129,7 +129,7 @@ def _chmod_private_file(path: Path) -> None:
         ):
             raise JournalError(
                 f"journal file is not a private regular file: {path}",
-                code="state_conflict",
+                code="io_error",
             )
         os.fchmod(descriptor, 0o600)
     finally:
@@ -145,7 +145,7 @@ def _open_private_lock(path: Path):
     except OSError as error:
         raise JournalError(
             f"cannot open private journal lock: {path}",
-            code="state_conflict",
+            code="io_error",
         ) from error
     status = os.fstat(descriptor)
     if (
@@ -156,7 +156,7 @@ def _open_private_lock(path: Path):
         os.close(descriptor)
         raise JournalError(
             f"journal lock is not a private regular file: {path}",
-            code="state_conflict",
+            code="io_error",
         )
     os.fchmod(descriptor, 0o600)
     return os.fdopen(descriptor, "a+")
@@ -200,7 +200,7 @@ def _flock_until(
         except OSError as error:
             raise JournalError(
                 f"cannot acquire journal lock: {lock_path}",
-                code="state_conflict",
+                code="io_error",
             ) from error
         return
     deadline = time.monotonic() + timeout
@@ -219,7 +219,7 @@ def _flock_until(
         except OSError as error:
             raise JournalError(
                 f"cannot acquire journal lock: {lock_path}",
-                code="state_conflict",
+                code="io_error",
             ) from error
 
 
@@ -249,7 +249,7 @@ def lifecycle_lock(
             except OSError as error:
                 raise JournalError(
                     f"cannot release journal lifecycle lock: {lock_path}",
-                    code="state_conflict",
+                    code="io_error",
                 ) from error
 
 
@@ -849,7 +849,7 @@ def _git_path(
         if not executable.is_absolute():
             raise JournalError(
                 "Git executable must be an absolute path",
-                code="invalid_document",
+                code="invalid_argument",
             )
         if any(
             character in raw_executable
@@ -857,7 +857,7 @@ def _git_path(
         ):
             raise JournalError(
                 "Git executable path contains control characters",
-                code="state_conflict",
+                code="invalid_argument",
             )
         try:
             status = executable.stat()
@@ -923,7 +923,7 @@ def _state_home() -> Path:
         if not state_home.is_absolute():
             raise JournalError(
                 "XDG_STATE_HOME must be an absolute path",
-                code="state_conflict",
+                code="unsupported_environment",
             )
         return state_home
     return Path.home() / ".local" / "state"
@@ -1208,7 +1208,7 @@ def _validate_metadata(
             raise JournalError(
                 f"journal metadata mismatch for {key}: "
                 f"expected {value!r}, found {metadata.get(key)!r}",
-                code="state_conflict",
+                code="integrity_failed",
             )
 
 
@@ -1293,7 +1293,7 @@ def _execute_script_statements(
     if statement.strip():
         raise JournalError(
             "incomplete schema statement",
-            code="state_conflict",
+            code="internal_error",
         )
 
 
@@ -1365,7 +1365,7 @@ def _validate_schema_objects(
         formatted = ", ".join(f"{kind}:{name}" for kind, name in missing)
         raise JournalError(
             f"journal schema objects are missing: {formatted}",
-            code="state_conflict",
+            code="integrity_failed",
         )
 
 
@@ -1478,7 +1478,7 @@ def _initialize_journal_locked(
                 except sqlite3.OperationalError as error:
                     raise JournalError(
                         "existing journal has no readable metadata",
-                        code="state_conflict",
+                        code="integrity_failed",
                     ) from error
                 raw_version = metadata.get("schema_version")
                 try:
@@ -1486,7 +1486,7 @@ def _initialize_journal_locked(
                 except ValueError as error:
                     raise JournalError(
                         f"invalid journal schema version: {raw_version!r}",
-                        code="state_conflict",
+                        code="integrity_failed",
                     ) from error
                 if version > SCHEMA_VERSION:
                     raise JournalError(
@@ -1517,7 +1517,7 @@ def _initialize_journal_locked(
                         if current_version != str(version):
                             raise JournalError(
                                 "journal schema changed during migration",
-                                code="state_conflict",
+                                code="integrity_failed",
                             )
                         backup_name = _migration_backup(
                             scope,
@@ -1555,7 +1555,7 @@ def _initialize_journal_locked(
                         if cursor.rowcount != 1:
                             raise JournalError(
                                 "journal schema changed during migration",
-                                code="state_conflict",
+                                code="integrity_failed",
                             )
                         _normalize_repo_metadata(connection, scope)
                         _validate_schema_objects(
@@ -1746,7 +1746,9 @@ def _canonical_ingest_event(
     try:
         return validate_event(document)
     except EventError as error:
-        raise JournalError(str(error)) from error
+        # An `EventError` that escapes uncaught classifies as
+        # `invalid_document`; wrapping it must not change that.
+        raise JournalError(str(error), code="invalid_document") from error
 
 
 def _ingest_connected(
@@ -2255,7 +2257,7 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
             if actual_hash != message["content_sha256"]:
                 raise JournalError(
                     f"message content hash mismatch: {message['message_id']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
             received_count = connection.execute(
                 """
@@ -2271,7 +2273,7 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
                 raise JournalError(
                     f"message received event count is {received_count}: "
                     f"{message['message_id']}",
-                    code="state_conflict",
+                    code="integrity_failed",
                 )
         label = _read_project_label(connection)
 
@@ -2285,7 +2287,7 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
     if mode != 0o600:
         raise JournalError(
             f"journal permissions are {mode:04o}; expected 0600",
-            code="state_conflict",
+            code="integrity_failed",
         )
 
     return {
