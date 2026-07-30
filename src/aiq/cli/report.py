@@ -148,13 +148,12 @@ def _report(arguments: argparse.Namespace) -> int:
         )
     except JournalError as error:
         # An identical report from another origin repository stores a
-        # different message identity; treat it as the same known defect.
-        # The message substring is a fallback until every raise site
-        # carries a stable code.
-        if (
-            getattr(error, "code", None) != "state_conflict"
-            and "different message identity" not in str(error)
-        ):
+        # different message identity, which ingest refuses as a state
+        # conflict; treat it as the same known defect. The code alone
+        # decides, as it does everywhere else: wording classifies
+        # nothing, so rewording that refusal cannot silently turn this
+        # branch off.
+        if getattr(error, "code", None) != "state_conflict":
             raise
         existing = find_message_by_idempotency_key(scope, idempotency_key)
         if existing is None:
@@ -171,10 +170,7 @@ def _report(arguments: argparse.Namespace) -> int:
         )
     except JournalError as error:
         # A concurrent instance claimed or applied the message first.
-        if (
-            getattr(error, "code", None) != "not_claimable"
-            and "not claimable" not in str(error)
-        ):
+        if getattr(error, "code", None) != "not_claimable":
             raise
         claimed = None
     if claimed is None:

@@ -10,7 +10,15 @@ from unittest.mock import patch
 
 import support
 from aiq import __version__
-from aiq.journal import ingest_message, resolve_scope
+from aiq.cli import report as report_module
+from aiq.journal import JournalError, ingest_message, resolve_scope
+
+
+# The exact wording ingest uses when one idempotency key is re-presented
+# with a different message identity. `report` must no longer read it.
+IDENTITY_CONFLICT_WORDING = (
+    "idempotency key already belongs to a different message identity"
+)
 
 
 def report_content(summary: str, detail: str) -> str:
@@ -275,6 +283,114 @@ class ReportCliTest(unittest.TestCase):
             self.assertEqual(payload["message_id"], ingested.message_id)
             # The pre-ingested message never produced a tracking task.
             self.assertNotIn("task_id", payload)
+        self.assertEqual(self.target_tasks(), [])
+
+    def test_cross_origin_duplicate_comes_from_the_ingest_conflict_branch(
+        self,
+    ) -> None:
+        """The other-origin duplicate really is the conflict recovery.
+
+        A same-origin repeat is ordinary idempotent re-ingest and never
+        reaches the handler. Only the conflict branch looks the stored
+        message up by key, so that lookup running is the proof that the
+        branch under test is what produced the answer.
+        """
+        first = json.loads(self.report()[1])
+
+        with patch(
+            "aiq.cli.report.find_message_by_idempotency_key",
+            wraps=report_module.find_message_by_idempotency_key,
+        ) as lookup:
+            same_origin = self.report()
+            self.assertEqual(lookup.call_count, 0, "same origin must not conflict")
+            other_origin = self.report(origin=self.origin_b)
+            self.assertEqual(lookup.call_count, 1)
+
+        self.assertEqual(other_origin[0], 0, other_origin[2])
+        self.assertEqual(json.loads(same_origin[1])["status"], "duplicate")
+        payload = json.loads(other_origin[1])
+        self.assertEqual(payload["status"], "duplicate")
+        self.assertEqual(payload["message_id"], first["message_id"])
+
+    def test_ingest_conflict_is_recognized_by_its_code_alone(self) -> None:
+        """A reworded conflict still resolves to the known duplicate."""
+        first = json.loads(self.report()[1])
+
+        with patch(
+            "aiq.cli.report.ingest_message",
+            side_effect=JournalError(
+                "some future rewording of the same refusal",
+                code="state_conflict",
+            ),
+        ):
+            code, stdout, stderr = self.report()
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "duplicate")
+        self.assertEqual(payload["message_id"], first["message_id"])
+        self.assertEqual(payload["task_id"], first["task_id"])
+
+    def test_ingest_failure_with_another_code_is_never_swallowed(self) -> None:
+        """Wording cannot buy an error the duplicate treatment.
+
+        This is the narrowing that removing the substring fallback bought:
+        the identity-conflict wording carried by an error that is *not* a
+        state conflict now surfaces as that error, instead of silently
+        answering `duplicate` and exiting 0.
+        """
+        self.report()
+
+        for failure_code, exit_code in (("contention", 4), ("io_error", 6)):
+            with self.subTest(code=failure_code):
+                with patch(
+                    "aiq.cli.report.ingest_message",
+                    side_effect=JournalError(
+                        IDENTITY_CONFLICT_WORDING, code=failure_code
+                    ),
+                ):
+                    result = self.report()
+                self.assert_error(result, exit_code, failure_code)
+
+    def test_ingest_conflict_without_a_stored_message_propagates(self) -> None:
+        """A conflict AIQ cannot explain is reported, not hidden."""
+        with patch(
+            "aiq.cli.report.ingest_message",
+            side_effect=JournalError(
+                IDENTITY_CONFLICT_WORDING, code="state_conflict"
+            ),
+        ):
+            result = self.report()
+
+        self.assert_error(result, 4, "state_conflict")
+        self.assertEqual(self.target_tasks(), [])
+
+    def test_lost_claim_race_is_recognized_by_its_code_alone(self) -> None:
+        """A concurrent claimer yields a duplicate, whatever the wording."""
+        with patch(
+            "aiq.cli.report.claim_message",
+            side_effect=JournalError(
+                "some future rewording of the same refusal",
+                code="not_claimable",
+            ),
+        ):
+            code, stdout, stderr = self.report()
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout)["status"], "duplicate")
+        # The message was stored, but this instance created no task for it.
+        self.assertEqual(self.target_tasks(), [])
+
+    def test_claim_failure_with_another_code_is_never_swallowed(self) -> None:
+        with patch(
+            "aiq.cli.report.claim_message",
+            side_effect=JournalError(
+                "message is not claimable: msg_x", code="contention"
+            ),
+        ):
+            result = self.report()
+
+        self.assert_error(result, 4, "contention")
         self.assertEqual(self.target_tasks(), [])
 
 
