@@ -125,11 +125,23 @@ holder recorded a locator naming this host, that session is still running, and
 it is not the one the hook itself belongs to. A session that only files work
 while such a reader holds the role stops freely, with one exit-0 stderr notice
 such as `AIQ: not blocking: runnable work remains (1 ready task) but reader
-"host-4242" holds the reader lease — aiq reader status`. In every other case
-the gate blocks as above: no lease at all, an expired or released one, a
-holder that is provably dead, a holder on another host, a holder occupying
-this same session, and any holder that recorded no locator — which is every
-explicitly configured `reader` or `AIQ_READER` identity.
+"host-4242" holds the reader lease — aiq reader status`.
+
+A session also stands the gate down by saying it is finished.
+`aiq reader release` means "I am no longer draining this queue", so when the
+lease is `released` and its recorded holder locator names this very session,
+the gate exits 0 with one stderr notice — `AIQ: not blocking: runnable work remains
+(1 ready task) but this session released the reader role — aiq reader status`.
+That is how a bounded run (one task, or a fixed batch) ends cleanly with ready
+work deliberately left behind. The release must be provably this session's own,
+under the same locator discipline: somebody else's release is not this session
+declaring anything.
+
+In every other case the gate blocks as above: no lease at all, an expired one,
+a release by another session, a holder that is provably dead, a holder on
+another host, a holder occupying this same session, and any holder that
+recorded no locator — which is every explicitly configured `reader` or
+`AIQ_READER` identity, releases included.
 
 Those last cases matter. An agent harness can give each shell invocation its
 own POSIX session, so a lease routinely outlives the session that took it, and

@@ -509,6 +509,31 @@ def _reader_holder_is_foreign_live(row: sqlite3.Row) -> bool:
     return True
 
 
+def _reader_holder_is_this_session(row: sqlite3.Row) -> bool:
+    """True only when the recorded holder locator names this session.
+
+    The mirror image of :func:`_reader_holder_is_foreign_live` over the
+    same evidence, and it demands the same proof: a locator was recorded
+    (which happens only for a self-derived identity), it names this host,
+    and it names this process's own POSIX session. No liveness probe is
+    needed — this process is the running proof.
+
+    The locator, not the reader identity string, is what tells a session
+    apart from itself. A host hook runs as a child of the session that
+    took the lease and inherits its session id, but it does not inherit
+    that shell's environment, so the two surfaces can derive different
+    identity strings from one session. Comparing identities would miss
+    the match; comparing locators does not.
+    """
+
+    host = row["holder_host"]
+    session = row["holder_sid"]
+    if host is None or session is None:
+        return False
+    locator = _reader_locator()
+    return locator is not None and locator[0] == host and locator[1] == session
+
+
 def _reader_lease_conflict(
     row: sqlite3.Row | None,
     *,
@@ -742,6 +767,17 @@ def _reader_status_summary(
     this process's own. Unprovable foreignness, including the common
     case of an explicitly configured identity that records no locator at
     all, reads false so the gate keeps blocking.
+
+    ``released_by_self`` states the complementary thing: that *this*
+    session gave the role up on purpose. It is true only for a
+    ``released`` lease whose recorded holder locator names this host and
+    this process's own POSIX session -- the recorded, deliberate act of
+    an ``aiq reader release`` from this session. A release by anyone
+    else, and a release under an identity that recorded no locator,
+    reads false, because neither is this session declaring anything.
+
+    The two are mutually exclusive by construction: a lease cannot be
+    both ``held`` and ``released``.
     """
 
     summary = {
@@ -759,6 +795,11 @@ def _reader_status_summary(
         lease["status"] == "held"
         and row is not None
         and _reader_holder_is_foreign_live(row)
+    )
+    summary["released_by_self"] = (
+        lease["status"] == "released"
+        and row is not None
+        and _reader_holder_is_this_session(row)
     )
     return summary
 
@@ -1742,10 +1783,12 @@ def read_status(
     ``reader`` reports the scope's reader lease from this same snapshot,
     so a caller deciding from one status read needs no second open. Its
     ``self`` field is null unless ``reader_id`` names whom to compare
-    the recorded holder against, and its ``live`` field is true only for
+    the recorded holder against, its ``live`` field is true only for
     a held lease whose recorded holder is provably a different live
     session on this host -- the one reading that relieves this caller of
-    the work.
+    the work -- and its ``released_by_self`` field is true only for a
+    released lease this very session gave up, the recorded signal that
+    this caller finished draining on purpose.
     """
 
     if ready_limit < 1 or ready_limit > 64:

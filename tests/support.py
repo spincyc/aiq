@@ -150,6 +150,46 @@ def hold_reader_lease_with_locator(
     return reader_id
 
 
+def release_reader_lease_with_locator(
+    scope,
+    *,
+    host: str,
+    session: int,
+    owner_id: str = "located-worker",
+) -> str:
+    """Record a *released* reader lease naming one holder locator.
+
+    Release leaves the recorded locator in place, so this is how a test
+    names who deliberately gave the role up -- this very session, or a
+    stranger -- without owning such a process.
+    """
+    from aiq.queue import release_reader_lease
+
+    reader_id = hold_reader_lease_with_locator(
+        scope,
+        host=host,
+        session=session,
+        owner_id=owner_id,
+    )
+    release_reader_lease(scope, reader_id=reader_id)
+    return reader_id
+
+
+def release_reader_lease_from_this_session(scope, **keywords) -> str:
+    """Record a reader lease this very session took and then released.
+
+    The locator names this host and this process's own POSIX session,
+    which is the proof a completion gate demands before reading a
+    release as *this* session declaring its bounded run finished.
+    """
+    return release_reader_lease_with_locator(
+        scope,
+        host=socket.gethostname(),
+        session=os.getsid(0),
+        **keywords,
+    )
+
+
 def hold_reader_lease_from_dead_session(
     scope,
     *,

@@ -538,8 +538,10 @@ class ReaderLeaseTest(unittest.TestCase):
                 "reader_id",
                 "expires_at",
                 "live",
+                "released_by_self",
             },
         )
+        self.assertFalse(anonymous["reader"]["released_by_self"])
 
     def test_status_reports_a_dead_holders_lease_as_not_live(self) -> None:
         reader_id = support.hold_reader_lease_from_dead_session(self.scope)
@@ -614,6 +616,79 @@ class ReaderLeaseTest(unittest.TestCase):
         self.assertEqual(status["reader"]["status"], "held")
         self.assertFalse(status["reader"]["self"])
         self.assertFalse(status["reader"]["live"])
+
+    # 11. The datum a bounded run's deliberate stop is read from.
+
+    def test_status_reports_this_sessions_own_release_as_such(self) -> None:
+        # The shape a bounded run leaves behind: this session took the
+        # role by consuming, then gave it up on purpose. The identity the
+        # caller asks under differs, exactly as a hook's does when it
+        # does not inherit the agent shell's AIQ_READER.
+        reader_id = support.release_reader_lease_from_this_session(self.scope)
+
+        status = read_status(self.scope, reader_id=READER_A)
+
+        self.assertEqual(status["reader"]["status"], "released")
+        self.assertFalse(status["reader"]["held"])
+        self.assertFalse(status["reader"]["self"])
+        self.assertEqual(status["reader"]["reader_id"], reader_id)
+        # A release is nobody draining the queue, so it is never live...
+        self.assertFalse(status["reader"]["live"])
+        # ...but the locator proves this session is the one that said so.
+        self.assertTrue(status["reader"]["released_by_self"])
+
+    def test_status_never_reports_a_foreign_release_as_this_sessions(
+        self,
+    ) -> None:
+        def released_on_another_host(scope) -> None:
+            support.release_reader_lease_with_locator(
+                scope,
+                host="other-host",
+                session=os.getsid(0),
+            )
+
+        def released_by_another_session(scope) -> None:
+            support.release_reader_lease_with_locator(
+                scope,
+                host=socket.gethostname(),
+                session=support.dead_session_id(),
+            )
+
+        def released_without_a_locator(scope) -> None:
+            # An explicitly configured identity records no locator, so
+            # nothing ties the release to any particular session.
+            acquire_reader_lease(
+                scope,
+                owner_id="worker",
+                reader_id=READER_B,
+                lease_seconds=60,
+            )
+            release_reader_lease(scope, reader_id=READER_B)
+
+        for index, (name, prepare) in enumerate(
+            (
+                ("on another host", released_on_another_host),
+                ("by another session", released_by_another_session),
+                ("without a locator", released_without_a_locator),
+            )
+        ):
+            with self.subTest(release=name):
+                agent_root = self.root / f"foreign-release-{index}"
+                agent_root.mkdir()
+                scope = resolve_scope(
+                    "agent-root",
+                    cwd=self.root,
+                    agent_root=agent_root,
+                )
+                prepare(scope)
+
+                status = read_status(scope, reader_id=READER_A)
+
+                self.assertEqual(status["reader"]["status"], "released")
+                self.assertFalse(status["reader"]["live"])
+                # Somebody else's release is not this session declaring
+                # anything, so the gate it feeds keeps blocking.
+                self.assertFalse(status["reader"]["released_by_self"])
 
 
 class ReaderLeaseScopeTest(unittest.TestCase):

@@ -1783,13 +1783,16 @@ def gate_stop_hook(
     stderr line naming the parked count — instead of full silence.
     ``None`` (silent allow) means nothing runnable and nothing parked.
 
-    Runnable work obligates the session that may drain it. When the
-    scope's reader lease is held by a demonstrably different and still
-    live session, this one is a writer only: it returns ``(False,
-    notice)`` and stops freely. Every other reading of the lease --
-    self-held, absent, expired, released, or held by a session proved
-    dead -- blocks exactly as before, because none of them names a live
-    reader who will do the work. That bias is deliberate: agent
+    Runnable work obligates the session that may drain it, so two
+    readings of the reader lease stand the gate down, both returning
+    ``(False, notice)``. The lease is held by a demonstrably different
+    and still live session, so this one is a writer only; or this very
+    session released the role, the explicit recorded act by which a
+    bounded run -- one task, or a fixed batch -- says it finished on
+    purpose. Every other reading -- self-held, absent, expired, released
+    by somebody else, or held by a session proved dead -- blocks exactly
+    as before, because none of them names a live reader who will do the
+    work nor this session declining it. That bias is deliberate: agent
     harnesses can give each shell invocation its own POSIX session, so
     leases outlive their sessions routinely, and treating an abandoned
     one as an active reader would silently retire the gate.
@@ -1894,11 +1897,13 @@ def gate_stop_hook(
     # only for a holder *proved* to be a different session that is still
     # alive: the lease is held, its holder recorded a locator naming this
     # host, that session still exists, and it is not this process's own.
-    # Every other reading -- no lease, an expired or released one, one
-    # left behind by a dead session, one whose holder recorded no locator
-    # because the identity was configured explicitly -- means nothing
-    # proves another session is draining this queue, so this session is
-    # still accountable for the work and must block. Proof, not absence
+    # Every other reading -- no lease, an expired one, one released by
+    # somebody else, one left behind by a dead session, one whose holder
+    # recorded no locator because the identity was configured explicitly
+    # -- means nothing proves another session is draining this queue, so
+    # this session is still accountable for the work and must block. The
+    # sole exception is this session's own release, handled just below.
+    # Proof, not absence
     # of doubt, is the standard: a hook process does not inherit the
     # agent shell's environment, so this gate can derive a different
     # reader identity than the CLI that took the lease, and reading its
@@ -1915,6 +1920,25 @@ def gate_stop_hook(
             False,
             f"AIQ: not blocking: runnable work remains ({summary}) but "
             f'reader "{reader.get("reader_id")}" holds the reader lease'
+            f"{parked_note} — aiq reader status",
+        )
+    # The other way a session is not accountable for the rest of the
+    # queue: it said so. Releasing the reader role is an explicit,
+    # recorded act meaning "I am no longer draining this queue", which is
+    # exactly the signal a bounded run -- one task, or a fixed batch --
+    # needs to finish without the gate reading its deliberate stop as an
+    # abandonment. Honoring it needs the same proof as standing down for
+    # a foreign reader, and for the same reason: only a release whose
+    # recorded holder locator names this host and this session is this
+    # session declaring anything. A release by anyone else, and a release
+    # under an explicitly configured identity that recorded no locator,
+    # keeps blocking. A patched or older status shape without the datum
+    # reads falsy and therefore blocks too.
+    if reader.get("released_by_self"):
+        return (
+            False,
+            f"AIQ: not blocking: runnable work remains ({summary}) but "
+            "this session released the reader role"
             f"{parked_note} — aiq reader status",
         )
     # Make the single block line actionable: name up to the first three

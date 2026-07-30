@@ -8,6 +8,19 @@ effects documents, capability contracts, and integration manifests.
 
 ## [Unreleased]
 
+### Added
+
+- `aiq reader release` is now the explicit signal that a session finished a
+  bounded run on purpose. When the scope's reader lease is `released` and its
+  recorded holder locator proves this very session released it, the `Stop`
+  completion gate stops blocking and exits 0 with one notice —
+  `AIQ: not blocking: runnable work remains (1 ready task) but this session
+  released the reader role — aiq reader status` — so running a single task or a
+  fixed batch ends cleanly with ready work deliberately left behind. `status`
+  carries the same datum as `reader.released_by_self`. A release by any other
+  session, and a release under an explicitly configured identity that records
+  no locator, keep blocking exactly as before.
+
 ### Changed
 
 - The packaged agent bootstrap (`AGENTS.md`) now covers the reader lease: one

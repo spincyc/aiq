@@ -397,7 +397,7 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 | `tasks` | Effective task-state counts keyed by every task state |
 | `project` | The journal's [project label](#project-label) |
 | `claims` | `active`: unreleased, unexpired message and task leases |
-| `reader` | The [Reader lease](#reader-lease) object reduced to `status`, `held`, `self`, `owner_id`, `reader_id`, and `expires_at`, read from this same snapshot, plus `live` |
+| `reader` | The [Reader lease](#reader-lease) object reduced to `status`, `held`, `self`, `owner_id`, `reader_id`, and `expires_at`, read from this same snapshot, plus `live` and `released_by_self` |
 | `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, `title`, and `created_at` |
 | `blocked` | At most five blocked tasks in the same order, each with only `task_id`, `priority`, `title`, and `blocked_by` — the failed prerequisite task IDs causing the block, empty for a directly blocked task |
 | `scope` | The resolved [Scope](#scope) object |
@@ -419,8 +419,40 @@ dead, which reads as `stale` rather than `held`), `expired`, `released`, a
 holder that recorded no locator because its identity was configured
 explicitly, a holder on another host, and a holder occupying this very
 session. Unprovable foreignness therefore never stands a gate down.
+`reader.released_by_self` answers the complementary question — did *this*
+session give the role up on purpose? — under the same discipline. It is true
+only when the lease is `released` and its recorded holder locator names this
+host and this process's own POSIX session. A release by anyone else, and a
+release under an explicitly configured identity that recorded no locator, read
+false. The two fields are mutually exclusive: a lease cannot be both `held` and
+`released`.
 Human-readable `ready` and `blocked` lines render the task reference
 as `[label: TASK-19]`; the `blocked by` causes stay bare IDs.
+
+### Drain stop predicates
+
+`status --json` carries everything a bounded or exhaustive run needs to decide
+whether to stop, without parsing any prose:
+
+| Stop condition | Predicate |
+|---|---|
+| Queue empty | `tasks.ready == 0` and `tasks.blocked == 0` |
+| Everything remaining is blocked | `tasks.ready == 0` and `tasks.blocked > 0` |
+| Nothing runnable at all | `tasks.ready == 0` and `claims.active == 0` and `messages.received == 0` |
+
+`tasks.ready` counts effective ready state, so it is exactly what `dequeue` may
+lease next; `tasks.blocked` counts tasks that cannot become ready without a new
+decision, and the bounded `blocked` array names up to five of them with the
+failed prerequisite IDs in `blocked_by`. A drain loop therefore ends on
+`tasks.ready == 0` and reads `tasks.blocked` to say which of the two ends it
+reached.
+
+An empty `dequeue` reports the same exhaustion in the drain command itself: exit
+0 with `items: []` and `reader_acquired: false`. Consuming nothing takes no
+reader role — the lease stays `absent` — so polling `dequeue` never makes an
+idle session the reader, and an empty result is never confusable with a refusal
+(a foreign live holder fails with [`reader_held`](errors.md) and exit 4
+instead).
 
 ## Reader role
 
@@ -721,17 +753,35 @@ Runnable work obligates the session that may drain it, so the gate follows
 the [reader lease](#reader-lease). It derives its own reader identity exactly
 as the CLI does — configuration or `AIQ_READER`, defaulting to the host and
 POSIX session id — and reads the lease from the same snapshot as the counts.
-Only one reading stands the gate down: `reader.self` false with `reader.live`
-true, meaning the role is held by a session proved to be alive, on this host,
-and not this process's own. That session is a writer only, and it stops with
-exit 0 and one stderr notice naming the holder, for example
+Exactly two readings stand the gate down, each with exit 0 and one stderr
+notice.
+
+The first is `reader.self` false with `reader.live` true: the role is held by a
+session proved to be alive, on this host, and not this process's own. That
+session is a writer only, and its notice names the holder, for example
 `AIQ: not blocking: runnable work remains (1 ready task) but reader
 "host-4242" holds the reader lease — aiq reader status`.
+
+The second is `reader.released_by_self` true — the release-as-completion
+signal. `aiq reader release` means "I am no longer draining this queue", so a
+session that took the role and then gave it back has explicitly and durably
+recorded that it finished on purpose. Its notice is
+`AIQ: not blocking: runnable work remains (1 ready task) but this session
+released the reader role — aiq reader status`.
+This is what makes a bounded run — one task, or a fixed batch — end cleanly
+with ready work deliberately left behind, instead of absorbing a spurious
+block. The notice still names the remaining work, so nothing is hidden. The
+signal is a recorded act, never an ambient flag: it must be the lease this
+session itself released, proved by the recorded holder locator exactly as
+`reader.live` is proved, so a release by any other session is not this session
+declaring anything.
+
 Every other reading blocks exactly as above: the caller holding the lease
-itself, no lease at all, an expired or released lease, a lease whose holder
-recorded no locator — which is every explicitly configured `reader` or
-`AIQ_READER` identity — a holder on another host, a holder occupying this
-same session, and — deliberately — a lease whose holder is provably dead.
+itself, no lease at all, an expired lease, a lease released by somebody else,
+a lease whose holder recorded no locator — which is every explicitly configured
+`reader` or `AIQ_READER` identity, releases included — a holder on another
+host, a holder occupying this same session, and — deliberately — a lease whose
+holder is provably dead.
 The bias is conservative because a harness may give each shell invocation its
 own POSIX session, so leases outlive their sessions routinely; honoring an
 abandoned one would silently stop enforcing completion. Proof of foreignness,
@@ -751,6 +801,26 @@ exits 0 silently. The gate fails open: any error on the gate path
 (unresolvable scope, invalid payload, locked or unreadable journal) exits 0
 with a single stderr diagnostic, so an AIQ defect never blocks stopping —
 the inverse of capture, which fails visibly with exit 1.
+
+### Bounded and exhaustive run modes
+
+Three run shapes follow from the gate's two stand-down readings and the
+[drain stop predicates](#drain-stop-predicates). Each is a command sequence
+with one machine-readable stop predicate; none needs prose parsing, and none
+needs a flag the gate does not already honor.
+
+| Mode | Sequence | Stop predicate |
+|---|---|---|
+| Run one task, then stop | `dequeue` → settle with `task done` → `reader release` | one settled task, then `reader.status == "released"` with `reader.released_by_self` true |
+| Run N tasks, then stop | repeat `dequeue` → `task done` until N settled or `items == []` → `reader release` | N settled or `items == []`, then the same released reading |
+| Run until exhausted | repeat `dequeue` → `task done` while `items != []` | `items == []`; `status --json` then says which end: `tasks.blocked == 0` is queue empty, `tasks.blocked > 0` is everything remaining blocked |
+
+The first two are bounded, so they end with ready work still queued, and the
+`reader release` is what tells the gate that is deliberate. The third ends with
+nothing ready, so the gate is satisfied on the counts alone and the release is
+optional hygiene rather than a signal. In every mode `reader release` leaves
+held claims untouched: settle or release each claim on its own, because
+`tasks.ready == 0` with `claims.active > 0` still blocks.
 
 ## Post-upgrade reconciliation
 

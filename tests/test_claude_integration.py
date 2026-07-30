@@ -965,6 +965,57 @@ class ClaudeIntegrationTest(unittest.TestCase):
                 "aiq reader status\n",
             )
 
+    def test_stop_gate_stands_down_after_this_session_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._runnable_repository(Path(temporary_directory))
+            scope = resolve_scope("repo", cwd=repository)
+            # Without the release the gate blocks: ready work remains and
+            # nothing says this session is done with it.
+            blocking_status, blocking_errors = self._run_gate(repository)
+            # The bounded run's deliberate stop: the role this session
+            # took is handed back explicitly.
+            support.release_reader_lease_from_this_session(scope)
+
+            status, errors = self._run_gate(repository)
+
+            self.assertEqual(blocking_status, 2)
+            self.assertIn(
+                "AIQ: runnable work remains: 1 ready task", blocking_errors
+            )
+            # An explicit release is this session declaring its batch
+            # finished, so it stops with one exit-0 notice instead.
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                errors,
+                "AIQ: not blocking: runnable work remains (1 ready task) "
+                "but this session released the reader role — "
+                "aiq reader status\n",
+            )
+
+    def test_stop_gate_release_notice_is_one_sanitized_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._initialized_repository(
+                Path(temporary_directory)
+            )
+            support.initialize_repo_journal(repository)
+            scope = resolve_scope("repo", cwd=repository)
+            enqueue_task(
+                scope,
+                title="Ship\nthe\treport",
+                owner_id="gate-test",
+            )
+            support.release_reader_lease_from_this_session(scope)
+
+            status, errors = self._run_gate(repository)
+
+            self.assertEqual(status, 0)
+            # The notice names no task titles, so nothing hostile can
+            # reach it; the boundary sanitizes it to one line regardless.
+            self.assertEqual(len(errors.splitlines()), 1)
+            self.assertTrue(errors.endswith("\n"))
+            for character in ("\t", "\r"):
+                self.assertNotIn(character, errors)
+
     def test_stop_gate_blocks_whenever_no_live_reader_holds_the_lease(
         self,
     ) -> None:
@@ -988,6 +1039,22 @@ class ClaudeIntegrationTest(unittest.TestCase):
                 lease_seconds=3600,
             )
             release_reader_lease(scope, reader_id=CONFIGURED_READER)
+
+        def released_by_another_session(scope: object) -> None:
+            # A stranger's deliberate release says nothing about this
+            # session, which is still accountable for the queue.
+            support.release_reader_lease_with_locator(
+                scope,
+                host=socket.gethostname(),
+                session=support.dead_session_id(),
+            )
+
+        def released_on_another_host(scope: object) -> None:
+            support.release_reader_lease_with_locator(
+                scope,
+                host="other-host",
+                session=os.getsid(0),
+            )
 
         def dead_holder(scope: object) -> None:
             support.hold_reader_lease_from_dead_session(scope)
@@ -1024,16 +1091,21 @@ class ClaudeIntegrationTest(unittest.TestCase):
             )
 
         # None of these proves a live reader other than this session will
-        # do the work, so the session that is stopping stays accountable
-        # for it. The dead holder and the unlocated one are the
-        # load-bearing cases: an agent harness leaves abandoned leases
-        # behind routinely, and a configured identity names a holder that
-        # may well be this very session, so honoring either would
-        # silently retire the gate.
+        # do the work, nor is any of them this session declining it, so
+        # the session that is stopping stays accountable. The dead holder
+        # and the unlocated one are the load-bearing cases: an agent
+        # harness leaves abandoned leases behind routinely, and a
+        # configured identity names a holder that may well be this very
+        # session, so honoring either would silently retire the gate. The
+        # three releases are the same discipline applied to the
+        # stand-down signal: only a release this session can be shown to
+        # have made counts as this session declaring its batch finished.
         for lease, prepare in (
             ("absent", absent),
             ("expired", expired),
             ("released", released),
+            ("released by another session", released_by_another_session),
+            ("released on another host", released_on_another_host),
             ("dead holder", dead_holder),
             ("unlocated holder", unlocated_holder),
             ("holder on another host", holder_on_another_host),

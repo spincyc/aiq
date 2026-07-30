@@ -698,6 +698,182 @@ class IntegrationCliTests(unittest.TestCase):
             "AIQ: runnable work remains: 1 ready task", blocked.stderr
         )
 
+    def test_run_one_task_then_stop_ends_with_an_exit_zero_notice(
+        self,
+    ) -> None:
+        """Mode 1 end to end: acquire, settle, release, stop.
+
+        The whole point of the release-as-completion signal is that ready
+        work is deliberately left behind, so this queues two tasks and
+        runs exactly one. Every step is a real CLI process in this POSIX
+        session, which is what records the holder locator the gate later
+        matches against its own.
+        """
+
+        support.initialize_repo_journal(self.repository)
+        first = self.assert_json_success(
+            self.run_aiq("enqueue", "Run me", "--json")
+        )
+        self.assert_json_success(
+            self.run_aiq("enqueue", "Leave me queued", "--json")
+        )
+        stop_payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session",
+            "cwd": str(self.repository),
+        }
+
+        # Two ready tasks and no reader: the gate holds this session.
+        before = self.receive_stop(stop_payload)
+        self.assertEqual(before.returncode, 2)
+        self.assertIn(
+            "AIQ: runnable work remains: 2 ready tasks", before.stderr
+        )
+
+        # Step 1: consuming one task acquires the reader role.
+        dequeued = self.assert_json_success(
+            self.run_aiq("dequeue", "--owner", "mode-one", "--json")
+        )
+        items = dequeued["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["task"]["task_id"], first["task_id"])
+        self.assertTrue(dequeued["reader_acquired"])
+
+        # Step 2: settle it.
+        settled = self.assert_json_success(
+            self.run_aiq(
+                "task",
+                "done",
+                first["task_id"],
+                "--summary",
+                "ran exactly one task",
+                "--owner",
+                "mode-one",
+                "--json",
+            )
+        )
+        self.assertEqual(settled["tasks"][0]["state"], "done")
+
+        # One ready task remains and the role is still held, so the gate
+        # would still block: the release, not the settle, is the signal.
+        held = self.receive_stop(stop_payload)
+        self.assertEqual(held.returncode, 2)
+        self.assertIn(
+            "AIQ: runnable work remains: 1 ready task", held.stderr
+        )
+
+        # Step 3: declare the bounded batch finished.
+        released = self.assert_json_success(self.run_aiq("reader", "release", "--json"))
+        self.assertEqual(released["status"], "released")
+        self.assertFalse(released["replayed"])
+        self.assertEqual(released["reader"]["status"], "released")
+
+        # Step 4: stop. Exit 0, one notice, ready work honestly named.
+        stopped = self.receive_stop(stop_payload)
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        self.assertEqual(stopped.stdout, "")
+        self.assertEqual(
+            stopped.stderr,
+            "AIQ: not blocking: runnable work remains (1 ready task) but "
+            "this session released the reader role — aiq reader status\n",
+        )
+
+    def test_drain_stop_conditions_are_readable_without_parsing_prose(
+        self,
+    ) -> None:
+        """Mode 3's two terminal reads, and the peek that is safe to poll.
+
+        A drain loop stops on "queue empty" or "everything remaining is
+        blocked", and must tell them apart from machine output. Both come
+        off one ``status --json`` read; an empty ``dequeue`` reports the
+        same exhaustion without taking the reader role, so polling it
+        never makes an idle session accountable for the queue.
+        """
+
+        support.initialize_repo_journal(self.repository)
+
+        # An empty queue: exit 0, empty items, and no role taken.
+        empty = self.assert_json_success(self.run_aiq("dequeue", "--json"))
+        self.assertEqual(empty["items"], [])
+        self.assertFalse(empty["reader_acquired"])
+        lease = self.assert_json_success(
+            self.run_aiq("reader", "status", "--json")
+        )
+        self.assertEqual(lease["reader"]["status"], "absent")
+
+        drained = self.assert_json_success(self.run_aiq("status", "--json"))
+        self.assertEqual(drained["tasks"]["ready"], 0)
+        self.assertEqual(drained["tasks"]["blocked"], 0)
+        self.assertEqual(drained["blocked"], [])
+
+        # Everything remaining is blocked: cancelling a prerequisite
+        # leaves a dependent task that is real, unfinished, not runnable,
+        # and never becomes runnable on its own.
+        prerequisite = self.assert_json_success(
+            self.run_aiq("enqueue", "Cannot be done", "--json")
+        )["task_id"]
+        dependent = self.assert_json_success(
+            self.run_aiq(
+                "enqueue", "Waits on it", "--requires", prerequisite, "--json"
+            )
+        )["task_id"]
+        message_id = self.assert_json_success(
+            self.run_aiq("ingest", "--message", "Cancel it", "--json")
+        )["message_id"]
+        claim_id = self.assert_json_success(
+            self.run_aiq(
+                "inbox", "claim", message_id, "--owner", "drainer", "--json"
+            )
+        )["claim"]["claim_id"]
+        applied = self.run_aiq(
+            "inbox",
+            "apply",
+            message_id,
+            "--claim",
+            claim_id,
+            "--effects",
+            "-",
+            "--json",
+            input_text=json.dumps(
+                {
+                    "v": 1,
+                    "expect": {prerequisite: 1},
+                    "effects": [
+                        [
+                            "transition",
+                            prerequisite,
+                            "canceled",
+                            {"reason": "obsolete"},
+                        ]
+                    ],
+                }
+            ),
+        )
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+
+        stalled = self.assert_json_success(self.run_aiq("status", "--json"))
+        # The predicate that separates the two stops: nothing ready, but
+        # blocked tasks remain, each naming what it is waiting on.
+        self.assertEqual(stalled["tasks"]["ready"], 0)
+        self.assertEqual(stalled["tasks"]["blocked"], 1)
+        self.assertEqual(
+            stalled["blocked"],
+            [
+                {
+                    "task_id": dependent,
+                    "priority": 0,
+                    "title": "Waits on it",
+                    "blocked_by": [prerequisite],
+                }
+            ],
+        )
+        # And dequeue agrees: nothing to lease, so the loop stops either
+        # way, but only status says which of the two ends it reached.
+        stalled_dequeue = self.assert_json_success(
+            self.run_aiq("dequeue", "--owner", "drainer", "--json")
+        )
+        self.assertEqual(stalled_dequeue["items"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
