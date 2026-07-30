@@ -307,7 +307,11 @@ between 1 and 1000) in acquisition order. `--owner`, `--resource`, and
 
 ## Status
 
-The status dashboard is read-only and reads one journal snapshot:
+The status dashboard reads one journal snapshot and changes no work state.
+Like every command that opens the journal, opening a journal whose stored
+schema is older than the installed version first runs the pending schema
+migration with an automatic pre-migration backup; deep semantic
+verification stays explicit in `aiq journal check`:
 
 ```text
 aiq status [--scope SCOPE] [--cwd PATH] [--json]
@@ -566,17 +570,19 @@ resolves to user scope, which keeps auto-initialization, as do explicit
 `aiq ingest` and the generic integration.
 
 The `Stop` completion gate enforces the AGENTS.md practice that no required
-runnable work may remain at completion. It performs one read-only journal
-snapshot — a missing journal counts as nothing runnable and creates no
-storage — and blocks with exit 2 and exactly one stderr line, for example
+runnable work may remain at completion. It performs one journal snapshot
+that changes no work state — a missing journal counts as nothing runnable
+and creates no storage, while opening an existing journal at an older
+stored schema first runs the pending migration with an automatic backup —
+and blocks with exit 2 and exactly one stderr line, for example
 `AIQ: runnable work remains: 1 ready task, 1 active claim: TASK-7 "Ship the
-release notes" (ready 2h) — settle finished work: aiq task done TASK-7
+release notes" (open 2h) — settle finished work: aiq task done TASK-7
 --summary TEXT — or: aiq status`,
 when ready tasks, unexpired active claims, or unapplied (`received`)
 messages remain and the payload's `stop_hook_active` loop guard is falsy.
 After the counts, the line names up to the first three ready tasks — task
 ID, double-quoted title truncated to 40 characters, and a coarse ready-age
-such as `(ready 5m)` — and ends with the settle command; with claims or
+such as `(open 5m)`, its age since creation — and ends with the settle command; with claims or
 messages only, it keeps the `— run aiq status` tail. A
 parked `needs_input` message awaits the user, not the agent, and never
 counts as runnable work, but the block line surfaces it: a fragment such as

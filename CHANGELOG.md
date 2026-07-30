@@ -62,6 +62,14 @@ effects documents, capability contracts, and integration manifests.
 
 ### Changed
 
+- Contract prose now states honestly that any command or hook opening a
+  journal whose stored schema is older than the installed version first
+  runs the pending migration with an automatic backup; "never creates
+  storage" is scoped to the missing-journal case. The Stop-gate task
+  fragment's age is labeled `(open 2h)` — age since task creation — and
+  the injected-wrapper skip requires the prompt to be exactly one whole
+  block, so wrapper-sandwiched user text is captured, not dropped.
+
 - The `Stop` completion gate now surfaces parked `needs_input` messages:
   a block line appends a fragment such as
   `; 2 parked messages await user input` before the settle tail, and with
@@ -76,7 +84,7 @@ effects documents, capability contracts, and integration manifests.
 - The `Stop` completion gate's block line is now actionable: after the
   counts it names up to the first three ready tasks — task ID,
   double-quoted title truncated to 40 characters, and a coarse ready-age
-  such as `(ready 5m)` — and ends with the settle command
+  such as `(open 5m)`, its age since creation — and ends with the settle command
   `aiq task done TASK --summary TEXT`; with claims or messages only, it
   keeps the `— run aiq status` tail. `status --json` ready entries
   additionally carry `created_at`.

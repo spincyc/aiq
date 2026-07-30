@@ -342,7 +342,10 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "Read one bounded work-state snapshot without message content.",
         "aiq status [--json]",
         mutates=False,
-        idempotency="read-only",
+        idempotency=(
+            "changes no work state; opening a journal at an older stored "
+            "schema first runs the pending migration with a backup"
+        ),
     ),
     "task.done": _capability(
         "Settle one or more ready or owned active tasks as done through "

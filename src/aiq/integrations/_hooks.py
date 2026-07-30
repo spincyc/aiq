@@ -171,10 +171,17 @@ def _is_injected_prompt(prompt: str, receive: ReceivePayloadSpec) -> bool:
         receive.injected_prefixes
     ):
         return True
-    return any(
-        stripped.startswith(f"<{tag}>") and stripped.endswith(f"</{tag}>")
-        for tag in receive.injected_wrappers
-    )
+    for tag in receive.injected_wrappers:
+        opening, closing = f"<{tag}>", f"</{tag}>"
+        if not (
+            stripped.startswith(opening) and stripped.endswith(closing)
+        ):
+            continue
+        # Exactly one whole block: the closing tag may appear only at the
+        # very end, else user content could hide between wrapper blocks.
+        if stripped.index(closing) == len(stripped) - len(closing):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -1876,7 +1883,7 @@ def gate_stop_hook(
         fragment = f'{task_id} "{title}"'
         age = _coarse_age(entry.get("created_at"), now)
         if age is not None:
-            fragment += f" (ready {age})"
+            fragment += f" (open {age})"
         fragments.append(fragment)
     parked_note = (
         f"; {_parked_fragment(parked_messages)}" if parked_messages else ""

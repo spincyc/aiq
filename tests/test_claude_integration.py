@@ -466,11 +466,38 @@ class ClaudeIntegrationTest(unittest.TestCase):
                 ),
                 git_executable=self.git_executable(),
             )
+            sandwiched = receive_hook(
+                json.dumps(
+                    {
+                        **base,
+                        "prompt": (
+                            "<system-reminder>a</system-reminder>\n"
+                            "please fix the login bug today\n"
+                            "<system-reminder>b</system-reminder>"
+                        ),
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
+            adjacent = receive_hook(
+                json.dumps(
+                    {
+                        **base,
+                        "prompt": (
+                            "<system-reminder>a</system-reminder>"
+                            "<system-reminder>b</system-reminder>"
+                        ),
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
 
             self.assertTrue(plain["created"])
             self.assertTrue(mention["created"])
             self.assertTrue(unclosed["created"])
-            self.assertEqual(check_journal(scope)["messages"], 3)
+            self.assertTrue(sandwiched["created"])
+            self.assertTrue(adjacent["created"])
+            self.assertEqual(check_journal(scope)["messages"], 5)
 
     def test_receive_hook_skips_uninitialized_repo_without_storage(
         self,

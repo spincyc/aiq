@@ -90,11 +90,11 @@ routes to the user journal, which still auto-initializes on capture.
 
 The installed command is also registered under the `Stop` event. When Claude
 Code is about to finish a turn, the hook resolves the AIQ scope from the
-event's absolute `cwd` and takes one read-only journal snapshot. If ready
+event's absolute `cwd` and takes one journal snapshot that changes no work state (an existing journal at an older stored schema first runs the pending migration with an automatic backup). If ready
 tasks, unexpired active claims, or unapplied (`received`) messages remain,
 it exits 2 with a single stderr line such as
 `AIQ: runnable work remains: 1 ready task, 1 active claim: TASK-7 "Ship the
-release notes" (ready 2h) — settle finished work: aiq task done TASK-7
+release notes" (open 2h) — settle finished work: aiq task done TASK-7
 --summary TEXT — or: aiq status`.
 After the counts, the line names up to the first three ready tasks — task ID,
 double-quoted title truncated to 40 characters, and a coarse ready-age — and

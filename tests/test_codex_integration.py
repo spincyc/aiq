@@ -888,11 +888,44 @@ class CodexIntegrationTest(unittest.TestCase):
                     True,
                     "AIQ: runnable work remains: 2 ready tasks, "
                     '1 active claim: TASK-7 "Ship the release notes" '
-                    f'(ready 2h); TASK-9 "{truncated}" '
+                    f'(open 2h); TASK-9 "{truncated}" '
                     "— settle finished work: aiq task done TASK-7 "
                     "--summary TEXT — or: aiq status",
                 ),
             )
+
+    def test_stop_gate_names_at_most_three_ready_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = support.init_repository(root / "repository")
+            status = {
+                "messages": {"received": 0, "needs_input": 0},
+                "tasks": {"ready": 4},
+                "claims": {"active": 0},
+                "ready": [
+                    {"task_id": f"TASK-{number}", "priority": 1, "title": f"t{number}"}
+                    for number in range(1, 5)
+                ],
+            }
+
+            with patch("aiq.queue.read_status", return_value=status):
+                reason = gate_hook(
+                    json.dumps(
+                        {
+                            "hook_event_name": "Stop",
+                            "session_id": "session",
+                            "cwd": str(repository),
+                        }
+                    ),
+                    git_executable=self.git_executable(),
+                )
+
+            self.assertIsNotNone(reason)
+            blocking, line = reason
+            self.assertTrue(blocking)
+            for named in ("TASK-1", "TASK-2", "TASK-3"):
+                self.assertIn(f'{named} "', line)
+            self.assertNotIn("TASK-4", line)
 
     def test_stop_gate_escapes_and_truncates_hostile_titles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
