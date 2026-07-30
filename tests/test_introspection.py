@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import contextlib
-import io
 import json
 import os
 from pathlib import Path
@@ -9,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from aiq.cli import main
+import support
 from aiq.journal import JournalError, ingest_message, resolve_scope
 from aiq.queue import (
     _now_us,
@@ -507,26 +505,17 @@ class ListClaimsTests(IntrospectionTestCase):
 
 
 class IntrospectionCliTests(IntrospectionTestCase):
-    def run_cli(self, *arguments: str) -> tuple[int, str, str]:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with (
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-        ):
-            code = main(
-                [
-                    *arguments,
-                    "--scope",
-                    "agent-root",
-                    "--agent-root",
-                    str(self.agent_root),
-                    "--cwd",
-                    str(self.root),
-                    "--no-repo-config",
-                ]
-            )
-        return code, stdout.getvalue(), stderr.getvalue()
+    def run_cli(self, *arguments: str) -> support.CliResult:
+        return support.run_cli(
+            *arguments,
+            "--scope",
+            "agent-root",
+            "--agent-root",
+            str(self.agent_root),
+            "--cwd",
+            str(self.root),
+            "--no-repo-config",
+        )
 
     def test_task_explain_json_and_human(self) -> None:
         first, second = self.create_pair()

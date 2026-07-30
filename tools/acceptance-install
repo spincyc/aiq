@@ -13,7 +13,7 @@ stage() {
   printf '==> %s\n' "$1"
 }
 
-for command_name in git pipx python3 sh; do
+for command_name in git pipx pyproject-build python3 sh; do
   command_path=$(command -v "$command_name" 2>/dev/null || true)
   if [ -z "$command_path" ] || [ ! -x "$command_path" ]; then
     fail "missing required command: $command_name"
@@ -41,6 +41,13 @@ if not ((3, 11) <= sys.version_info[:2] < (3, 15)):
         f"Python 3.11-3.14 is required; found {sys.version.split()[0]}"
     )
 PY
+
+stage "run installed acceptance tests"
+(
+  cd "$repo_dir"
+  AIQ_INSTALLED_ACCEPTANCE=1 PYTHONDONTWRITEBYTECODE=1 \
+    "$python_command" -m unittest discover -s tests -p test_installed_acceptance.py
+)
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/aiq-acceptance.XXXXXX")
 case "$test_root" in

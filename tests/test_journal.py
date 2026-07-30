@@ -15,6 +15,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from support import run_git
 from aiq import journal as journal_module
 from aiq.journal import (
     JournalError,
@@ -27,16 +28,6 @@ from aiq.journal import (
     list_inbox,
     resolve_scope,
 )
-
-
-def run_git(cwd: Path, *arguments: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(cwd), *arguments],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
 
 
 class JournalTest(unittest.TestCase):

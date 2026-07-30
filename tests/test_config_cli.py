@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import unittest
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOT = REPOSITORY_ROOT / "src"
+import support
 
 
 class ConfigCliTests(unittest.TestCase):
@@ -20,61 +15,33 @@ class ConfigCliTests(unittest.TestCase):
         self.home = self.root / "home"
         self.config_home = self.root / "config"
         self.state_home = self.root / "state"
-        self.repository = self.root / "repository"
         self.home.mkdir()
         self.config_home.mkdir()
         self.state_home.mkdir()
-        self.repository.mkdir()
-        subprocess.run(
-            ["git", "init", "--quiet", str(self.repository)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        self.repository = support.init_repository(self.root / "repository")
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
     def environment(self, **updates: str) -> dict[str, str]:
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("AIQ_")
-            and key
-            not in {
-                "GIT_COMMON_DIR",
-                "GIT_DIR",
-                "GIT_WORK_TREE",
-                "PYTHONPATH",
-                "XDG_CONFIG_HOME",
-                "XDG_STATE_HOME",
-            }
-        }
-        environment.update(
-            {
-                "HOME": str(self.home),
-                "PYTHONPATH": str(SOURCE_ROOT),
-                "XDG_CONFIG_HOME": str(self.config_home),
-                "XDG_STATE_HOME": str(self.state_home),
-            }
+        return support.scrubbed_environment(
+            HOME=str(self.home),
+            PYTHONPATH=str(support.SOURCE_ROOT),
+            XDG_CONFIG_HOME=str(self.config_home),
+            XDG_STATE_HOME=str(self.state_home),
+            **updates,
         )
-        environment.update(updates)
-        return environment
 
     def run_aiq(
         self,
         *arguments: str,
         environment: dict[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+    ) -> support.CliResult:
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=self.repository,
-            env=environment or self.environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+            environment=environment or self.environment(),
         )
 
     def write_user_config(self, content: str) -> Path:
@@ -90,7 +57,7 @@ class ConfigCliTests(unittest.TestCase):
 
     def assert_json_error(
         self,
-        result: subprocess.CompletedProcess[str],
+        result: support.CliResult,
         *,
         code: str,
     ) -> dict[str, object]:

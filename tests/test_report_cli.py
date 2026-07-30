@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import contextlib
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
+import support
 from aiq import __version__
-from aiq.cli import main
 from aiq.journal import ingest_message, resolve_scope
 
 
@@ -33,24 +30,11 @@ class ReportCliTest(unittest.TestCase):
         self.origin_a = self.root / "origin-a"
         self.origin_b = self.root / "origin-b"
         for repository in (self.target, self.origin_a, self.origin_b):
-            repository.mkdir()
-            subprocess.run(
-                ["git", "init", "--quiet", str(repository)],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("AIQ_", "GIT_"))
-        }
-        environment.update(
-            {
-                "HOME": str(self.root / "home"),
-                "XDG_CONFIG_HOME": str(self.root / "config"),
-                "XDG_STATE_HOME": str(self.root / "state"),
-            }
+            support.init_repository(repository)
+        environment = support.scrubbed_environment(
+            HOME=str(self.root / "home"),
+            XDG_CONFIG_HOME=str(self.root / "config"),
+            XDG_STATE_HOME=str(self.root / "state"),
         )
         patcher = patch.dict(os.environ, environment, clear=True)
         patcher.start()
@@ -66,17 +50,8 @@ class ReportCliTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def run_cli(self, *arguments: str) -> tuple[int, str, str]:
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with (
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-        ):
-            try:
-                code = main(list(arguments))
-            except SystemExit as error:
-                code = int(error.code or 0)
-        return code, stdout.getvalue(), stderr.getvalue()
+    def run_cli(self, *arguments: str) -> support.CliResult:
+        return support.run_cli(*arguments)
 
     def report(
         self,
@@ -85,7 +60,7 @@ class ReportCliTest(unittest.TestCase):
         detail: str = "Traceback from aiq ingest --stdin with empty input",
         origin: Path | None = None,
         to: bool = True,
-    ) -> tuple[int, str, str]:
+    ) -> support.CliResult:
         arguments = [
             "report",
             "--summary", summary,
@@ -107,7 +82,7 @@ class ReportCliTest(unittest.TestCase):
 
     def assert_error(
         self,
-        result: tuple[int, str, str],
+        result: support.CliResult,
         exit_code: int,
         code: str,
     ) -> None:
@@ -198,14 +173,7 @@ class ReportCliTest(unittest.TestCase):
         self.assertEqual(len(self.target_tasks()), 1)
 
     def test_to_override_wins_over_environment(self) -> None:
-        decoy = self.root / "decoy"
-        decoy.mkdir()
-        subprocess.run(
-            ["git", "init", "--quiet", str(decoy)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        decoy = support.init_repository(self.root / "decoy")
         with patch.dict(os.environ, {"AIQ_DEV_REPORT_REPO": str(decoy)}):
             code, stdout, stderr = self.report()
 

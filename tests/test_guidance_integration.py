@@ -4,11 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import unittest
 
+import support
 from aiq.integrations.guidance import (
     BEGIN_MARKER,
     END_MARKER,
@@ -464,29 +463,18 @@ class GuidanceIntegrationTests(unittest.TestCase):
             b"\xff\xfe not unicode text",
         )
 
-    def run_aiq(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("AIQ_")
-            and key not in {"PYTHONPATH", "XDG_STATE_HOME"}
-        }
-        environment.update(
-            {
-                "HOME": str(self.home),
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPATH": str(SOURCE_ROOT),
-                "XDG_STATE_HOME": str(self.state_home),
-            }
+    def run_aiq(self, *arguments: str) -> support.CliResult:
+        environment = support.scrubbed_environment(
+            HOME=str(self.home),
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(SOURCE_ROOT),
+            XDG_STATE_HOME=str(self.state_home),
         )
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=self.root,
-            env=environment,
-            text=True,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environment=environment,
         )
 
     def test_cli_requires_an_explicit_absolute_target(self) -> None:

@@ -5,17 +5,15 @@ import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
 
+import support
 from aiq.journal import SCHEMA_VERSION
 
 
-SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "schema-v1.sql"
 
 
@@ -42,53 +40,33 @@ class ReconcileCliTests(unittest.TestCase):
             self.bin_directory,
         ):
             directory.mkdir()
-        self.launcher = self.bin_directory / "aiq"
-        self.launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        self.launcher.chmod(0o755)
-        if shutil.which("git") is None:
-            self.fail("test requires Git")
+        self.launcher = support.write_launcher(self.bin_directory / "aiq")
+        support.git_executable()
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
     def environment(self) -> dict[str, str]:
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("AIQ_", "GIT_"))
-            and key
-            not in {
-                "CODEX_HOME",
-                "PYTHONPATH",
-                "XDG_CONFIG_HOME",
-                "XDG_STATE_HOME",
-            }
-        }
-        environment.update(
-            {
-                "CODEX_HOME": str(self.codex_home),
-                "HOME": str(self.home),
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPATH": str(SOURCE_ROOT),
-                "XDG_STATE_HOME": str(self.state_home),
-            }
+        return support.scrubbed_environment(
+            drop={"XDG_CONFIG_HOME"},
+            CODEX_HOME=str(self.codex_home),
+            HOME=str(self.home),
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(support.SOURCE_ROOT),
+            XDG_STATE_HOME=str(self.state_home),
         )
-        return environment
 
-    def run_aiq(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+    def run_aiq(self, *arguments: str) -> support.CliResult:
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=self.root,
-            env=self.environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+            environment=self.environment(),
         )
 
     def json_payload(
         self,
-        result: subprocess.CompletedProcess[str],
+        result: support.CliResult,
         *,
         returncode: int = 0,
     ) -> dict[str, object]:

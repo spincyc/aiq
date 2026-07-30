@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import sqlite3
 import stat
 import subprocess
@@ -14,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import support
 from aiq.integrations import _hooks as hooks_engine
 from aiq.integrations import codex as codex_module
 from aiq.integrations.codex import (
@@ -33,25 +33,10 @@ from aiq.journal import check_journal, resolve_scope
 
 class CodexIntegrationTest(unittest.TestCase):
     def git_executable(self) -> Path:
-        discovered = shutil.which("git")
-        self.assertIsNotNone(discovered)
-        return Path(discovered).absolute()
+        return support.git_executable()
 
     def fixture(self, root: Path) -> tuple[dict[str, str], Path]:
-        home = root / "home"
-        state = root / "state"
-        codex_home = root / "codex home"
-        launcher = root / "bin" / "aiq tool"
-        launcher.parent.mkdir(parents=True)
-        launcher.write_text("#!/bin/sh\nexit 0\n")
-        launcher.chmod(0o755)
-        environment = {
-            "HOME": str(home),
-            "XDG_STATE_HOME": str(state),
-            "CODEX_HOME": str(codex_home),
-            "PATH": str(self.git_executable().parent),
-        }
-        return environment, launcher
+        return support.integration_fixture(root, CODEX_HOME="codex home")
 
     def test_print_is_stable_fragment_with_isolated_absolute_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -642,12 +627,7 @@ class CodexIntegrationTest(unittest.TestCase):
     def test_receive_hook_is_idempotent_and_uses_codex_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -701,18 +681,8 @@ class CodexIntegrationTest(unittest.TestCase):
     def test_receive_hook_captures_changed_content_for_same_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
-            other = root / "other"
-            other.mkdir()
-            subprocess.run(
-                ["git", "-C", str(other), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
+            other = support.init_repository(root / "other")
             base = {
                 "hook_event_name": "UserPromptSubmit",
                 "session_id": "session",
@@ -751,12 +721,7 @@ class CodexIntegrationTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -786,12 +751,7 @@ class CodexIntegrationTest(unittest.TestCase):
     def test_stop_gate_blocks_once_then_respects_loop_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             receive_hook(
                 json.dumps(
                     {
@@ -839,12 +799,7 @@ class CodexIntegrationTest(unittest.TestCase):
     def test_stop_gate_reports_ready_tasks_and_active_claims(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             status = {
                 "messages": {"received": 0, "needs_input": 0},
                 "tasks": {"ready": 2},
@@ -872,12 +827,7 @@ class CodexIntegrationTest(unittest.TestCase):
     def test_stop_gate_ignores_parked_needs_input_messages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             payload = json.dumps(
                 {
                     "hook_event_name": "Stop",
@@ -934,6 +884,7 @@ class CodexIntegrationTest(unittest.TestCase):
                     "main",
                 ],
                 check=True,
+                env={**os.environ, **support.GIT_ISOLATION},
             )
             hostile_directory = root / "hostile"
             hostile_directory.mkdir()

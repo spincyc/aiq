@@ -14,6 +14,11 @@ from typing import NamedTuple
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
+# The class-level setup builds a wheel and an sdist and installs both into
+# fresh virtual environments, which is too slow for the default suite. CI
+# still runs it: tools/acceptance-install sets this variable.
+RUN_VARIABLE = "AIQ_INSTALLED_ACCEPTANCE"
+
 
 class Installation(NamedTuple):
     name: str
@@ -22,6 +27,10 @@ class Installation(NamedTuple):
     console: Path
 
 
+@unittest.skipUnless(
+    os.environ.get(RUN_VARIABLE) == "1",
+    f"heavyweight installed acceptance; set {RUN_VARIABLE}=1 to run",
+)
 class InstalledAcceptanceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

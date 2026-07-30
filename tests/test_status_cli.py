@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import unittest
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+import support
 
 
 class StatusCliTest(unittest.TestCase):
@@ -18,28 +14,13 @@ class StatusCliTest(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self.repository = self.root / "repository"
-        self.repository.mkdir()
-        subprocess.run(
-            ["git", "init", "--quiet", "--initial-branch=main", str(self.repository)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self.environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("AIQ_", "GIT_"))
-            and key not in {"PYTHONPATH", "XDG_CONFIG_HOME", "XDG_STATE_HOME"}
-        }
-        self.environment.update(
-            {
-                "HOME": str(self.home),
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPATH": str(REPOSITORY_ROOT / "src"),
-                "XDG_CONFIG_HOME": str(self.root / "config"),
-                "XDG_STATE_HOME": str(self.root / "state"),
-            }
+        self.repository = support.init_repository(self.root / "repository")
+        self.environment = support.scrubbed_environment(
+            HOME=str(self.home),
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(support.SOURCE_ROOT),
+            XDG_CONFIG_HOME=str(self.root / "config"),
+            XDG_STATE_HOME=str(self.root / "state"),
         )
         self.scope = ("--scope", "repo", "--cwd", str(self.repository))
 
@@ -50,16 +31,13 @@ class StatusCliTest(unittest.TestCase):
         self,
         *arguments: str,
         input_text: str | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+    ) -> support.CliResult:
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=self.repository,
-            env=self.environment,
-            input=input_text,
-            text=True,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environment=self.environment,
+            input_text=input_text,
         )
 
     def ok(

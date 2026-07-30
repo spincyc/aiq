@@ -4,16 +4,16 @@ import json
 import os
 from pathlib import Path
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 
+import support
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOT = REPOSITORY_ROOT / "src"
-CANONICAL_AGENTS = REPOSITORY_ROOT / "AGENTS.md"
+
+SOURCE_ROOT = support.SOURCE_ROOT
+CANONICAL_AGENTS = support.REPOSITORY_ROOT / "AGENTS.md"
 
 
 class IntegrationCliTests(unittest.TestCase):
@@ -28,77 +28,45 @@ class IntegrationCliTests(unittest.TestCase):
         for directory in (
             self.home,
             self.state_home,
-            self.repository,
             self.bin_directory,
         ):
             directory.mkdir()
-        subprocess.run(
-            ["git", "init", "--quiet", str(self.repository)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        self.launcher = self.bin_directory / "aiq"
-        self.launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        self.launcher.chmod(0o755)
-        discovered_git = shutil.which("git")
-        if discovered_git is None:
-            self.fail("test requires Git")
-        self.git_executable = Path(discovered_git).absolute()
+        support.init_repository(self.repository)
+        self.launcher = support.write_launcher(self.bin_directory / "aiq")
+        self.git_executable = support.git_executable()
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
     def environment(self) -> dict[str, str]:
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("AIQ_")
-            and key
-            not in {
-                "CODEX_HOME",
-                "GIT_COMMON_DIR",
-                "GIT_DIR",
-                "GIT_WORK_TREE",
-                "PYTHONPATH",
-                "XDG_CONFIG_HOME",
-                "XDG_STATE_HOME",
-            }
-        }
-        environment.update(
-            {
-                "CODEX_HOME": str(self.codex_home),
-                "HOME": str(self.home),
-                "PATH": (
-                    f"{self.bin_directory}{os.pathsep}"
-                    f"{environment.get('PATH', os.defpath)}"
-                ),
-                "PYTHONPATH": str(SOURCE_ROOT),
-                "XDG_STATE_HOME": str(self.state_home),
-            }
+        return support.scrubbed_environment(
+            drop={"XDG_CONFIG_HOME"},
+            CODEX_HOME=str(self.codex_home),
+            HOME=str(self.home),
+            PATH=(
+                f"{self.bin_directory}{os.pathsep}"
+                f"{os.environ.get('PATH', os.defpath)}"
+            ),
+            PYTHONPATH=str(SOURCE_ROOT),
+            XDG_STATE_HOME=str(self.state_home),
         )
-        return environment
 
     def run_aiq(
         self,
         *arguments: str,
         input_text: str | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+    ) -> support.CliResult:
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=self.repository,
-            env=self.environment(),
-            input=input_text,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+            environment=self.environment(),
+            input_text=input_text,
         )
 
     def assert_json_success(
         self,
-        result: subprocess.CompletedProcess[str],
+        result: support.CliResult | subprocess.CompletedProcess[str],
     ) -> dict[str, object]:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
@@ -127,7 +95,7 @@ class IntegrationCliTests(unittest.TestCase):
         operation: str,
         *,
         include_launcher: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> support.CliResult:
         arguments = ["integration", operation, "codex", "--user"]
         if include_launcher:
             arguments.extend(("--launcher", str(self.launcher)))

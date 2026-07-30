@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import sqlite3
-import subprocess
-import sys
 import tempfile
 import unittest
 
+import support
 from aiq.cli import (
     CONFIG_OUTPUT_COMMANDS,
     _classify_error,
@@ -16,9 +14,6 @@ from aiq.cli import (
     build_parser,
 )
 from aiq.integrations.codex import CodexIntegrationError
-
-
-SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 JSON_COMMAND_PATHS = {
     tuple(name.split("."))
     for name in """
@@ -64,40 +59,19 @@ class CliProtocolTests(unittest.TestCase):
             self.root / "config",
             self.root / "state",
             self.root / "codex",
-            self.repository,
         ):
             path.mkdir()
-        subprocess.run(
-            ["git", "init", "-q", "-b", "main", str(self.repository)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        support.init_repository(self.repository)
+        self.launcher = support.write_launcher(
+            self.root / "bin" / "aiq", mode=0o700
         )
-        self.launcher = self.root / "bin" / "aiq"
-        self.launcher.parent.mkdir()
-        self.launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        self.launcher.chmod(0o700)
-        self.environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("AIQ_", "GIT_"))
-            and key
-            not in {
-                "CODEX_HOME",
-                "PYTHONPATH",
-                "XDG_CONFIG_HOME",
-                "XDG_STATE_HOME",
-            }
-        }
-        self.environment.update(
-            {
-                "CODEX_HOME": str(self.root / "codex"),
-                "HOME": str(self.root / "home"),
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPATH": str(SOURCE_ROOT),
-                "XDG_CONFIG_HOME": str(self.root / "config"),
-                "XDG_STATE_HOME": str(self.root / "state"),
-            }
+        self.environment = support.scrubbed_environment(
+            CODEX_HOME=str(self.root / "codex"),
+            HOME=str(self.root / "home"),
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(support.SOURCE_ROOT),
+            XDG_CONFIG_HOME=str(self.root / "config"),
+            XDG_STATE_HOME=str(self.root / "state"),
         )
         self.scope = (
             "--scope",
@@ -116,16 +90,13 @@ class CliProtocolTests(unittest.TestCase):
         *arguments: str,
         input_text: str | None = None,
         environment: dict[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+    ) -> support.CliResult:
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=self.repository,
-            env=self.environment if environment is None else environment,
-            input=input_text,
-            text=True,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environment=self.environment if environment is None else environment,
+            input_text=input_text,
         )
 
     def ok(
@@ -154,7 +125,7 @@ class CliProtocolTests(unittest.TestCase):
 
     def assert_error(
         self,
-        completed: subprocess.CompletedProcess[str],
+        completed: support.CliResult,
         exit_code: int,
         code: str,
     ) -> None:

@@ -1,17 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import stat
-import subprocess
-import sys
 import tempfile
 import unittest
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOT = REPOSITORY_ROOT / "src"
+import support
 
 
 class PrivacyCliTests(unittest.TestCase):
@@ -36,50 +31,29 @@ class PrivacyCliTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def environment(self) -> dict[str, str]:
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("AIQ_")
-            and key
-            not in {
-                "CODEX_HOME",
-                "GIT_COMMON_DIR",
-                "GIT_DIR",
-                "GIT_WORK_TREE",
-                "PYTHONPATH",
-                "XDG_CONFIG_HOME",
-                "XDG_STATE_HOME",
-            }
-        }
-        environment.update(
-            {
-                "CODEX_HOME": str(self.codex_home),
-                "HOME": str(self.home),
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPATH": str(SOURCE_ROOT),
-                "XDG_CONFIG_HOME": str(self.config_home),
-                "XDG_STATE_HOME": str(self.state_home),
-            }
+        return support.scrubbed_environment(
+            CODEX_HOME=str(self.codex_home),
+            HOME=str(self.home),
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(support.SOURCE_ROOT),
+            XDG_CONFIG_HOME=str(self.config_home),
+            XDG_STATE_HOME=str(self.state_home),
         )
-        return environment
 
     def run_aiq(
         self,
         *arguments: str,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+    ) -> support.CliResult:
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=self.working_directory,
-            env=self.environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+            environment=self.environment(),
         )
 
     def json_success(
         self,
-        completed: subprocess.CompletedProcess[str],
+        completed: support.CliResult,
     ) -> dict[str, object]:
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stderr, "")
@@ -90,7 +64,7 @@ class PrivacyCliTests(unittest.TestCase):
 
     def json_state_conflict(
         self,
-        completed: subprocess.CompletedProcess[str],
+        completed: support.CliResult,
     ) -> dict[str, object]:
         self.assertEqual(completed.returncode, 4, completed)
         self.assertEqual(completed.stdout, "")
@@ -126,7 +100,7 @@ class PrivacyCliTests(unittest.TestCase):
             )
         )
 
-    def destroy_confirm(self, token: str) -> subprocess.CompletedProcess[str]:
+    def destroy_confirm(self, token: str) -> support.CliResult:
         return self.run_aiq(
             "journal",
             "destroy",

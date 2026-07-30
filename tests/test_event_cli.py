@@ -3,13 +3,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import unittest
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+import support
 
 
 class EventCliTest(unittest.TestCase):
@@ -18,52 +15,38 @@ class EventCliTest(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self.environment = os.environ.copy()
-        self.environment.update(
-            {
-                "HOME": str(self.home),
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "XDG_CONFIG_HOME": str(self.root / "config"),
-                "XDG_STATE_HOME": str(self.root / "state"),
-            }
-        )
-        source_path = str(REPOSITORY_ROOT / "src")
-        inherited_python_path = self.environment.get("PYTHONPATH")
-        self.environment["PYTHONPATH"] = (
-            f"{source_path}{os.pathsep}{inherited_python_path}"
-            if inherited_python_path
-            else source_path
+        source_path = str(support.SOURCE_ROOT)
+        inherited_python_path = os.environ.get("PYTHONPATH")
+        self.environment = support.scrubbed_environment(
+            HOME=str(self.home),
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=(
+                f"{source_path}{os.pathsep}{inherited_python_path}"
+                if inherited_python_path
+                else source_path
+            ),
+            XDG_CONFIG_HOME=str(self.root / "config"),
+            XDG_STATE_HOME=str(self.root / "state"),
         )
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
     def repository(self, name: str) -> Path:
-        path = self.root / name
-        path.mkdir()
-        subprocess.run(
-            ["git", "init", "--quiet", "--initial-branch=main", str(path)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        return path
+        return support.init_repository(self.root / name)
 
     def run_aiq(
         self,
         *arguments: str,
         cwd: Path | None = None,
         input_text: str | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+    ) -> support.CliResult:
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=cwd or self.root,
-            env=self.environment,
-            input=input_text,
-            text=True,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environment=self.environment,
+            input_text=input_text,
         )
 
     def event_json(self, document: object) -> str:
@@ -79,7 +62,7 @@ class EventCliTest(unittest.TestCase):
         *,
         command_cwd: Path,
         source: str = "-",
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> support.CliResult:
         input_text = self.event_json(document) if source == "-" else None
         return self.run_aiq(
             "ingest",
@@ -112,7 +95,7 @@ class EventCliTest(unittest.TestCase):
 
     def assert_json_error(
         self,
-        completed: subprocess.CompletedProcess[str],
+        completed: support.CliResult,
         *,
         exit_code: int,
         code: str,

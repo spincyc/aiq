@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import tempfile
 import unittest
 
+import support
 from aiq.integrations import _hooks as hooks_engine
 from aiq.integrations import codex as codex_module
 from aiq.integrations.codex import (
@@ -31,25 +31,10 @@ def _group_with_command(command: object) -> dict:
 
 class HooksEngineTest(unittest.TestCase):
     def git_executable(self) -> Path:
-        discovered = shutil.which("git")
-        self.assertIsNotNone(discovered)
-        return Path(discovered).absolute()
+        return support.git_executable()
 
     def fixture(self, root: Path) -> tuple[dict[str, str], Path]:
-        home = root / "home"
-        state = root / "state"
-        codex_home = root / "codex home"
-        launcher = root / "bin" / "aiq tool"
-        launcher.parent.mkdir(parents=True)
-        launcher.write_text("#!/bin/sh\nexit 0\n")
-        launcher.chmod(0o755)
-        environment = {
-            "HOME": str(home),
-            "XDG_STATE_HOME": str(state),
-            "CODEX_HOME": str(codex_home),
-            "PATH": str(self.git_executable().parent),
-        }
-        return environment, launcher
+        return support.integration_fixture(root, CODEX_HOME="codex home")
 
     def test_manifest_from_older_hook_template_loads_and_uninstalls(
         self,

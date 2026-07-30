@@ -3,14 +3,13 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
-import shutil
 import sqlite3
-import subprocess
 import tempfile
 import unittest
 
 from unittest.mock import patch
 
+import support
 from aiq.integrations.claude import (
     ClaudeIntegrationError,
     INTEGRATION_ID,
@@ -28,25 +27,12 @@ from aiq.journal import JournalError, check_journal, resolve_scope
 
 class ClaudeIntegrationTest(unittest.TestCase):
     def git_executable(self) -> Path:
-        discovered = shutil.which("git")
-        self.assertIsNotNone(discovered)
-        return Path(discovered).absolute()
+        return support.git_executable()
 
     def fixture(self, root: Path) -> tuple[dict[str, str], Path]:
-        home = root / "home"
-        state = root / "state"
-        claude_config = root / "claude config"
-        launcher = root / "bin" / "aiq tool"
-        launcher.parent.mkdir(parents=True)
-        launcher.write_text("#!/bin/sh\nexit 0\n")
-        launcher.chmod(0o755)
-        environment = {
-            "HOME": str(home),
-            "XDG_STATE_HOME": str(state),
-            "CLAUDE_CONFIG_DIR": str(claude_config),
-            "PATH": str(self.git_executable().parent),
-        }
-        return environment, launcher
+        return support.integration_fixture(
+            root, CLAUDE_CONFIG_DIR="claude config"
+        )
 
     def test_print_is_stable_nested_fragment_without_matcher(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -239,12 +225,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -283,12 +264,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
     def test_receive_hook_without_prompt_id_captures_each_event(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -372,12 +348,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             base = {
                 "hook_event_name": "UserPromptSubmit",
                 "session_id": "session",
@@ -411,12 +382,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-                check=True,
-            )
+            repository = support.init_repository(root / "repository")
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -444,13 +410,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertIn("capture failed", errors.getvalue())
 
     def _initialized_repository(self, root: Path) -> Path:
-        repository = root / "repository"
-        repository.mkdir()
-        subprocess.run(
-            ["git", "-C", str(repository), "init", "-q", "-b", "main"],
-            check=True,
-        )
-        return repository
+        return support.init_repository(root / "repository")
 
     def test_stop_gate_blocks_once_then_respects_loop_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

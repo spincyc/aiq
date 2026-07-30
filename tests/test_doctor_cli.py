@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import unittest
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOT = REPOSITORY_ROOT / "src"
+import support
 
 EXPECTED_CHECKS = (
     "python",
@@ -38,65 +33,41 @@ class DoctorCliTests(unittest.TestCase):
             self.home,
             self.config_home,
             self.state_home,
-            self.repository,
         ):
             path.mkdir()
-        subprocess.run(
-            ["git", "init", "--quiet", str(self.repository)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        support.init_repository(self.repository)
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
     def environment(self) -> dict[str, str]:
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("AIQ_", "GIT_"))
-            and key
-            not in {
-                "CODEX_HOME",
-                "PYTHONPATH",
-                "XDG_CONFIG_HOME",
-                "XDG_STATE_HOME",
-            }
-        }
-        environment.update(
-            {
-                "HOME": str(self.home),
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "PYTHONPATH": str(SOURCE_ROOT),
-                "XDG_CONFIG_HOME": str(self.config_home),
-                "XDG_STATE_HOME": str(self.state_home),
-            }
+        return support.scrubbed_environment(
+            drop={"CODEX_HOME"},
+            HOME=str(self.home),
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(support.SOURCE_ROOT),
+            XDG_CONFIG_HOME=str(self.config_home),
+            XDG_STATE_HOME=str(self.state_home),
         )
-        return environment
 
     def run_aiq(
         self,
         *arguments: str,
         extra_environment: dict[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> support.CliResult:
         environment = self.environment()
         if extra_environment:
             environment.update(extra_environment)
-        return subprocess.run(
-            [sys.executable, "-m", "aiq", *arguments],
+        return support.run_cli(
+            *arguments,
+            in_process=False,
             cwd=self.repository,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+            environment=environment,
         )
 
     def doctor_payload(
         self,
-        completed: subprocess.CompletedProcess[str],
+        completed: support.CliResult,
     ) -> tuple[dict[str, object], dict[str, dict[str, str]]]:
         self.assertEqual(completed.stderr, "")
         self.assertEqual(completed.stdout.count("\n"), 1, completed.stdout)
@@ -153,15 +124,7 @@ class DoctorCliTests(unittest.TestCase):
         self.assertIn("does not exist", checks["report"]["detail"])
         self.assertIn(str(missing), checks["report"]["detail"])
 
-        uninitialized = self.root / "uninitialized"
-        uninitialized.mkdir()
-        subprocess.run(
-            ["git", "init", "--quiet", str(uninitialized)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        uninitialized = support.init_repository(self.root / "uninitialized")
         completed = self.run_aiq(
             "doctor", "--scope", "repo", "--json",
             extra_environment={"AIQ_DEV_REPORT_REPO": str(uninitialized)},

@@ -4,12 +4,12 @@ import multiprocessing
 import os
 from pathlib import Path
 import stat
-import subprocess
 import tempfile
 from typing import Any
 import unittest
 from unittest.mock import patch
 
+import support
 from aiq import journal
 from aiq.journal import JournalError, JournalScope, resolve_scope
 
@@ -118,16 +118,8 @@ class LifecycleLockTest(unittest.TestCase):
     def test_repo_lock_moves_with_repository_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            repository = root / "repository"
+            repository = support.init_repository(root / "repository")
             moved_repository = root / "moved-repository"
-            repository.mkdir()
-            subprocess.run(
-                ["git", "-C", str(repository), "init", "-b", "main"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
             original_scope = resolve_scope("repo", cwd=repository)
             with journal.lifecycle_lock(original_scope, exclusive=False):
                 original_lock_path = journal._lifecycle_lock_path(

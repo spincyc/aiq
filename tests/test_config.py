@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
 
+import support
 from aiq.config import (
     CONFIG_MAX_BYTES,
     ConfigError,
@@ -179,10 +179,7 @@ class ConfigTests(unittest.TestCase):
             repository = Path(temporary_directory) / "repository"
             nested = repository / "one" / "two"
             nested.mkdir(parents=True)
-            subprocess.run(
-                ["git", "init", "--quiet", str(repository)],
-                check=True,
-            )
+            support.init_repository(repository)
 
             self.assertEqual(
                 repository_config_path(nested),
@@ -195,15 +192,9 @@ class ConfigTests(unittest.TestCase):
     def test_repository_discovery_ignores_ambient_git_redirection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            expected_repository = root / "expected"
-            redirected_repository = root / "redirected"
-            subprocess.run(
-                ["git", "init", "--quiet", str(expected_repository)],
-                check=True,
-            )
-            subprocess.run(
-                ["git", "init", "--quiet", str(redirected_repository)],
-                check=True,
+            expected_repository = support.init_repository(root / "expected")
+            redirected_repository = support.init_repository(
+                root / "redirected"
             )
             previous = {
                 key: os.environ.get(key)
