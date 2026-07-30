@@ -8,6 +8,12 @@ effects documents, capability contracts, and integration manifests.
 
 ## [Unreleased]
 
+### Changed
+
+- The packaged agent bootstrap (`AGENTS.md`) now covers the reader lease: one
+  session consumes at a time, `reader_held` reports that another session holds
+  the role, and `ingest` and `enqueue` stay open to every session.
+
 ## [0.2.0a1] - 2026-07-30
 
 ### Breaking changes at a glance

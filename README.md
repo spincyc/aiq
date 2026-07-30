@@ -134,7 +134,8 @@ aiq journal check --scope repo
 ```
 
 `queue peek` is read-only. `queue next --owner OWNER` leases work and changes
-state.
+state. `inbox claim` and `queue next` also take the scope's single reader role,
+so a second session consuming at the same time is refused with `reader_held`.
 
 ## Find the right operation
 
@@ -154,13 +155,16 @@ one contract instead of carrying every tool description in context.
 | Create one task in one step | `aiq enqueue TITLE` |
 | List tasks, including finished ones | `aiq list --all` |
 | Preview ready work | `aiq queue peek` |
-| Lease ready work | `aiq queue next --owner OWNER` (or `aiq dequeue`) |
+| Lease ready work, taking the reader role | `aiq queue next --owner OWNER` (or `aiq dequeue`) |
 | Settle leased or ready tasks as done | `aiq task done TASK-1 --summary TEXT` |
 | Verify storage and history | `aiq journal check` |
 | Check local health read-only | `aiq doctor` |
 | Explain task eligibility | `aiq task explain TASK-1` |
 | Review recorded task history | `aiq task history TASK-1` |
 | List unreleased leases | `aiq claim list` |
+| Show who holds the reader role | `aiq reader status` |
+| Hold the reader role without consuming | `aiq reader acquire` |
+| Give the reader role back | `aiq reader release` |
 | File an AIQ defect report | `aiq report --summary TEXT --detail -` |
 | Reconcile after an AIQ upgrade | `aiq reconcile --user` |
 
@@ -178,6 +182,14 @@ Repository scope is shared by linked worktrees, but not by independent clones.
 Use `aiq journal path` before capture when scope is uncertain. Journals,
 leases, snapshots, and exports are private runtime state and must not be
 committed.
+
+Each scope has many writers and one reader. Any session may `ingest`,
+`enqueue`, and `report`; exactly one at a time may consume, through
+`inbox claim`, `queue next`/`dequeue`, and `task done` on work no session
+holds. The first successful consume takes the role implicitly and each later
+one slides it forward, so a single session never meets the rule; a second live
+consumer is refused with `reader_held` (exit 4). `aiq reader status` reports
+the holder.
 
 ## Integrations
 

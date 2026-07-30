@@ -10,11 +10,13 @@ mid-turn user messages; ingest each one manually with `aiq ingest --if-new`. Dis
 with `aiq capability list`; load only the relevant contract with
 `aiq capability show <id>`. Do not infer commands or database details.
 
-At scheduling boundaries, check `aiq status` for runnable work. Before
-declaring completion, record outcomes with `aiq task done TASK --summary
-TEXT` and verify no required runnable work remains. Installed hooks enforce
-this at session stop. Keep AIQ runtime state local and untracked; never
-commit journals, leases, exports, or snapshots.
+At scheduling boundaries, check `aiq status` for runnable work. One session
+consumes at a time; `reader_held` means another holds the reader role.
+`ingest` and `enqueue` stay open. Before declaring completion, record
+outcomes with `aiq task done TASK --summary TEXT` and verify no required
+runnable work remains. Installed hooks enforce this at session stop. Keep
+AIQ runtime state local and untracked; never commit journals, leases,
+exports, or snapshots.
 File AIQ defects with `aiq report` (requires a configured `dev_report_repo`).
 
 When reasoning becomes repeatable, encode it in the smallest deterministic
