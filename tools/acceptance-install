@@ -304,6 +304,11 @@ fi
 stage "prepare unrelated user environment"
 mkdir -p "$work_repo" "$home_dir/.codex"
 "$git_command" -C "$work_repo" init --quiet -b main
+# Repo-scope hook capture is opt-in by journal presence; the prompt-hook
+# stage below expects capture, so opt the work repository in explicitly.
+"$aiq_bin" journal init --scope repo --cwd "$work_repo" --json \
+  >"$results_dir/journal-init.json"
+assert_json_object "$results_dir/journal-init.json"
 cat >"$home_dir/.codex/hooks.json" <<'EOF'
 {
   "description": "user-owned acceptance configuration",
