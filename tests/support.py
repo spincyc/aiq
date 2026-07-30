@@ -116,27 +116,26 @@ def dead_session_id() -> int:
     return process.pid
 
 
-def hold_reader_lease_from_dead_session(
+def hold_reader_lease_with_locator(
     scope,
     *,
-    owner_id: str = "dead-worker",
+    host: str,
+    session: int,
+    owner_id: str = "located-worker",
     lease_seconds: int = 3600,
 ) -> str:
-    """Record an unexpired reader lease whose holder session is gone.
+    """Record an unexpired reader lease naming one holder locator.
 
-    This is the shape an agent harness leaves behind routinely: each
-    shell invocation can be its own POSIX session, so a lease outlives
-    the session that took it. Only a self-derived identity records a
-    holder locator, so both the identity and the locator are patched for
-    the acquisition; afterwards the real probe compares this host
-    against a reaped session id and proves the holder dead.
+    Only a self-derived identity records a locator at all, so both the
+    identity and the locator are patched for the acquisition; every
+    later probe runs unpatched against the recorded pair. This is how a
+    test names a specific holder -- a reaped session, another host, or
+    the test's own session -- without owning such a process.
     """
     from unittest.mock import patch
 
     from aiq.queue import acquire_reader_lease
 
-    host = socket.gethostname()
-    session = dead_session_id()
     reader_id = f"{host}-{session}"
     with (
         patch("aiq.queue._default_reader", return_value=reader_id),
@@ -149,6 +148,124 @@ def hold_reader_lease_from_dead_session(
             lease_seconds=lease_seconds,
         )
     return reader_id
+
+
+def hold_reader_lease_from_dead_session(
+    scope,
+    *,
+    owner_id: str = "dead-worker",
+    lease_seconds: int = 3600,
+) -> str:
+    """Record an unexpired reader lease whose holder session is gone.
+
+    This is the shape an agent harness leaves behind routinely: each
+    shell invocation can be its own POSIX session, so a lease outlives
+    the session that took it. The unpatched probe afterwards compares
+    this host against a reaped session id and proves the holder dead.
+    """
+    return hold_reader_lease_with_locator(
+        scope,
+        host=socket.gethostname(),
+        session=dead_session_id(),
+        owner_id=owner_id,
+        lease_seconds=lease_seconds,
+    )
+
+
+# Takes the reader lease as its own POSIX session leader, then parks on
+# stdin so that session stays alive for the whole test. The identity is
+# the one this child derives for itself, which is what makes the
+# recorded holder locator real: nothing is patched here, so the holder
+# is a genuinely foreign live session -- the only reading that stands a
+# completion gate down.
+_LIVE_READER_PROGRAM = """
+import sys
+from pathlib import Path
+
+from aiq.config import _default_reader
+from aiq.journal import resolve_scope
+from aiq.queue import acquire_reader_lease
+
+scope_name, cwd, owner_id, lease_seconds, agent_root = sys.argv[1:6]
+reader_id = _default_reader()
+acquire_reader_lease(
+    resolve_scope(
+        scope_name,
+        cwd=Path(cwd),
+        agent_root=Path(agent_root) if agent_root else None,
+    ),
+    owner_id=owner_id,
+    reader_id=reader_id,
+    lease_seconds=int(lease_seconds),
+)
+sys.stdout.write(reader_id + "\\n")
+sys.stdout.flush()
+sys.stdin.read()
+"""
+
+
+@contextlib.contextmanager
+def reader_lease_held_by_live_session(
+    scope_name: str,
+    cwd: Path,
+    *,
+    owner_id: str = "live-worker",
+    lease_seconds: int = 3600,
+    agent_root: Path | None = None,
+    environment: dict[str, str] | None = None,
+):
+    """Hold the reader lease from another live session for the block.
+
+    Yields that session's reader identity. The holder is a real child
+    process in its own POSIX session, so its recorded locator names this
+    host and a session id that is alive and is not the test process's
+    own -- the only shape that proves foreignness. The session ends on
+    exit, which leaves the lease abandoned rather than held.
+    """
+    import aiq
+
+    environment = dict(os.environ if environment is None else environment)
+    package_root = str(Path(aiq.__file__).resolve().parents[1])
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        f"{package_root}{os.pathsep}{existing}" if existing else package_root
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _LIVE_READER_PROGRAM,
+            scope_name,
+            str(cwd),
+            owner_id,
+            str(lease_seconds),
+            "" if agent_root is None else str(agent_root),
+        ],
+        start_new_session=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    try:
+        reader_id = process.stdout.readline().strip()
+        if not reader_id:
+            process.stdin.close()
+            raise AssertionError(
+                "live reader session failed to take the lease: "
+                f"{process.stderr.read()}"
+            )
+        yield reader_id
+    finally:
+        process.stdin.close()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            process.kill()
+            process.wait()
+        process.stdout.close()
+        process.stderr.close()
 
 
 def write_launcher(path: Path, *, mode: int = 0o755) -> Path:

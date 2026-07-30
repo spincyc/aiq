@@ -650,31 +650,48 @@ class IntegrationCliTests(unittest.TestCase):
             "AIQ: runnable work remains: 1 ready task", unheld.stderr
         )
 
-        # A different live session takes the role. The hook derives its
-        # own identity from configuration exactly as the CLI does, so it
-        # now sees itself as a writer only and stops freely.
-        acquired = self.run_aiq(
-            "reader", "acquire", "--reader", "another-live-session", "--json"
+        # A configured reader identity records no holder locator, so
+        # nothing proves the holder is not this very session -- a hook
+        # never inherits the agent shell's AIQ_READER -- and the gate
+        # keeps this session accountable.
+        configured = self.run_aiq(
+            "reader", "acquire", "--reader", "a-configured-reader", "--json"
         )
-        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        self.assertEqual(configured.returncode, 0, configured.stderr)
 
-        allowed = self.receive_stop(stop_payload)
+        unproven = self.receive_stop(stop_payload)
+        self.assertEqual(unproven.returncode, 2)
+        self.assertIn(
+            "AIQ: runnable work remains: 1 ready task", unproven.stderr
+        )
+
+        releasing = self.run_aiq(
+            "reader", "release", "--reader", "a-configured-reader", "--json"
+        )
+        self.assertEqual(releasing.returncode, 0, releasing.stderr)
+
+        # A real session of this host takes the role instead. Its lease
+        # records a locator the hook can probe, which is what proves a
+        # different session is draining the queue: the hook now sees
+        # itself as a writer only and stops freely.
+        with support.reader_lease_held_by_live_session(
+            "repo",
+            self.repository,
+            environment=self.environment(),
+        ) as reader_id:
+            allowed = self.receive_stop(stop_payload)
+
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertEqual(allowed.stdout, "")
         self.assertEqual(
             allowed.stderr,
             "AIQ: not blocking: runnable work remains (1 ready task) but "
-            'reader "another-live-session" holds the reader lease — '
+            f'reader "{reader_id}" holds the reader lease — '
             "aiq reader status\n",
         )
 
-        # Releasing the role leaves nobody draining the queue, so the
-        # gate resumes holding this session to the work.
-        released = self.run_aiq(
-            "reader", "release", "--reader", "another-live-session", "--json"
-        )
-        self.assertEqual(released.returncode, 0, released.stderr)
-
+        # That session has now ended, leaving nobody draining the queue,
+        # so the gate resumes holding this session to the work.
         blocked = self.receive_stop(stop_payload)
         self.assertEqual(blocked.returncode, 2)
         self.assertIn(

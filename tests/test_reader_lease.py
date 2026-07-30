@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import socket
 import tempfile
 import threading
 import unittest
@@ -61,12 +62,12 @@ class ReaderLeaseTest(unittest.TestCase):
             {"XDG_STATE_HOME": str(self.root / "state")},
         )
         self.environment.start()
-        agent_root = self.root / "agent"
-        agent_root.mkdir()
+        self.agent_root = self.root / "agent"
+        self.agent_root.mkdir()
         self.scope = resolve_scope(
             "agent-root",
             cwd=self.root,
-            agent_root=agent_root,
+            agent_root=self.agent_root,
         )
         self.now = _now_us()
 
@@ -505,14 +506,15 @@ class ReaderLeaseTest(unittest.TestCase):
         self.assertTrue(held["reader"]["held"])
         self.assertTrue(held["reader"]["self"])
         self.assertEqual(held["reader"]["reader_id"], READER_A)
-        # An explicitly configured identity records no locator, so its
-        # holder is never provably dead and reads as live.
-        self.assertTrue(held["reader"]["live"])
+        # An explicitly configured identity records no locator, so no
+        # session can be shown to be draining this queue: held, but not
+        # the live foreign reader that would relieve a gate.
+        self.assertFalse(held["reader"]["live"])
 
         foreign = read_status(self.scope, reader_id=READER_B, now_us=self.now)
         self.assertTrue(foreign["reader"]["held"])
         self.assertFalse(foreign["reader"]["self"])
-        self.assertTrue(foreign["reader"]["live"])
+        self.assertFalse(foreign["reader"]["live"])
 
         # An expired lease names nobody currently draining the queue.
         expired = read_status(
@@ -551,6 +553,66 @@ class ReaderLeaseTest(unittest.TestCase):
         self.assertFalse(status["reader"]["held"])
         self.assertFalse(status["reader"]["self"])
         self.assertEqual(status["reader"]["reader_id"], reader_id)
+        self.assertFalse(status["reader"]["live"])
+
+    def test_status_reports_a_live_foreign_sessions_lease_as_live(
+        self,
+    ) -> None:
+        with support.reader_lease_held_by_live_session(
+            "agent-root",
+            self.root,
+            agent_root=self.agent_root,
+        ) as reader_id:
+            status = read_status(self.scope, reader_id=READER_A)
+
+        # A running session on this host recorded its own locator, which
+        # is the one reading that proves someone else is accountable.
+        self.assertNotEqual(reader_id, READER_A)
+        self.assertEqual(status["reader"]["status"], "held")
+        self.assertTrue(status["reader"]["held"])
+        self.assertFalse(status["reader"]["self"])
+        self.assertEqual(status["reader"]["reader_id"], reader_id)
+        self.assertTrue(status["reader"]["live"])
+
+    def test_status_never_reports_this_sessions_own_lease_as_live(
+        self,
+    ) -> None:
+        # The lease this very session took, under an identity the reader
+        # asking is not configured with -- the shape a hook sees when it
+        # does not inherit the agent shell's AIQ_READER.
+        reader_id = support.hold_reader_lease_with_locator(
+            self.scope,
+            host=socket.gethostname(),
+            session=os.getsid(0),
+        )
+
+        status = read_status(self.scope, reader_id=READER_A)
+
+        # The identities differ, but the locator names this very
+        # session: nobody else is draining the queue, so the caller is
+        # still accountable for the work.
+        self.assertEqual(status["reader"]["status"], "held")
+        self.assertFalse(status["reader"]["self"])
+        self.assertEqual(status["reader"]["reader_id"], reader_id)
+        self.assertFalse(status["reader"]["live"])
+
+    def test_status_never_reports_a_holder_on_another_host_as_live(
+        self,
+    ) -> None:
+        # A live session id, but on a host whose processes this one
+        # cannot probe at all.
+        support.hold_reader_lease_with_locator(
+            self.scope,
+            host="other-host",
+            session=os.getpid(),
+        )
+
+        status = read_status(self.scope, reader_id=READER_A)
+
+        # A foreign host's session id means nothing here, so liveness is
+        # unprovable and the caller stays accountable.
+        self.assertEqual(status["reader"]["status"], "held")
+        self.assertFalse(status["reader"]["self"])
         self.assertFalse(status["reader"]["live"])
 
 

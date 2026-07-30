@@ -408,12 +408,17 @@ prompt content never appears. A missing journal reports zero counts, empty
 label without creating storage. `reader.self` compares the recorded holder
 against the caller's configured `reader` identity, so one status read answers
 both what work remains and whether this session may consume it. `reader.live`
-is true exactly for a `held` lease: a lease carries the holder's host and
-POSIX session id when the holder used a self-derived identity, and a matching
-host with a vanished session proves the holder dead, which reads as `stale`
-rather than `held`. It is false for every other reading, including `absent`,
-`stale`, `expired`, and `released`. A holder whose liveness cannot be
-established counts as live, so an unprovable death never stands the gate down.
+answers the one question a completion gate asks — is some *other* session
+provably still draining this queue? — and demands proof of all of it. It is
+true only when the lease is `held`, its holder recorded a locator (a lease
+carries the holder's host and POSIX session id only when the holder used a
+self-derived identity), that host is this one, that session still exists, and
+it is not this process's own session. It is false for every other reading:
+`absent`, `stale` (a matching host with a vanished session proves the holder
+dead, which reads as `stale` rather than `held`), `expired`, `released`, a
+holder that recorded no locator because its identity was configured
+explicitly, a holder on another host, and a holder occupying this very
+session. Unprovable foreignness therefore never stands a gate down.
 Human-readable `ready` and `blocked` lines render the task reference
 as `[label: TASK-19]`; the `blocked by` causes stay bare IDs.
 
@@ -717,18 +722,26 @@ the [reader lease](#reader-lease). It derives its own reader identity exactly
 as the CLI does — configuration or `AIQ_READER`, defaulting to the host and
 POSIX session id — and reads the lease from the same snapshot as the counts.
 Only one reading stands the gate down: `reader.self` false with `reader.live`
-true, meaning a demonstrably different session is alive and holding the role.
-That session is a writer only, and it stops with exit 0 and one stderr notice
-naming the holder, for example
+true, meaning the role is held by a session proved to be alive, on this host,
+and not this process's own. That session is a writer only, and it stops with
+exit 0 and one stderr notice naming the holder, for example
 `AIQ: not blocking: runnable work remains (1 ready task) but reader
 "host-4242" holds the reader lease — aiq reader status`.
 Every other reading blocks exactly as above: the caller holding the lease
-itself, no lease at all, an expired or released lease, and — deliberately — a
-lease whose holder is provably dead. The bias is conservative because a
-harness may give each shell invocation its own POSIX session, so leases
-outlive their sessions routinely; honoring an abandoned one would silently
-stop enforcing completion. Nothing runnable is unaffected by the role: the
-parked notice and silent allow behave the same for holder and non-holder. When nothing is runnable but parked `needs_input`
+itself, no lease at all, an expired or released lease, a lease whose holder
+recorded no locator — which is every explicitly configured `reader` or
+`AIQ_READER` identity — a holder on another host, a holder occupying this
+same session, and — deliberately — a lease whose holder is provably dead.
+The bias is conservative because a harness may give each shell invocation its
+own POSIX session, so leases outlive their sessions routinely; honoring an
+abandoned one would silently stop enforcing completion. Proof of foreignness,
+not absence of doubt, is required because a hook process does not inherit the
+agent shell's environment: the gate can derive a different identity than the
+CLI that took the lease, so an unproven holder may be this very session.
+A deliberate shared-`AIQ_READER` fan-out therefore keeps blocking every
+participant, which is the safe direction. Nothing runnable is unaffected by
+the role: the parked notice and silent allow behave the same for holder and
+non-holder. When nothing is runnable but parked `needs_input`
 messages remain, the gate exits 0 with exactly one stderr notice —
 `AIQ: no runnable work; 2 parked messages await user input —
 aiq inbox list` — instead of full silence, so a session cannot end with a waiting

@@ -1891,14 +1891,22 @@ def gate_stop_hook(
         f"; {_parked_fragment(parked_messages)}" if parked_messages else ""
     )
     # Runnable work belongs to whoever holds the reader role. Stand down
-    # only for a holder proved to be someone else AND still alive: every
-    # other reading -- no lease, an expired or released one, or one left
-    # behind by a dead session -- means nobody is draining this queue, so
-    # this session is still accountable for the work and must block. In
-    # agent harnesses each shell invocation can be its own POSIX session,
-    # so abandoned leases are routine; treating one as "someone else's"
-    # would silently retire the gate. A patched or older status shape
-    # without the datum reads falsy and therefore blocks too.
+    # only for a holder *proved* to be a different session that is still
+    # alive: the lease is held, its holder recorded a locator naming this
+    # host, that session still exists, and it is not this process's own.
+    # Every other reading -- no lease, an expired or released one, one
+    # left behind by a dead session, one whose holder recorded no locator
+    # because the identity was configured explicitly -- means nothing
+    # proves another session is draining this queue, so this session is
+    # still accountable for the work and must block. Proof, not absence
+    # of doubt, is the standard: a hook process does not inherit the
+    # agent shell's environment, so this gate can derive a different
+    # reader identity than the CLI that took the lease, and reading its
+    # own session's lease as a stranger's would silently retire the gate
+    # for exactly the session doing the work. A deliberate shared-reader
+    # fan-out therefore keeps blocking, which is the safe direction. A
+    # patched or older status shape without the datum reads falsy and
+    # therefore blocks too.
     reader = status.get("reader")
     if not isinstance(reader, dict):
         reader = {}

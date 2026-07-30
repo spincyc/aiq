@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import sqlite3
 import tempfile
 import time
@@ -36,9 +37,10 @@ from aiq.queue import (
 )
 
 
-# The identity the gate itself resolves, and a different session's.
+# The identity the gate itself resolves, and an explicitly configured
+# one, which names a holder no locator can tell apart from this session.
 GATE_READER = "gate-session"
-OTHER_READER = "another-live-session"
+CONFIGURED_READER = "another-configured-reader"
 
 
 class ClaudeIntegrationTest(unittest.TestCase):
@@ -943,22 +945,23 @@ class ClaudeIntegrationTest(unittest.TestCase):
     def test_stop_gate_lets_a_writer_only_session_stop(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = self._runnable_repository(Path(temporary_directory))
-            acquire_reader_lease(
-                resolve_scope("repo", cwd=repository),
-                owner_id="drainer",
-                reader_id=OTHER_READER,
-                lease_seconds=3600,
-            )
+            # A real process in its own POSIX session, so the lease
+            # records a locator this host can probe: the only shape that
+            # proves another session is draining the queue.
+            with support.reader_lease_held_by_live_session(
+                "repo",
+                repository,
+            ) as reader_id:
+                status, errors = self._run_gate(repository)
 
-            status, errors = self._run_gate(repository)
-
-            # Another live session is draining this queue, so a session
-            # that only files work stops freely with one exit-0 notice.
+            self.assertNotEqual(reader_id, GATE_READER)
+            # That session owns the work, so a session that only files
+            # work stops freely with one exit-0 notice.
             self.assertEqual(status, 0)
             self.assertEqual(
                 errors,
                 "AIQ: not blocking: runnable work remains (1 ready task) "
-                f'but reader "{OTHER_READER}" holds the reader lease — '
+                f'but reader "{reader_id}" holds the reader lease — '
                 "aiq reader status\n",
             )
 
@@ -972,7 +975,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
             acquire_reader_lease(
                 scope,
                 owner_id="drainer",
-                reader_id=OTHER_READER,
+                reader_id=CONFIGURED_READER,
                 lease_seconds=60,
                 now_us=(time.time_ns() // 1000) - 3_600_000_000,
             )
@@ -981,24 +984,60 @@ class ClaudeIntegrationTest(unittest.TestCase):
             acquire_reader_lease(
                 scope,
                 owner_id="drainer",
-                reader_id=OTHER_READER,
+                reader_id=CONFIGURED_READER,
                 lease_seconds=3600,
             )
-            release_reader_lease(scope, reader_id=OTHER_READER)
+            release_reader_lease(scope, reader_id=CONFIGURED_READER)
 
         def dead_holder(scope: object) -> None:
             support.hold_reader_lease_from_dead_session(scope)
 
-        # None of these names a live reader who will do the work, so the
-        # session that is stopping stays accountable for it. The dead
-        # holder is the load-bearing case: an agent harness leaves such
-        # leases behind routinely, and honoring one would silently
-        # retire the gate.
+        def unlocated_holder(scope: object) -> None:
+            # An explicitly configured identity records no locator, so
+            # nothing tells this holder apart from the session running
+            # the gate. A hook does not inherit the agent shell's
+            # AIQ_READER, so this is exactly what the session holding
+            # its own lease looks like from inside the gate.
+            acquire_reader_lease(
+                scope,
+                owner_id="drainer",
+                reader_id=CONFIGURED_READER,
+                lease_seconds=3600,
+            )
+
+        def holder_on_another_host(scope: object) -> None:
+            # A live session id, but on a host whose processes cannot be
+            # probed from here, so liveness stays unproven.
+            support.hold_reader_lease_with_locator(
+                scope,
+                host="other-host",
+                session=os.getpid(),
+            )
+
+        def holder_in_this_session(scope: object) -> None:
+            # The gate's own POSIX session, recorded under an identity
+            # the gate does not resolve to: alive, but not somebody else.
+            support.hold_reader_lease_with_locator(
+                scope,
+                host=socket.gethostname(),
+                session=os.getsid(0),
+            )
+
+        # None of these proves a live reader other than this session will
+        # do the work, so the session that is stopping stays accountable
+        # for it. The dead holder and the unlocated one are the
+        # load-bearing cases: an agent harness leaves abandoned leases
+        # behind routinely, and a configured identity names a holder that
+        # may well be this very session, so honoring either would
+        # silently retire the gate.
         for lease, prepare in (
             ("absent", absent),
             ("expired", expired),
             ("released", released),
             ("dead holder", dead_holder),
+            ("unlocated holder", unlocated_holder),
+            ("holder on another host", holder_on_another_host),
+            ("holder in this session", holder_in_this_session),
         ):
             with self.subTest(lease=lease):
                 with tempfile.TemporaryDirectory() as temporary_directory:

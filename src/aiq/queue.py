@@ -470,6 +470,45 @@ def _reader_holder_is_dead(row: sqlite3.Row) -> bool:
     return False
 
 
+def _reader_holder_is_foreign_live(row: sqlite3.Row) -> bool:
+    """True only when the holder is provably some *other* live session.
+
+    This is the inverse burden of :func:`_reader_holder_is_dead`, not its
+    negation: that probe answers "may this lease be taken over?" and so
+    assumes life whenever death is unproven, while this one answers "is
+    another session already accountable for this queue?" and so demands
+    positive proof. Every gap in the evidence -- an explicitly configured
+    identity that recorded no locator, a locator naming another host we
+    cannot probe, a probe that answers neither "alive" nor "gone" -- is
+    resolved against standing a completion gate down.
+
+    A recorded session equal to this process's own is deliberately not
+    foreign. Host hooks run as children of the session that took the
+    lease and inherit its session id, so the locator, not the reader
+    identity string, is what tells a session apart from itself: the two
+    surfaces may derive different identities from the same session when
+    a configuration file or ``AIQ_READER`` reaches only one of them.
+    """
+
+    host = row["holder_host"]
+    session = row["holder_sid"]
+    if host is None or session is None:
+        return False
+    locator = _reader_locator()
+    if locator is None or locator[0] != host or locator[1] == session:
+        return False
+    try:
+        os.kill(session, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # A live process owns that id; only its owner may signal it.
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _reader_lease_conflict(
     row: sqlite3.Row | None,
     *,
@@ -694,10 +733,15 @@ def _reader_status_summary(
 ) -> dict[str, Any]:
     """Project the gate-relevant subset carried by :func:`read_status`.
 
-    ``live`` states directly what a completion gate needs: a lease
-    abandoned by a crashed session is no reader at all. The rendered
-    status already separates such a lease as ``stale``, so this reads
-    the one snapshot both surfaces share rather than probing again.
+    ``live`` states directly what a completion gate needs, and nothing
+    looser: that the role is held by a demonstrably different session
+    that is still running, so this caller is not the one accountable for
+    the queue. It is true only for a ``held`` lease -- the rendered
+    status already separates a lease abandoned by a crashed session as
+    ``stale`` -- whose recorded holder locates a live session other than
+    this process's own. Unprovable foreignness, including the common
+    case of an explicitly configured identity that records no locator at
+    all, reads false so the gate keeps blocking.
     """
 
     summary = {
@@ -711,7 +755,11 @@ def _reader_status_summary(
             "expires_at",
         )
     }
-    summary["live"] = lease["status"] == "held"
+    summary["live"] = (
+        lease["status"] == "held"
+        and row is not None
+        and _reader_holder_is_foreign_live(row)
+    )
     return summary
 
 
@@ -1677,7 +1725,9 @@ def read_status(
     so a caller deciding from one status read needs no second open. Its
     ``self`` field is null unless ``reader_id`` names whom to compare
     the recorded holder against, and its ``live`` field is true only for
-    a held lease whose recorded holder is not provably gone.
+    a held lease whose recorded holder is provably a different live
+    session on this host -- the one reading that relieves this caller of
+    the work.
     """
 
     if ready_limit < 1 or ready_limit > 64:

@@ -14,6 +14,23 @@ effects documents, capability contracts, and integration manifests.
   session consumes at a time, `reader_held` reports that another session holds
   the role, and `ingest` and `enqueue` stay open to every session.
 
+### Fixed
+
+- The `Stop` completion gate no longer stands down for the session that holds
+  the reader lease. A hook process does not inherit the environment of the
+  agent's shell, so a gate run could derive a different reader identity than
+  the CLI that took the lease and read that session's own lease as a live
+  foreign reader's — silently disabling completion enforcement for exactly the
+  session doing the work. Standing down now requires proof that somebody else
+  is draining the queue: the lease is held, its holder recorded a locator, the
+  locator names this host, that session still exists, and it is not the gate
+  process's own session. `reader.live` on `status` reports that same proof and
+  is no longer true merely because a lease is held. One consequence is
+  deliberate and safe: a shared `AIQ_READER` fan-out records no holder
+  locator, so the gate now keeps blocking every participant instead of
+  standing down for all of them. Who may consume is unchanged — `reader_held`
+  refusal, takeover, and release semantics are untouched.
+
 ## [0.2.0a1] - 2026-07-30
 
 ### Breaking changes at a glance

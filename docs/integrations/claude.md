@@ -119,16 +119,27 @@ The gate blocks the reader. Runnable work belongs to whichever session may
 drain the queue, so the hook derives its own reader identity the same way the
 CLI does — configuration or `AIQ_READER`, defaulting to the host and POSIX
 session id — and consults the scope's
-[reader lease](../contracts/cli-v1.md#reader-lease). A session that only files
-work while another live session holds the role stops freely, with one exit-0
-stderr notice such as `AIQ: not blocking: runnable work remains (1 ready task)
-but reader "host-4242" holds the reader lease — aiq reader status`. In every
-other case the gate blocks as above, including when no lease exists at all,
-when it has expired or been released, and when its holder is provably dead.
-That last case matters: an agent harness can give each shell invocation its
+[reader lease](../contracts/cli-v1.md#reader-lease). Standing down needs
+proof that another session is draining the queue: the lease is held, its
+holder recorded a locator naming this host, that session is still running, and
+it is not the one the hook itself belongs to. A session that only files work
+while such a reader holds the role stops freely, with one exit-0 stderr notice
+such as `AIQ: not blocking: runnable work remains (1 ready task) but reader
+"host-4242" holds the reader lease — aiq reader status`. In every other case
+the gate blocks as above: no lease at all, an expired or released one, a
+holder that is provably dead, a holder on another host, a holder occupying
+this same session, and any holder that recorded no locator — which is every
+explicitly configured `reader` or `AIQ_READER` identity.
+
+Those last cases matter. An agent harness can give each shell invocation its
 own POSIX session, so a lease routinely outlives the session that took it, and
 treating an abandoned lease as an active reader would silently stop enforcing
-completion.
+completion. A hook process does not inherit the environment of the agent's
+shell either, so the gate can derive a different identity than the CLI that
+took the lease; without proof that the holder is somebody else, an unproven
+holder may be this very session. One consequence is deliberate: a shared
+`AIQ_READER` fan-out proves nothing about who is draining the queue, so the
+gate keeps blocking every participant.
 
 The gate honors the host loop guard: when the `Stop` payload carries a truthy
 `stop_hook_active` — Claude Code sets it while already continuing because of
