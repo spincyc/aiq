@@ -283,13 +283,10 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "Create or validate the selected local journal; initializing a "
         "repository journal is the act that opts that repository into "
         "hook capture.",
-        (
-            "aiq journal init [--scope auto|repo|user|agent-root] "
-            "[--label TEXT] [--json]"
-        ),
+        "aiq journal init [--scope auto|repo|user] [--label TEXT] [--json]",
         mutates=True,
         idempotency="safe retry",
-        version=2,
+        version=3,
     ),
     "journal.path": _capability(
         "Resolve the selected journal location without opening it.",

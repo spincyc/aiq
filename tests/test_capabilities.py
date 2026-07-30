@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from aiq.capabilities import (
@@ -61,6 +62,10 @@ INTERNAL_COMMAND_PATHS = {
     ("integration", "receive"),
 }
 
+INTERNAL_SCOPE_HOOKS = ("agent-root", "--agent-root")
+
+CONTRACT_SCOPE_CHOICES = "[--scope auto|repo|user]"
+
 GIT_EXECUTABLE_CAPABILITIES = {
     "integration.check",
     "integration.install",
@@ -121,6 +126,52 @@ class CapabilityContractTests(unittest.TestCase):
             if capability_id in GIT_EXECUTABLE_CAPABILITIES:
                 self.assertEqual(descriptor["version"], 2)
                 self.assertIn("[--git-executable PATH]", descriptor["command"])
+
+    def test_no_descriptor_advertises_the_internal_scope_hooks(self) -> None:
+        """Descriptors must not teach agents to use what cli-v1 disowns.
+
+        ``docs/contracts/cli-v1.md`` documents the ``agent-root`` scope
+        choice and the ``--agent-root PATH`` option as internal, unstable
+        hooks outside the contract. Descriptors are the surface agents are
+        told to trust in place of inferring commands, so advertising either
+        one anywhere in a descriptor is a defect, not a detail.
+        """
+
+        for capability_id, descriptor in CAPABILITIES.items():
+            rendered = json.dumps(descriptor, sort_keys=True)
+            for hook in INTERNAL_SCOPE_HOOKS:
+                with self.subTest(capability=capability_id, hook=hook):
+                    self.assertNotIn(hook, rendered)
+
+    def test_advertised_scope_choices_match_the_documented_contract(self) -> None:
+        advertising = {
+            capability_id
+            for capability_id, descriptor in CAPABILITIES.items()
+            if "--scope" in descriptor["command"]
+        }
+
+        self.assertEqual(advertising, {"journal.init"})
+        for capability_id in advertising:
+            with self.subTest(capability=capability_id):
+                self.assertIn(
+                    CONTRACT_SCOPE_CHOICES,
+                    CAPABILITIES[capability_id]["command"],
+                )
+
+    def test_parser_still_accepts_the_unadvertised_internal_scope_hook(self) -> None:
+        arguments = build_parser().parse_args(
+            [
+                "journal",
+                "init",
+                "--scope",
+                "agent-root",
+                "--agent-root",
+                "/tmp/aiq-agent-root",
+            ]
+        )
+
+        self.assertEqual(arguments.scope, "agent-root")
+        self.assertEqual(str(arguments.agent_root), "/tmp/aiq-agent-root")
 
     def test_show_returns_an_isolated_descriptor(self) -> None:
         shown = show_capability("inbox.apply")

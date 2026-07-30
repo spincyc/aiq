@@ -42,6 +42,14 @@ effects documents, capability contracts, and integration manifests.
   Capability descriptors gain the `--lease-seconds`, `ingest`, and config
   override flags they omitted and spell `--state` as repeatable. Behavior,
   JSON shapes, and capability versions are unchanged.
+- The `journal.init` capability descriptor no longer advertises the internal
+  `agent-root` scope choice, which `cli-v1.md` has always disowned as an
+  unstable hook outside the contract; its command now reads
+  `aiq journal init [--scope auto|repo|user] [--label TEXT] [--json]` and its
+  capability `version` is 3. Descriptors are what an agent is told to trust in
+  place of guessing commands, so advertising the choice taught agents to
+  invoke exactly what the contract refuses to support. The parser still
+  accepts `--scope agent-root` and `--agent-root PATH` for internal use.
 - The packaged agent bootstrap (`AGENTS.md`) now covers the reader lease: one
   session consumes at a time, `reader_held` reports that another session holds
   the role, and `ingest` and `enqueue` stay open to every session.

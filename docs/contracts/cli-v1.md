@@ -41,6 +41,9 @@ Scope-aware commands accept `--scope auto|repo|user`, `--cwd PATH`,
 diagnosed; see [`configuration.md`](../configuration.md). The parser
 additionally exposes an `agent-root` scope choice and an `--agent-root PATH`
 option; both are internal, unstable hooks and not part of this contract.
+Capability descriptors deliberately do not advertise either one, so a consumer
+following `capability show` — authoritative wherever it and this documentation
+differ — is never told to use them.
 
 | Scope | Resolution |
 |---|---|
