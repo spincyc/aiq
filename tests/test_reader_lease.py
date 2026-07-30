@@ -20,6 +20,7 @@ import unittest
 from unittest.mock import patch
 
 import support
+from aiq.config import _default_reader
 from aiq.journal import (
     JournalError,
     check_journal,
@@ -689,6 +690,211 @@ class ReaderLeaseTest(unittest.TestCase):
                 # Somebody else's release is not this session declaring
                 # anything, so the gate it feeds keeps blocking.
                 self.assertFalse(status["reader"]["released_by_self"])
+
+    # 12. Whose claims are these? Releasing the role settles nothing, so
+    # the gate needs a claim count it can hold *this* session to.
+
+    def test_status_counts_this_sessions_own_claims_separately(self) -> None:
+        self.enqueue("Mine")
+        self.dequeue(READER_A)
+
+        status = read_status(self.scope, reader_id=READER_A, now_us=self.now)
+
+        # This process took the claim, so it is both scope-wide active
+        # and attributable to this session.
+        self.assertEqual(
+            status["claims"],
+            {"active": 1, "active_this_session": 1},
+        )
+
+    def test_status_never_counts_a_foreign_sessions_claim_as_this_ones(
+        self,
+    ) -> None:
+        self.enqueue("Somebody else's")
+        claimed = support.claim_next_task_from_another_session(self.scope)
+        self.assertEqual(len(claimed), 1)
+
+        status = read_status(self.scope, reader_id=READER_A, now_us=self.now)
+
+        # Scope-wide the claim is live, which is exactly why `active`
+        # alone cannot gate a session: another session on this host is
+        # working that item, and this one can neither settle nor release
+        # it honestly.
+        self.assertEqual(status["claims"]["active"], 1)
+        self.assertEqual(status["claims"]["active_this_session"], 0)
+
+    def test_status_never_counts_a_locatorless_claim_as_this_sessions(
+        self,
+    ) -> None:
+        self.enqueue("Written before schema 5")
+        # The shape of every claim stored before schema 5 added the
+        # locator columns, and of any claim taken where no POSIX session
+        # can be derived: the columns are simply NULL.
+        claimed = support.claim_next_task_with_locator(
+            self.scope,
+            locator=None,
+        )
+        self.assertEqual(len(claimed), 1)
+
+        status = read_status(self.scope, reader_id=READER_A, now_us=self.now)
+
+        # Unattributed is not this session's. The gate's usual bias --
+        # missing proof means block -- inverts here, because absent
+        # evidence "is this claim mine?" must answer no just as "is
+        # somebody else covering for me?" does. Blocking on a claim this
+        # session cannot settle would be unclearable; under-counting a
+        # pre-migration claim expires on its own.
+        self.assertEqual(status["claims"]["active"], 1)
+        self.assertEqual(status["claims"]["active_this_session"], 0)
+
+    def test_status_stops_counting_a_settled_claim_as_this_sessions(
+        self,
+    ) -> None:
+        task_id = self.enqueue("Settle me")
+        self.dequeue(READER_A)
+
+        settle_tasks_done(
+            self.scope,
+            task_ids=[task_id],
+            summary="done",
+            owner_id="worker",
+            cwd=str(self.root),
+            reader_id=READER_A,
+            now_us=self.now,
+        )
+        status = read_status(self.scope, reader_id=READER_A, now_us=self.now)
+
+        # Settling releases the claim, which is the remedy the gate names.
+        self.assertEqual(status["claims"]["active_this_session"], 0)
+
+    def test_a_dead_separate_sessions_claim_is_never_this_sessions(
+        self,
+    ) -> None:
+        """The per-invocation-session host, reproduced faithfully.
+
+        A host may give every shell invocation its own POSIX session, so
+        the process that claimed is already gone when anything later asks
+        about it. ``subprocess.run`` cannot reproduce that -- a child
+        inherits its parent's session -- so this spawns a real session
+        leader and reaps it.
+
+        The point of the assertions is the *coupling*: on such a host
+        this session can prove neither that a claim is its own nor that a
+        release was its own, because both read the same locator. So the
+        gate's release stand-down is unreachable there, and the claim
+        check that refines it cannot be the thing that lets a stranded
+        claim through -- the gate blocks on the counts either way.
+        """
+
+        self.enqueue("Taken by a session that then exits")
+        reader_id, session, claimed = support.dequeue_from_a_separate_session(
+            "agent-root",
+            self.root,
+            agent_root=self.agent_root,
+        )
+
+        status = read_status(self.scope, reader_id=READER_A)
+
+        self.assertEqual(claimed, 1)
+        self.assertNotEqual(session, os.getsid(0))
+        self.assertNotEqual(reader_id, _default_reader())
+        # Scope-wide the claim is live and blocks the gate on the counts.
+        self.assertEqual(status["claims"]["active"], 1)
+        # It is not this session's, and cannot become so: the session
+        # that took it no longer exists.
+        self.assertEqual(status["claims"]["active_this_session"], 0)
+        # The same evidence, read for the lease that same dead session
+        # took: not live, and no release of it could ever read as this
+        # session's. The two predicates stand or fall together.
+        self.assertEqual(status["reader"]["status"], "stale")
+        self.assertFalse(status["reader"]["live"])
+        self.assertFalse(status["reader"]["released_by_self"])
+
+    def test_a_later_session_cannot_release_a_dead_sessions_lease(
+        self,
+    ) -> None:
+        """Why the stand-down is unreachable under per-call sessions.
+
+        Release is keyed on the reader identity, which defaults to this
+        host plus this POSIX session. A later invocation on such a host
+        derives a different identity, so it matches no lease, records no
+        release, and replays vacuously -- and the claim it did not settle
+        stays behind. This is a limitation of the reader identity itself,
+        not of the per-session claim count, which reports the same zero
+        for the same reason.
+        """
+
+        self.enqueue("Claimed and abandoned")
+        support.dequeue_from_a_separate_session(
+            "agent-root",
+            self.root,
+            agent_root=self.agent_root,
+        )
+
+        released = release_reader_lease(self.scope, reader_id=_default_reader())
+
+        # Nothing was released: no lease names this identity.
+        self.assertTrue(released["replayed"])
+        self.assertEqual(released["claims_held"], 0)
+        self.assertEqual(
+            read_reader_lease(self.scope)["status"],
+            "stale",
+        )
+        # So the gate never sees a release to stand down for, and keeps
+        # blocking on the claim it can still see and name.
+        status = read_status(self.scope, reader_id=READER_A)
+        self.assertFalse(status["reader"]["released_by_self"])
+        self.assertEqual(status["claims"]["active"], 1)
+
+    def test_release_reports_the_callers_own_unsettled_claims(self) -> None:
+        self.enqueue("Mine")
+        self.enqueue("Somebody else's")
+        self.dequeue(READER_A)
+        support.claim_next_task_from_another_session(self.scope)
+
+        released = release_reader_lease(
+            self.scope,
+            reader_id=READER_A,
+            now_us=self.now,
+        )
+
+        # Release never refuses -- a mid-item handoff is legitimate and
+        # the call stays replayable -- but it says plainly that giving
+        # the role back settled nothing, counting only this session's own.
+        self.assertEqual(released["status"], "released")
+        self.assertFalse(released["replayed"])
+        self.assertEqual(released["claims_held"], 1)
+        self.assertEqual(
+            read_reader_lease(
+                self.scope,
+                reader_id=READER_A,
+                now_us=self.now,
+            )["status"],
+            "released",
+        )
+
+    def test_release_reports_no_claims_when_the_caller_settled_first(
+        self,
+    ) -> None:
+        task_id = self.enqueue("Settle me")
+        self.dequeue(READER_A)
+        settle_tasks_done(
+            self.scope,
+            task_ids=[task_id],
+            summary="done",
+            owner_id="worker",
+            cwd=str(self.root),
+            reader_id=READER_A,
+            now_us=self.now,
+        )
+
+        released = release_reader_lease(
+            self.scope,
+            reader_id=READER_A,
+            now_us=self.now,
+        )
+
+        self.assertEqual(released["claims_held"], 0)
 
 
 class ReaderLeaseScopeTest(unittest.TestCase):

@@ -76,7 +76,15 @@ number provide stable tie-breaking.
 `inbox claim` reserves source interpretation. `queue next` — with `dequeue`
 as its ergonomic synonym — atomically chooses and reserves ready tasks: a
 lease is time-bounded ownership, never removal. A claim records its owner,
-fence, and expiry.
+fence, and expiry, plus the session that took it.
+
+Owner and session are different questions. `owner` defaults to the OS user, so
+one person's concurrent terminals claim under the same owner; the recorded
+session — the claiming process's host and POSIX session id, exactly as a
+reader lease records its holder's — is what lets a session recognize its own
+claims among everyone's. Nothing in the CLI surfaces it directly; the one
+thing derived from it is the `claims.active_this_session` count that keeps a
+session from stopping on work only it can settle.
 
 Transactional shortcuts (`enqueue`, `task done`) compose this pipeline
 inside one journal transaction: they record a message, claim it, and apply
@@ -108,6 +116,11 @@ Single-reader governs dispatch, not settlement. A session that already holds a
 claim keeps applying, parking, failing, releasing, and completing that work
 after losing the role: the claim itself proves legitimate consumption, and
 none of those steps hands out new work. Losing the role never revokes a claim.
+
+The converse is the obligation: giving the role back settles nothing, so a
+session that releases while still holding claims of its own has not finished.
+`aiq reader release` says so, and the completion gate keeps blocking until
+each of those claims is settled or released.
 
 ## Scope
 

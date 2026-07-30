@@ -17,7 +17,7 @@ from typing import Any, Iterator
 import uuid
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SQLITE_MINIMUM_VERSION = (3, 37, 0)
 
 # Journal-level project label: the human-readable name of the repository
@@ -711,6 +711,41 @@ SCHEMA_V4_STATEMENTS = (
     """,
 )
 
+# The per-claim holder locator: the host and POSIX session id of the
+# process that took the claim, recorded exactly as `reader_leases` does
+# for the reader role. `owner_id` cannot serve here -- it defaults to the
+# OS user and is therefore identical across one person's concurrent
+# sessions -- so this pair is what lets a session recognize its *own*
+# claims inside a scope-wide count.
+#
+# Added by ALTER rather than by rebuilding the table. `claims` is
+# append-only: it carries no-update and no-delete triggers, an insert
+# validator tying every row to its `claim.acquired` event, CHECK
+# constraints, and an incoming foreign key from `claim_releases`. A
+# rebuild would have to drop and recreate all of that, copy every row
+# through a table whose own triggers exist to forbid exactly that, and
+# re-point the foreign key -- real risk on a ledger, for no gain.
+# ALTER TABLE ADD COLUMN is a metadata-only change in SQLite: it rewrites
+# no row, leaves every trigger, index, and foreign key untouched, and
+# gives existing rows NULL, which is precisely the "this claim recorded
+# no locator" reading the consumer already has to handle. Both columns
+# are nullable for the same reason the lease's are: a host without POSIX
+# sessions can derive no locator at all.
+SCHEMA_V5_STATEMENTS = (
+    "ALTER TABLE claims ADD COLUMN holder_host TEXT",
+    """
+    ALTER TABLE claims ADD COLUMN holder_sid INTEGER
+      CHECK (holder_sid IS NULL OR holder_sid > 0)
+    """,
+)
+
+# Schema 5 adds columns, not schema objects, so `sqlite_master` cannot
+# witness it by name. These are validated against PRAGMA table_info
+# instead, which keeps every schema version verifiable the same way.
+SCHEMA_V5_COLUMNS = {
+    "claims": ("holder_host", "holder_sid"),
+}
+
 APPEND_ONLY_V2_TABLES = (
     "schema_migrations",
     "task_numbers",
@@ -1280,6 +1315,11 @@ def _create_v4_schema(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _create_v5_schema(connection: sqlite3.Connection) -> None:
+    for statement in SCHEMA_V5_STATEMENTS:
+        connection.execute(statement)
+
+
 def _execute_script_statements(
     connection: sqlite3.Connection,
     script: str,
@@ -1367,6 +1407,38 @@ def _validate_schema_objects(
             f"journal schema objects are missing: {formatted}",
             code="integrity_failed",
         )
+    if schema_version >= 5:
+        _validate_schema_columns(connection, SCHEMA_V5_COLUMNS)
+
+
+def _validate_schema_columns(
+    connection: sqlite3.Connection,
+    required: dict[str, tuple[str, ...]],
+) -> None:
+    """Verify columns added by ALTER, which name no schema object.
+
+    A migration that adds a column leaves ``sqlite_master`` listing the
+    same tables it already did, so the object check above cannot see it.
+    Table names come from a module constant, never from input.
+    """
+
+    missing = []
+    for table, columns in required.items():
+        actual = {
+            row[1]
+            for row in connection.execute(f"PRAGMA table_info({table})")
+        }
+        missing.extend(
+            f"{table}.{column}"
+            for column in columns
+            if column not in actual
+        )
+    if missing:
+        missing.sort()
+        raise JournalError(
+            f"journal schema columns are missing: {', '.join(missing)}",
+            code="state_conflict",
+        )
 
 
 def _migration_backup(
@@ -1440,6 +1512,7 @@ def _initialize_journal_locked(
                     _create_v2_schema(connection)
                     _create_v3_schema(connection)
                     _create_v4_schema(connection)
+                    _create_v5_schema(connection)
                     metadata = {
                         "schema_version": str(SCHEMA_VERSION),
                         **_scope_metadata(scope),
@@ -1530,6 +1603,8 @@ def _initialize_journal_locked(
                             _create_v3_schema(connection)
                         if version < 4:
                             _create_v4_schema(connection)
+                        if version < 5:
+                            _create_v5_schema(connection)
                         connection.execute(
                             """
                             INSERT INTO schema_migrations(

@@ -106,13 +106,29 @@ such as `AIQ: not blocking: runnable work remains (1 ready task) but reader
 
 A session also stands the gate down by saying it is finished.
 `aiq reader release` means "I am no longer draining this queue", so when the
-lease is `released` and its recorded holder locator names this very session,
-the gate exits 0 with one stderr notice — `AIQ: not blocking: runnable work remains
+lease is `released`, its recorded holder locator names this very session, and
+this session holds no live claims of its own, the gate exits 0 with one stderr
+notice — `AIQ: not blocking: runnable work remains
 (1 ready task) but this session released the reader role — aiq reader status`.
 That is how a bounded run (one task, or a fixed batch) ends cleanly with ready
 work deliberately left behind. The release must be provably this session's own,
 under the same locator discipline: somebody else's release is not this session
 declaring anything.
+
+Releasing the role is not settling the work. Release deliberately leaves every
+per-item claim in place, so a session that dequeues a task, hands the role
+back, and stops would leave that task claimed and unworkable by anyone until
+its lease expired. A released session still holding claims of its own
+therefore keeps blocking, with a line naming the remedy:
+`AIQ: this session released the reader role but still holds 1 active claim of
+its own (1 ready task, 1 active claim) — settle finished work: aiq task done
+TASK_ID --summary TEXT — or hand it back: aiq claim release CLAIM_ID — list
+yours: aiq claim list --status active`.
+Only this session's own claims count, proved by the locator each claim
+records: a concurrent session claims under the same default owner, and this
+session could not settle or release its work honestly. A claim that recorded
+no locator is nobody's provable claim and does not block. `aiq reader release`
+warns about the same count on stderr when it happens, one step earlier.
 
 In every other case the gate blocks as above: no lease at all, an expired one,
 a release by another session, a holder that is provably dead, a holder on
@@ -129,6 +145,16 @@ took the lease; without proof that the holder is somebody else, an unproven
 holder may be this very session. One consequence is deliberate: a shared
 `AIQ_READER` fan-out proves nothing about who is draining the queue, so the
 gate keeps blocking every participant.
+
+Taken to its limit, that same property is a known limitation. Where a host
+gives *every* invocation its own POSIX session, no later process can prove any
+lease or claim is its own: `aiq reader release` matches no lease and records
+nothing, the release stand-down is never reached, and the gate simply blocks
+on the counts, naming whatever remains. Both stand-downs and the
+released-with-claims block depend on a session identity that survives between
+invocations; where it does not, the gate is strictly more conservative, never
+less. Setting `AIQ_READER` to a stable value makes the reader identity survive,
+but records no locator, so it does not by itself restore the stand-downs.
 
 The gate honors the host loop guard: when the `Stop` payload carries a truthy
 `stop_hook_active` — Codex sets it while a turn was already continued by a

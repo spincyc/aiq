@@ -131,6 +131,7 @@ TASK-1	done	r2
 $ aiq reader release
 status	released
 replayed	False
+claims_held	0
 ```
 
 The stop condition is the release. `aiq reader release` means "I am no longer
@@ -145,6 +146,22 @@ released the reader role — aiq reader status
 Without the release, the gate would have blocked and pushed the agent back to
 the two remaining tasks. That is the difference between "do one" and "do them
 all", and it is enforced, not merely requested.
+
+The `task done` step is not optional either. Releasing the role gives up the
+right to take *new* work; it does not finish the task already taken, which
+stays leased and unworkable by anyone else until it expires. So `release`
+counts what is still held (`claims_held` above) and warns when it is not zero,
+and the gate blocks the stop outright:
+
+```text
+AIQ: this session released the reader role but still holds 1 active claim of
+its own (1 ready task, 1 active claim) — settle finished work: aiq task done
+TASK_ID --summary TEXT — or hand it back: aiq claim release CLAIM_ID — list
+yours: aiq claim list --status active
+```
+
+Only this session's own claims count. Another session working the same journal
+is never your session's problem to settle.
 
 > **Known limitation.** The release is recognized only when the agent's
 > commands and the host's `Stop` hook run in the same operating-system
@@ -176,6 +193,7 @@ TASK-2	done	r2
 $ aiq reader release
 status	released
 replayed	False
+claims_held	0
 
 AIQ: not blocking: runnable work remains (1 ready task) but this session
 released the reader role — aiq reader status

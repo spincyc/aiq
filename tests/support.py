@@ -190,6 +190,131 @@ def release_reader_lease_from_this_session(scope, **keywords) -> str:
     )
 
 
+def claim_next_task_with_locator(
+    scope,
+    *,
+    locator,
+    owner_id: str = "located-worker",
+    lease_seconds: int = 3600,
+):
+    """Lease the next ready task, recording one holder locator on it.
+
+    ``locator`` is the ``(host, session)`` pair the claim row stores, or
+    ``None`` for a claim that records nothing -- the shape of every claim
+    written before schema 5, and of any claim taken on a host without
+    POSIX sessions. Only the acquisition is patched; every later read
+    runs unpatched against the stored pair.
+    """
+    from unittest.mock import patch
+
+    from aiq.queue import claim_next_tasks
+
+    with patch("aiq.queue._reader_locator", return_value=locator):
+        return claim_next_tasks(
+            scope,
+            owner_id=owner_id,
+            lease_seconds=lease_seconds,
+        )
+
+
+def claim_next_task_from_another_session(scope, **keywords):
+    """Lease the next ready task as a *different* live session would.
+
+    The recorded locator names this host and a session id that is not
+    this process's own, which is what makes the claim demonstrably
+    somebody else's rather than merely unattributed.
+    """
+    return claim_next_task_with_locator(
+        scope,
+        locator=(socket.gethostname(), os.getsid(0) + 1),
+        **keywords,
+    )
+
+
+# Dequeues one task as its own POSIX session leader and exits, so the
+# session that took the claim and the reader lease is genuinely gone by
+# the time anything asserts on it. Nothing is patched: the recorded
+# locators are the real ones this child derived. This is the shape a host
+# that gives every shell invocation its own session leaves behind, which
+# `subprocess.run` from a test can never reproduce -- a child inherits its
+# parent's session unless `start_new_session` asks otherwise.
+_SEPARATE_SESSION_DEQUEUE_PROGRAM = """
+import sys
+from pathlib import Path
+
+from aiq.config import _default_reader
+from aiq.journal import resolve_scope
+from aiq.queue import claim_next_tasks
+
+scope_name, cwd, owner_id, lease_seconds, agent_root = sys.argv[1:6]
+reader_id = _default_reader()
+items = claim_next_tasks(
+    resolve_scope(
+        scope_name,
+        cwd=Path(cwd),
+        agent_root=Path(agent_root) if agent_root else None,
+    ),
+    owner_id=owner_id,
+    reader_id=reader_id,
+    lease_seconds=int(lease_seconds),
+    reader_lease_seconds=int(lease_seconds),
+)
+print(reader_id)
+print(len(items))
+"""
+
+
+def dequeue_from_a_separate_session(
+    scope_name: str,
+    cwd: Path,
+    *,
+    owner_id: str = "separate-worker",
+    lease_seconds: int = 3600,
+    agent_root: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> tuple[str, int, int]:
+    """Dequeue in its own POSIX session, then reap it.
+
+    Returns the reader identity that session derived, its session id, and
+    how many tasks it took. On return the session is dead, so this is the
+    only faithful way to test a host that gives each shell invocation its
+    own session: the claim and the lease carry a locator that no later
+    process on this machine can match.
+    """
+    import aiq
+
+    environment = dict(os.environ if environment is None else environment)
+    package_root = str(Path(aiq.__file__).resolve().parents[1])
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        f"{package_root}{os.pathsep}{existing}" if existing else package_root
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _SEPARATE_SESSION_DEQUEUE_PROGRAM,
+            scope_name,
+            str(cwd),
+            owner_id,
+            str(lease_seconds),
+            "" if agent_root is None else str(agent_root),
+        ],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    stdout, stderr = process.communicate(timeout=60)
+    if process.returncode != 0:
+        raise AssertionError(f"separate-session dequeue failed: {stderr}")
+    reader_id, claimed = stdout.split()
+    # A `start_new_session` child is its own session leader, so its pid is
+    # its session id; communicate() has already reaped it.
+    return reader_id, process.pid, int(claimed)
+
+
 def hold_reader_lease_from_dead_session(
     scope,
     *,

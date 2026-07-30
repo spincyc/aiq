@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from aiq.cli._protocol import _emit, _scope, _scope_parser, _single_line
 from aiq.queue import (
@@ -56,11 +57,28 @@ def _reader_release(arguments: argparse.Namespace) -> int:
         _scope(arguments),
         reader_id=arguments.effective_config.reader,
     )
+    # Giving the role back is not settling the work: release leaves every
+    # per-item claim in place. Warn rather than refuse, because release is
+    # a total, replayable declaration and a handoff mid-item is legitimate;
+    # the completion gate is what actually stops such a session. One line,
+    # on stderr, so machine callers reading stdout are unaffected.
+    held = result["claims_held"]
+    if held:
+        print(
+            f"aiq: released the reader role while still holding {held} "
+            f"active claim{'' if held == 1 else 's'}; settle or release "
+            "them before stopping: aiq claim list --status active",
+            file=sys.stderr,
+        )
     if arguments.json:
         _emit(result, as_json=True)
         return 0
     _emit(
-        {"status": result["status"], "replayed": result["replayed"]},
+        {
+            "status": result["status"],
+            "replayed": result["replayed"],
+            "claims_held": held,
+        },
         as_json=False,
     )
     return 0

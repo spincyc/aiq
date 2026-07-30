@@ -374,8 +374,14 @@ class CliProtocolTests(unittest.TestCase):
         self.assertFalse(acquired["acquired"])
         self.assertEqual(acquired["reader"]["epoch"], 1)
         released = self.ok("reader", "release", *self.scope)
-        self.assertEqual(set(released), {"reader", "replayed", "status", "v"})
+        self.assertEqual(
+            set(released),
+            {"claims_held", "reader", "replayed", "status", "v"},
+        )
         self.assertFalse(released["replayed"])
+        # Nothing of this session's is still claimed, so release is silent
+        # on stderr; `self.ok` already asserted that.
+        self.assertEqual(released["claims_held"], 0)
         self.assertTrue(self.ok("reader", "release", *self.scope)["replayed"])
 
         reported = self.ok(

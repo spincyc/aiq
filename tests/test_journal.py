@@ -797,6 +797,229 @@ class JournalTest(unittest.TestCase):
             self.assertEqual(backup_version, "2")
             self.assertIsNone(backup_index)
 
+    def test_schema_v4_migrates_and_preserves_claims_without_locators(
+        self,
+    ) -> None:
+        """The v4 -> v5 claim locator lands without disturbing the ledger.
+
+        Schema 5 adds the two holder-locator columns by ALTER rather than
+        by rebuilding an append-only table, so the property under test is
+        that an existing claim survives byte for byte and simply reads
+        NULL for the columns that did not exist when it was written.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scope = self.agent_scope(root)
+            scope.journal_path.parent.mkdir(parents=True)
+            connection = sqlite3.connect(scope.journal_path)
+            try:
+                connection.executescript(SCHEMA_SQL)
+                journal_module._create_v2_schema(connection)
+                journal_module._create_v3_schema(connection)
+                journal_module._create_v4_schema(connection)
+                connection.executemany(
+                    """
+                    INSERT INTO journal_metadata(key, value)
+                    VALUES (?, ?)
+                    """,
+                    {
+                        "schema_version": "4",
+                        "scope_kind": scope.kind,
+                        "scope_root": str(scope.root),
+                        "scope_id": scope.scope_id,
+                    }.items(),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO schema_migrations(
+                      migration_id,
+                      from_version,
+                      to_version,
+                      migrated_at,
+                      backup_name
+                    ) VALUES (1, 0, 4, '2026-01-01T00:00:00+00:00', NULL)
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO messages(
+                      message_id,
+                      received_at,
+                      source,
+                      content,
+                      content_sha256,
+                      cwd
+                    ) VALUES (
+                      'msg_claimed',
+                      '2026-01-01T00:00:00+00:00',
+                      'user',
+                      'claimed before v5',
+                      ?,
+                      ?
+                    )
+                    """,
+                    (
+                        hashlib.sha256(b"claimed before v5").hexdigest(),
+                        str(root),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO events(
+                      event_id,
+                      occurred_at,
+                      event_type,
+                      message_id,
+                      payload_json
+                    ) VALUES (
+                      'evt_received',
+                      '2026-01-01T00:00:00+00:00',
+                      'message.received',
+                      'msg_claimed',
+                      '{}'
+                    )
+                    """
+                )
+                cursor = connection.execute(
+                    """
+                    INSERT INTO events(
+                      event_id,
+                      occurred_at,
+                      event_type,
+                      message_id,
+                      payload_json
+                    ) VALUES (
+                      'evt_claim',
+                      '2026-01-01T00:00:00+00:00',
+                      'claim.acquired',
+                      'msg_claimed',
+                      '{"claim_id":"clm_legacy"}'
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO claims(
+                      claim_id,
+                      resource_kind,
+                      resource_id,
+                      owner_id,
+                      fence,
+                      basis_revision,
+                      acquired_at_us,
+                      expires_at_us
+                    ) VALUES (
+                      'clm_legacy',
+                      'message',
+                      'msg_claimed',
+                      'legacy-worker',
+                      ?,
+                      NULL,
+                      1000,
+                      901000000
+                    )
+                    """,
+                    (cursor.lastrowid,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            scope.journal_path.chmod(0o600)
+
+            check_result = check_journal(scope)
+
+            migrated = sqlite3.connect(scope.journal_path)
+            migrated.row_factory = sqlite3.Row
+            try:
+                metadata = dict(
+                    migrated.execute(
+                        "SELECT key, value FROM journal_metadata"
+                    )
+                )
+                claim = migrated.execute(
+                    "SELECT * FROM claims WHERE claim_id = 'clm_legacy'"
+                ).fetchone()
+                migrations = migrated.execute(
+                    """
+                    SELECT migration_id, from_version, to_version, backup_name
+                    FROM schema_migrations
+                    ORDER BY migration_id
+                    """
+                ).fetchall()
+                integrity = migrated.execute(
+                    "PRAGMA integrity_check"
+                ).fetchone()[0]
+                foreign_keys = migrated.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchall()
+                # The append-only guards are metadata, not data, so an
+                # ALTER must leave them exactly where a rebuild would
+                # have had to recreate them.
+                triggers = {
+                    row[0]
+                    for row in migrated.execute(
+                        """
+                        SELECT name
+                        FROM sqlite_master
+                        WHERE type = 'trigger' AND tbl_name = 'claims'
+                        """
+                    )
+                }
+            finally:
+                migrated.close()
+
+            self.assertEqual(metadata["schema_version"], str(SCHEMA_VERSION))
+            self.assertEqual(check_result["schema_version"], SCHEMA_VERSION)
+            self.assertEqual(check_result["claims"], 1)
+            self.assertEqual(
+                dict(claim),
+                {
+                    "claim_id": "clm_legacy",
+                    "resource_kind": "message",
+                    "resource_id": "msg_claimed",
+                    "owner_id": "legacy-worker",
+                    "fence": claim["fence"],
+                    "basis_revision": None,
+                    "acquired_at_us": 1000,
+                    "expires_at_us": 901000000,
+                    # Written before the columns existed: unattributed,
+                    # and therefore never counted as any session's own.
+                    "holder_host": None,
+                    "holder_sid": None,
+                },
+            )
+            self.assertEqual(
+                read_status(scope, now_us=1000)["claims"],
+                {"active": 1, "active_this_session": 0},
+            )
+            self.assertEqual(integrity, "ok")
+            self.assertEqual(foreign_keys, [])
+            self.assertEqual(
+                triggers,
+                {
+                    "claims_no_update",
+                    "claims_no_delete",
+                    "claims_no_replace",
+                    "claims_validate_insert",
+                },
+            )
+            self.assertEqual(len(migrations), 2)
+            self.assertEqual(migrations[1][:3], (2, 4, SCHEMA_VERSION))
+            backup_path = (
+                scope.journal_path.parent / "backups" / migrations[1][3]
+            )
+            backup = sqlite3.connect(backup_path)
+            try:
+                backup_columns = {
+                    row[1]
+                    for row in backup.execute("PRAGMA table_info(claims)")
+                }
+            finally:
+                backup.close()
+            self.assertNotIn("holder_host", backup_columns)
+            self.assertNotIn("holder_sid", backup_columns)
+
     def test_fresh_journal_creates_claims_lookup_index(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

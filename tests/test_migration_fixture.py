@@ -124,6 +124,12 @@ class MigrationFixtureTest(unittest.TestCase):
                     WHERE type = 'table' AND name = 'reader_leases'
                     """
                 ).fetchone()
+                claim_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(claims)"
+                    )
+                }
                 current_integrity = connection.execute(
                     "PRAGMA integrity_check"
                 ).fetchone()[0]
@@ -161,6 +167,12 @@ class MigrationFixtureTest(unittest.TestCase):
             )
             self.assertEqual(migration[:2], (1, SCHEMA_VERSION))
             self.assertEqual(reader_lease_table, ("reader_leases",))
+            # Every later schema lands in one pass, including the v5
+            # columns, which are added by ALTER and so name no object.
+            self.assertLessEqual(
+                {"holder_host", "holder_sid"},
+                claim_columns,
+            )
             self.assertEqual(current_integrity, "ok")
             self.assertEqual(current_foreign_keys, [])
             self.assertEqual(

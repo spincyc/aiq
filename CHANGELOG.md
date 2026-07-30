@@ -26,6 +26,35 @@ effects documents, capability contracts, and integration manifests.
   session, and a release under an explicitly configured identity that records
   no locator, keep blocking exactly as before.
 
+- **Releasing the reader role no longer stands the `Stop` gate down while the
+  session still holds claims of its own.** Release is a statement about
+  dispatch and deliberately leaves per-item claims in place, so a session that
+  dequeued a task, released the role, and stopped left that task claimed and
+  unworkable by anyone until its lease expired. Claims now record the session
+  that took them — the claiming process's host and POSIX session id, exactly as
+  reader leases already do, since `owner` defaults to the OS user and cannot
+  separate one person's concurrent sessions — and `status --json` reports the
+  new `claims.active_this_session` count beside the scope-wide
+  `claims.active`. A released session holding any of its own blocks with
+  `AIQ: this session released the reader role but still holds 1 active claim
+  of its own (…) — settle finished work: aiq task done TASK_ID --summary TEXT
+  — or hand it back: aiq claim release CLAIM_ID — list yours: aiq claim list
+  --status active`; releasing with nothing held stands the gate down exactly
+  as before. A concurrent session's claim never blocks this one, and a claim
+  written before schema 5 records no session and blocks nobody.
+  `aiq reader release` reports the same count as `claims_held` and warns on
+  stderr rather than refusing, so a mid-item handoff still works. Journal storage
+  moves to schema 5, migrating on first open with an automatic pre-migration
+  backup; every AIQ installation reaching a migrated journal must be upgraded.
+  The new count inherits the reader lease's known limitation: a session is
+  identified by its POSIX session id, so on a host that gives every shell
+  invocation its own session it reads zero. That is the same condition under
+  which `reader.released_by_self` is never true and `aiq reader release`
+  matches no lease, so the release stand-down is unreachable there and the
+  gate blocks on the plain counts — the refinement fails toward blocking and
+  cannot widen the hole. See the known limitation in
+  [`cli-v1.md`](docs/contracts/cli-v1.md#status).
+
 ### Changed
 
 - **Breaking: error codes and exit statuses are corrected.** Pinning each code

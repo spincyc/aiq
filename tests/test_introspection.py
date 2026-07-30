@@ -251,7 +251,10 @@ class ExplainTaskTests(IntrospectionTestCase):
         self.assertEqual(explained["explanation"], "ready: no prerequisites")
 
         status = read_status(self.scope)
-        self.assertEqual(status["claims"], {"active": 0})
+        self.assertEqual(
+            status["claims"],
+            {"active": 0, "active_this_session": 0},
+        )
         self.assertIn(
             first,
             [task["task_id"] for task in status["ready"]],

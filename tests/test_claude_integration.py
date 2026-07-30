@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import support
 from aiq import journal
+from aiq.config import _default_reader
 from aiq.integrations import _hooks
 from aiq.integrations.claude import (
     ClaudeIntegrationError,
@@ -901,11 +902,23 @@ class ClaudeIntegrationTest(unittest.TestCase):
         )
         return repository
 
-    def _run_gate(self, repository: Path) -> tuple[int, str]:
-        """Run one Stop payload through the gate as GATE_READER."""
+    def _run_gate(
+        self,
+        repository: Path,
+        *,
+        reader_id: str | None = GATE_READER,
+    ) -> tuple[int, str]:
+        """Run one Stop payload through the gate as GATE_READER.
+
+        ``reader_id=None`` leaves `AIQ_READER` unset so the gate derives
+        the default identity, which is what a real host does.
+        """
 
         errors = io.StringIO()
-        with patch.dict(os.environ, {"AIQ_READER": GATE_READER}):
+        overrides = {} if reader_id is None else {"AIQ_READER": reader_id}
+        with patch.dict(os.environ, overrides):
+            if reader_id is None:
+                os.environ.pop("AIQ_READER", None)
             status = receive_hook_main(
                 input_stream=io.BytesIO(
                     json.dumps(
@@ -991,6 +1004,138 @@ class ClaudeIntegrationTest(unittest.TestCase):
                 "but this session released the reader role — "
                 "aiq reader status\n",
             )
+
+    def test_stop_gate_blocks_a_release_that_leaves_own_claims_behind(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._runnable_repository(Path(temporary_directory))
+            scope = resolve_scope("repo", cwd=repository)
+            enqueue_task(scope, title="Also settle me", owner_id="gate-test")
+            # The gap TASK-53 closes: release is a statement about
+            # dispatch and deliberately leaves per-item claims alone, so
+            # a session that dequeues, releases, and stops would strand
+            # its own claimed task for a whole lease period.
+            claimed = support.claim_next_task_with_locator(
+                scope,
+                locator=(socket.gethostname(), os.getsid(0)),
+                owner_id="gate-test",
+            )
+            support.release_reader_lease_from_this_session(scope)
+
+            status, errors = self._run_gate(repository)
+
+            self.assertEqual(len(claimed), 1)
+            self.assertEqual(status, 2)
+            lines = errors.splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(
+                lines[0],
+                "AIQ: this session released the reader role but still "
+                "holds 1 active claim of its own (1 ready task, 1 active "
+                "claim) — settle finished work: aiq task done TASK_ID "
+                "--summary TEXT — or hand it back: aiq claim release "
+                "CLAIM_ID — list yours: aiq claim list --status active",
+            )
+
+    def test_stop_gate_release_stands_down_over_a_foreign_sessions_claim(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._runnable_repository(Path(temporary_directory))
+            scope = resolve_scope("repo", cwd=repository)
+            enqueue_task(scope, title="Not mine", owner_id="gate-test")
+            # Scope-wide claim counting cannot gate a session: `owner_id`
+            # defaults to the OS user, so one person's second session
+            # claims under the very same owner. Only the locator tells
+            # them apart.
+            support.claim_next_task_from_another_session(scope)
+            support.release_reader_lease_from_this_session(scope)
+
+            status, errors = self._run_gate(repository)
+
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                errors,
+                "AIQ: not blocking: runnable work remains (1 ready task, "
+                "1 active claim) but this session released the reader "
+                "role — aiq reader status\n",
+            )
+
+    def test_stop_gate_blocks_when_the_claiming_session_is_already_gone(
+        self,
+    ) -> None:
+        """The per-invocation-session host, end to end.
+
+        Where every shell invocation is its own POSIX session, the shell
+        that dequeued is dead before anything else runs. Nothing later
+        can prove that lease or that claim is its own, so the release
+        records nothing and the gate never reaches the release
+        stand-down at all -- it blocks on the plain counts, naming the
+        stranded claim. This is the direction the whole locator
+        mechanism fails in, and it is the safe one: the per-session
+        claim count cannot let a stranded claim through, because the
+        stand-down it guards is already unreachable.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._runnable_repository(Path(temporary_directory))
+            scope = resolve_scope("repo", cwd=repository)
+            enqueue_task(scope, title="Also settle me", owner_id="gate-test")
+            reader_id, session, claimed = (
+                support.dequeue_from_a_separate_session("repo", repository)
+            )
+
+            # What a later shell's `aiq reader release` actually does on
+            # such a host: it derives a different identity, matches no
+            # lease, and replays without recording a release.
+            released = release_reader_lease(
+                scope,
+                reader_id=_default_reader(),
+            )
+            status, errors = self._run_gate(repository, reader_id=None)
+
+            self.assertEqual(claimed, 1)
+            self.assertNotEqual(session, os.getsid(0))
+            self.assertNotEqual(reader_id, _default_reader())
+            self.assertTrue(released["replayed"])
+            # Nothing of this session's is held, because nothing can be
+            # proved to be -- the same reason the release did not stick.
+            self.assertEqual(released["claims_held"], 0)
+            # So the gate blocks on the counts, exactly as it did before
+            # this change, and the claim is named rather than hidden.
+            self.assertEqual(status, 2)
+            lines = errors.splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertTrue(
+                lines[0].startswith(
+                    "AIQ: runnable work remains: 1 ready task, 1 active claim"
+                ),
+                lines[0],
+            )
+            # And emphatically not the new released-with-claims line: the
+            # gate never got that far.
+            self.assertNotIn("released the reader role", lines[0])
+
+    def test_stop_gate_release_stands_down_over_a_locatorless_claim(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._runnable_repository(Path(temporary_directory))
+            scope = resolve_scope("repo", cwd=repository)
+            enqueue_task(scope, title="Written before v5", owner_id="gate-test")
+            # A claim stored before schema 5 records no locator at all.
+            # It is not provably this session's, and blocking on it would
+            # be unclearable by any act this session can take, so the
+            # release still stands the gate down and the claim recovers
+            # on its own schedule.
+            support.claim_next_task_with_locator(scope, locator=None)
+            support.release_reader_lease_from_this_session(scope)
+
+            status, errors = self._run_gate(repository)
+
+            self.assertEqual(status, 0)
+            self.assertIn("but this session released the reader role", errors)
 
     def test_stop_gate_release_notice_is_one_sanitized_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

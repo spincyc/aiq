@@ -1867,6 +1867,13 @@ def gate_stop_hook(
     status = read_status(scope, reader_id=reader_id)
     ready_tasks = int(status["tasks"].get("ready", 0))
     active_claims = int(status["claims"].get("active", 0))
+    # The subset of those claims this very session holds, proved by the
+    # locator recorded on each claim. Scope-wide `active` cannot serve
+    # here: it counts a concurrent session's claims too, and `owner_id`
+    # cannot separate them because it defaults to the OS user. A patched
+    # or older status shape without the datum reads zero, which restores
+    # exactly the pre-schema-5 behaviour rather than blocking on nothing.
+    own_claims = int(status["claims"].get("active_this_session", 0))
     # A parked needs_input message awaits the user, not the agent, so it
     # deliberately does not count as runnable work here.
     unapplied_messages = int(status["messages"].get("received", 0))
@@ -1935,11 +1942,37 @@ def gate_stop_hook(
     # keeps blocking. A patched or older status shape without the datum
     # reads falsy and therefore blocks too.
     if reader.get("released_by_self"):
+        # Releasing the role is a statement about dispatch, not about the
+        # items already taken: it deliberately leaves every per-item claim
+        # in place. A session that stops here strands its own claimed work
+        # for a whole lease period, unworkable by anyone. So the release
+        # stands the gate down only for a session holding nothing of its
+        # own; otherwise the obligation is the claim, and the remedy is to
+        # settle or release it.
+        #
+        # This branch is reachable only when the release above proved to
+        # be this session's, which needs the recorded locator to match.
+        # Where it cannot -- a host giving each shell invocation its own
+        # POSIX session -- `released_by_self` is false and control never
+        # arrives here, so the gate blocks on the counts below. See the
+        # known limitation on `_count_active_claims_this_session`
+        # (TASK-61): this check is exactly as reliable as the stand-down
+        # it refines, and fails toward blocking.
+        if not own_claims:
+            return (
+                False,
+                f"AIQ: not blocking: runnable work remains ({summary}) but "
+                "this session released the reader role"
+                f"{parked_note} — aiq reader status",
+            )
         return (
-            False,
-            f"AIQ: not blocking: runnable work remains ({summary}) but "
-            "this session released the reader role"
-            f"{parked_note} — aiq reader status",
+            True,
+            "AIQ: this session released the reader role but still holds "
+            f"{_count_noun(own_claims, 'active claim')} of its own"
+            f" ({summary}){parked_note} — settle finished work: "
+            "aiq task done TASK_ID --summary TEXT — or hand it back: "
+            "aiq claim release CLAIM_ID — list yours: "
+            "aiq claim list --status active",
         )
     # Make the single block line actionable: name up to the first three
     # ready tasks and the exact settle command, so a model blocked once

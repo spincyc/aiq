@@ -127,7 +127,10 @@ class StatusCliTest(unittest.TestCase):
             },
         )
         self.assertEqual(payload["tasks"]["ready"], 1)
-        self.assertEqual(payload["claims"], {"active": 0})
+        self.assertEqual(
+            payload["claims"],
+            {"active": 0, "active_this_session": 0},
+        )
         (entry,) = payload["ready"]
         created_at = entry.pop("created_at")
         datetime.fromisoformat(created_at)
@@ -268,7 +271,10 @@ class StatusCliTest(unittest.TestCase):
         self.assertEqual(payload["v"], 1)
         self.assertEqual(sum(payload["messages"].values()), 0)
         self.assertEqual(sum(payload["tasks"].values()), 0)
-        self.assertEqual(payload["claims"], {"active": 0})
+        self.assertEqual(
+            payload["claims"],
+            {"active": 0, "active_this_session": 0},
+        )
         self.assertEqual(payload["ready"], [])
         self.assertEqual(payload["blocked"], [])
         self.assertFalse(

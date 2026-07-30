@@ -1655,7 +1655,7 @@ class QueueTest(unittest.TestCase):
                     "canceled": 0,
                     "superseded": 0,
                 },
-                "claims": {"active": 0},
+                "claims": {"active": 0, "active_this_session": 0},
                 "reader": {
                     "status": "absent",
                     "held": False,
@@ -1726,7 +1726,10 @@ class QueueTest(unittest.TestCase):
         )
         self.assertEqual(status["tasks"]["ready"], 1)
         self.assertEqual(status["tasks"]["queued"], 1)
-        self.assertEqual(status["claims"], {"active": 1})
+        self.assertEqual(
+            status["claims"],
+            {"active": 1, "active_this_session": 1},
+        )
         (ready_entry,) = status["ready"]
         created_at = ready_entry.pop("created_at")
         datetime.fromisoformat(created_at)
@@ -1741,7 +1744,10 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(active_status["tasks"]["active"], 1)
         self.assertEqual(active_status["tasks"]["ready"], 0)
         self.assertEqual(active_status["ready"], [])
-        self.assertEqual(active_status["claims"], {"active": 2})
+        self.assertEqual(
+            active_status["claims"],
+            {"active": 2, "active_this_session": 2},
+        )
 
     def test_read_status_counts_expired_message_lease_as_received(self) -> None:
         message = self.ingest("Expiring message")
@@ -1757,7 +1763,10 @@ class QueueTest(unittest.TestCase):
 
         self.assertEqual(status["messages"]["processing"], 0)
         self.assertEqual(status["messages"]["received"], 1)
-        self.assertEqual(status["claims"], {"active": 0})
+        self.assertEqual(
+            status["claims"],
+            {"active": 0, "active_this_session": 0},
+        )
 
     def test_read_status_bounds_ready_tasks_by_priority(self) -> None:
         self.apply(

@@ -47,6 +47,15 @@ _EXPORT_RECORDS = (
     ("claim", "claims", ("claim_id",), {}),
     ("claim_release", "claim_releases", ("claim_id",), {}),
 )
+# Stored columns that carry no semantic history and are therefore never
+# exported. `task_number` is allocator state. A claim's holder locator is
+# the host and POSIX session id of the process that took it: live
+# coordination state, excluded for the same reason the whole reader lease
+# is, so an export still names no host and no session id.
+_EXPORT_EXCLUDED_COLUMNS = {
+    "task": ("task_number",),
+    "claim": ("holder_host", "holder_sid"),
+}
 _SCHEMA_V2_TABLE_NAMES = frozenset(
     {
         "journal_metadata",
@@ -139,8 +148,8 @@ def _export_rows(
             f"SELECT * FROM {quoted_table} ORDER BY {order}"
         ):
             semantic_row = dict(row)
-            if record_type == "task":
-                del semantic_row["task_number"]
+            for excluded in _EXPORT_EXCLUDED_COLUMNS.get(record_type, ()):
+                del semantic_row[excluded]
             for stored_name, public_name in json_columns.items():
                 raw_value = semantic_row.pop(stored_name)
                 try:

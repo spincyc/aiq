@@ -123,8 +123,17 @@ JSON `task_id` values are never prefixed.
 | `basis_revision` | integer or null | Claimed task revision; null for messages |
 | `expires_at` | RFC 3339 string | Lease deadline |
 
-Fence counters, acquisition event sequences, and microsecond storage values are
-internal and never appear in protocol v1.
+Fence counters, acquisition event sequences, the recorded holder locator, and
+microsecond storage values are internal and never appear in protocol v1.
+
+Every claim records which session took it — the claiming process's host and
+POSIX session id, stored exactly as the [reader lease](#reader-lease) records
+its holder's. `owner_id` cannot serve that purpose: it defaults to the OS user
+and is therefore identical across one person's concurrent sessions. The
+locator is never exported and never rendered; the one surface derived from it
+is `claims.active_this_session` in [Status](#status), which is what lets a
+completion gate hold a session to its own claims and only its own. A claim
+written before schema 5 has no locator and counts as nobody's.
 
 ### Reader lease
 
@@ -228,7 +237,7 @@ The tables list fields in addition to top-level `v`.
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `reader status --json` | `reader` containing the [Reader lease](#reader-lease) object, `scope` |
 | `reader acquire --json` | `status: "acquired"`, `acquired`, `reader` |
-| `reader release --json` | `status: "released"`, `replayed`, `reader` |
+| `reader release --json` | `status: "released"`, `replayed`, `claims_held`, `reader` |
 | `status --json` | `messages`, `tasks`, `project`, `claims`, `reader`, `ready`, `blocked`, `scope` |
 | `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
@@ -502,7 +511,7 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 | `messages` | Message counts keyed by `received`, `processing`, `applied`, `needs_input`, and `failed` |
 | `tasks` | Effective task-state counts keyed by every task state |
 | `project` | The journal's [project label](#project-label) |
-| `claims` | `active`: unreleased, unexpired message and task leases |
+| `claims` | `active`: unreleased, unexpired message and task leases, scope-wide; `active_this_session`: the subset whose recorded holder locator names this very session |
 | `reader` | The [Reader lease](#reader-lease) object reduced to `status`, `held`, `self`, `owner_id`, `reader_id`, and `expires_at`, read from this same snapshot, plus `live` and `released_by_self` |
 | `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, `title`, and `created_at` |
 | `blocked` | At most five blocked tasks in the same order, each with only `task_id`, `priority`, `title`, and `blocked_by` — the failed prerequisite task IDs causing the block, empty for a directly blocked task |
@@ -532,6 +541,44 @@ host and this process's own POSIX session. A release by anyone else, and a
 release under an explicitly configured identity that recorded no locator, read
 false. The two fields are mutually exclusive: a lease cannot be both `held` and
 `released`.
+
+`claims.active_this_session` answers the question `claims.active` cannot: of
+the live claims in this scope, which ones is *this* caller answerable for? It
+counts a claim only when the locator recorded on it names this host and this
+process's own POSIX session — the same proof `reader.released_by_self`
+demands, and no liveness probe is needed because the asking process is the
+proof. It is always less than or equal to `claims.active`; a concurrent
+session's claim is counted by `active` and not by `active_this_session`, even
+though both sessions claim under the same default `owner_id`.
+
+Absent evidence resolves to "not mine". A claim carrying no locator — every
+claim written before schema 5, and any claim taken where no POSIX session can
+be derived — is counted by `active` alone. This deliberately inverts the
+completion gate's usual bias, because the question inverts with it: with no
+proof, "is another session covering for me?" must answer no, and so must "is
+this claim mine?". Counting an unattributable claim as this session's would
+block that session on state it can neither settle nor release honestly, and no
+amount of waiting would clear it; not counting one leaves at most a single
+lease period of a pre-migration claim unenforced — still named by
+`claims.active` and by the gate's own line, and self-healing the moment that
+claim expires or is re-taken.
+
+**Known limitation.** A POSIX session identifies a session only on a host
+where one session spans many invocations. A host that gives every shell
+invocation its own session — some agent harnesses do — leaves the claiming
+process dead before anything later asks, so `claims.active_this_session` reads
+zero for claims that really do belong to the same logical session. The same
+limitation applies to `reader.released_by_self`, which reads the identical
+evidence, and to the default `reader` identity itself, which is derived from
+the same session id and is what `reader release` matches on: on such a host a
+later invocation releases nothing and the lease stays `held` or `stale`.
+The two therefore fail together and in the same direction — the release
+stand-down is unreachable, so the gate blocks on the plain counts and names
+the outstanding claim — which is why refining the stand-down with a
+per-session claim count can never widen the enforcement hole. Making session
+identity survive per-invocation shells requires re-grounding the `reader`
+identity, the lease locator, and this count together, and is not part of
+protocol v1 today.
 Human-readable `ready` and `blocked` lines render the task reference
 as `[label: TASK-19]`; the `blocked by` causes stay bare IDs.
 
@@ -580,6 +627,18 @@ acquisition. `release` gives the role up: holding nothing, an already released
 lease, and an expired lease all replay with `replayed: true` and exit 0, while
 another live holder is `reader_held`. There is no force, steal, or revoke of a
 live lease; wait for its expiry instead.
+
+`release` never settles anything: it gives up the right to hand out new work
+and leaves every per-item claim exactly where it was. `claims_held` reports
+how many live claims of the caller's own remain at that instant — the same
+count as `claims.active_this_session` — and a non-zero count also prints one
+`aiq: released the reader role while still holding N active claims; …` line on
+stderr. It is a warning, not a refusal: release stays total and replayable,
+and handing the role over while finishing an item already claimed is
+legitimate. The obligation is enforced where stopping actually happens: the
+`Stop` completion gate described under [Integrations](#integrations) keeps
+blocking a session that released the role while still holding claims of its
+own.
 
 The gated commands take no `--reader` flag: the identity comes from
 configuration or `AIQ_READER` so one session cannot accidentally consume under
@@ -882,12 +941,32 @@ session is a writer only, and its notice names the holder, for example
 `AIQ: not blocking: runnable work remains (1 ready task) but reader
 "host-4242" holds the reader lease — aiq reader status`.
 
-The second is `reader.released_by_self` true — the release-as-completion
-signal. `aiq reader release` means "I am no longer draining this queue", so a
-session that took the role and then gave it back has explicitly and durably
-recorded that it finished on purpose. Its notice is
+The second is `reader.released_by_self` true *and* `claims.active_this_session`
+zero — the release-as-completion signal. `aiq reader release` means "I am no
+longer draining this queue", so a session that took the role and then gave it
+back has explicitly and durably recorded that it finished on purpose. Its
+notice is
 `AIQ: not blocking: runnable work remains (1 ready task) but this session
 released the reader role — aiq reader status`.
+
+The claim condition is not decoration. Release is a statement about dispatch
+and deliberately leaves every per-item claim in place, so a session that
+dequeues a task, releases the role, and stops would leave that task claimed
+and unworkable by anyone until its lease expired. A released session still
+holding claims of its own therefore blocks with exit 2 and one line:
+`AIQ: this session released the reader role but still holds 1 active claim of
+its own (1 ready task, 1 active claim) — settle finished work: aiq task done
+TASK_ID --summary TEXT — or hand it back: aiq claim release CLAIM_ID — list
+yours: aiq claim list --status active`.
+The count is `claims.active_this_session`, never the scope-wide
+`claims.active`: blocking on the latter would block this session for a
+concurrent session's claim, which it cannot settle or release honestly. A
+claim with no recorded locator is not this session's and does not block it —
+see [Status](#status) for why that direction is the safe one, and for the
+known limitation both this condition and `reader.released_by_self` inherit
+from POSIX session identity. Where that identity does not survive between
+invocations, this line is unreachable and the ordinary block line above
+applies instead, still naming the outstanding claim.
 This is what makes a bounded run — one task, or a fixed batch — end cleanly
 with ready work deliberately left behind, instead of absorbing a spurious
 block. The notice still names the remaining work, so nothing is hidden. The
@@ -931,7 +1010,7 @@ needs a flag the gate does not already honor.
 
 | Mode | Sequence | Stop predicate |
 |---|---|---|
-| Run one task, then stop | `dequeue` → settle with `task done` → `reader release` | one settled task, then `reader.status == "released"` with `reader.released_by_self` true |
+| Run one task, then stop | `dequeue` → settle with `task done` → `reader release` | one settled task, then `reader.status == "released"` with `reader.released_by_self` true and `claims.active_this_session == 0` |
 | Run N tasks, then stop | repeat `dequeue` → `task done` until N settled or `items == []` → `reader release` | N settled or `items == []`, then the same released reading |
 | Run until exhausted | repeat `dequeue` → `task done` while `items != []` | `items == []`; `status --json` then says which end: `tasks.blocked == 0` is queue empty, `tasks.blocked > 0` is everything remaining blocked |
 
@@ -939,8 +1018,11 @@ The first two are bounded, so they end with ready work still queued, and the
 `reader release` is what tells the gate that is deliberate. The third ends with
 nothing ready, so the gate is satisfied on the counts alone and the release is
 optional hygiene rather than a signal. In every mode `reader release` leaves
-held claims untouched: settle or release each claim on its own, because
-`tasks.ready == 0` with `claims.active > 0` still blocks.
+held claims untouched, so the settle step is not optional: releasing the role
+with `claims.active_this_session > 0` blocks, and `tasks.ready == 0` with
+`claims.active > 0` blocks a session that never released at all. `release`
+reports the count as `claims_held` and warns on stderr, so the omission is
+visible one step before the gate names it.
 
 ## Post-upgrade reconciliation
 

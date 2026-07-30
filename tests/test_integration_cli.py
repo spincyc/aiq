@@ -778,6 +778,83 @@ class IntegrationCliTests(unittest.TestCase):
             "this session released the reader role — aiq reader status\n",
         )
 
+    def test_releasing_without_settling_still_blocks_the_stop(self) -> None:
+        """Release declares dispatch finished, not the work settled.
+
+        A session that dequeues, hands the role back, and stops would
+        leave its own task claimed and unworkable by anyone until the
+        lease expires. Release says so on stderr, and the gate refuses
+        the stop until the claim is actually settled or released.
+        """
+
+        support.initialize_repo_journal(self.repository)
+        task = self.assert_json_success(
+            self.run_aiq("enqueue", "Run me", "--json")
+        )
+        self.assert_json_success(
+            self.run_aiq("enqueue", "Leave me queued", "--json")
+        )
+        stop_payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session",
+            "cwd": str(self.repository),
+        }
+
+        self.assert_json_success(
+            self.run_aiq("dequeue", "--owner", "mode-one", "--json")
+        )
+
+        # Release without settling: exit 0, but one stderr warning.
+        released = self.run_aiq("reader", "release", "--json")
+        self.assertEqual(released.returncode, 0, released.stderr)
+        payload = json.loads(released.stdout)
+        self.assertEqual(payload["status"], "released")
+        self.assertEqual(payload["claims_held"], 1)
+        self.assertEqual(
+            released.stderr,
+            "aiq: released the reader role while still holding 1 active "
+            "claim; settle or release them before stopping: "
+            "aiq claim list --status active\n",
+        )
+
+        # The gate is where the warning has teeth.
+        blocked = self.receive_stop(stop_payload)
+        self.assertEqual(blocked.returncode, 2)
+        self.assertEqual(
+            blocked.stderr,
+            "AIQ: this session released the reader role but still holds "
+            "1 active claim of its own (1 ready task, 1 active claim) — "
+            "settle finished work: aiq task done TASK_ID --summary TEXT "
+            "— or hand it back: aiq claim release CLAIM_ID — list yours: "
+            "aiq claim list --status active\n",
+        )
+
+        # Settle, release again, and the same stop is a notice.
+        self.assert_json_success(
+            self.run_aiq(
+                "task",
+                "done",
+                str(task["task_id"]),
+                "--summary",
+                "settled after all",
+                "--owner",
+                "mode-one",
+                "--json",
+            )
+        )
+        settled_release = self.assert_json_success(
+            self.run_aiq("reader", "release", "--json")
+        )
+        self.assertEqual(settled_release["claims_held"], 0)
+
+        stopped = self.receive_stop(stop_payload)
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        self.assertEqual(
+            stopped.stderr,
+            "AIQ: not blocking: runnable work remains (1 ready task) but "
+            "this session released the reader role — aiq reader status\n",
+        )
+
     def test_drain_stop_conditions_are_readable_without_parsing_prose(
         self,
     ) -> None:

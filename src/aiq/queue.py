@@ -613,6 +613,68 @@ def _reader_holder_is_this_session(row: sqlite3.Row) -> bool:
     return locator is not None and locator[0] == host and locator[1] == session
 
 
+def _count_active_claims_this_session(
+    connection: sqlite3.Connection,
+    *,
+    now_us: int,
+) -> int:
+    """Count unreleased, unexpired claims this very session holds.
+
+    The claim-side twin of :func:`_reader_holder_is_this_session`, over
+    the same evidence and with the same standard of proof: a locator was
+    recorded on the claim, it names this host, and it names this
+    process's own POSIX session. No liveness probe is needed, because
+    this process is the running proof. ``owner_id`` deliberately plays no
+    part -- it defaults to the OS user, so it is shared by one person's
+    concurrent sessions and can never separate them.
+
+    A claim carrying no locator is *not* counted. That inverts the
+    gate's usual "missing proof means block" bias on purpose, because the
+    question inverts with it: absent evidence, "is somebody else covering
+    for me?" must answer no, but "is this claim mine?" must also answer
+    no. Counting an unattributable claim as this session's would block a
+    session on state it cannot settle or release honestly -- exactly the
+    scope-wide false positive that a per-session count exists to remove
+    -- and no waiting would clear it. Under-counting instead leaves at
+    most one lease period of a pre-schema-5 claim unenforced, the gate
+    still names it in the block or notice line, and it self-heals as soon
+    as that claim expires or is re-taken with a locator.
+
+    KNOWN LIMITATION (TASK-61). A POSIX session id identifies a session
+    only on a host where one session spans many invocations. Claude Code
+    gives every shell invocation its own session, so the process that
+    claimed is already gone when anything later asks, and this count
+    reads zero for claims that really are the same logical session's.
+    That is not a hole this function opens: `released_by_self` reads the
+    identical evidence and the reader identity `reader release` is keyed
+    on is derived from the same session id, so on such a host the release
+    records nothing, the stand-down this count refines is never reached,
+    and the gate blocks on the plain counts instead. The refinement is
+    therefore exactly as reliable as the stand-down it guards -- never
+    less -- and fails toward blocking. Re-grounding session identity on
+    something that survives per-invocation shells has to move the reader
+    identity, the lease locator, and this count together.
+    """
+
+    locator = _reader_locator()
+    if locator is None:
+        return 0
+    host, session = locator
+    return connection.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM claims AS claim
+        LEFT JOIN claim_releases AS release
+          ON release.claim_id = claim.claim_id
+        WHERE release.claim_id IS NULL
+          AND claim.expires_at_us > ?
+          AND claim.holder_host = ?
+          AND claim.holder_sid = ?
+        """,
+        (now_us, host, session),
+    ).fetchone()["total"]
+
+
 def _reader_lease_conflict(
     row: sqlite3.Row | None,
     *,
@@ -963,6 +1025,16 @@ def release_reader_lease(
     Holding nothing, an already released lease, and an expired lease all
     replay successfully; only another live holder is refused. Losing the
     role never revokes a claim, which recovers on its own schedule.
+
+    ``claims_held`` counts the caller's own live claims at the instant of
+    release, so the caller learns immediately that giving the role back
+    did not settle its work. Release deliberately does not refuse on it:
+    it is a total, replayable declaration, and a session may legitimately
+    hand the role over while still finishing an item it already holds.
+    The obligation is enforced where stopping actually happens -- the
+    completion gate keeps blocking a released session that still holds
+    claims of its own -- so this count is the early warning, not the
+    barrier.
     """
 
     reader = _text(reader_id, path="reader_id", minimum=1, maximum=200)
@@ -998,10 +1070,15 @@ def release_reader_lease(
             reader_id=reader,
             now_us=effective_now,
         )
+        claims_held = _count_active_claims_this_session(
+            connection,
+            now_us=effective_now,
+        )
         connection.commit()
         return {
             "status": "released",
             "replayed": not held,
+            "claims_held": claims_held,
             "reader": lease_public,
         }
     except Exception:
@@ -1135,6 +1212,16 @@ def _claim_resource(
     expires_at_us = now_us + lease_seconds * 1_000_000
     message_id = resource_id if resource_kind == "message" else None
     task_id = resource_id if resource_kind == "task" else None
+    # Unlike the reader lease, a claim records its locator unconditionally.
+    # The lease withholds one for an explicitly configured identity
+    # because such an identity may name a deliberately shared fan-out
+    # holder, so the locator would describe a stranger. A claim has no
+    # such ambiguity: exactly one process inserts this row, and the pair
+    # simply says which session that was. Recording it under a shared
+    # `AIQ_READER` is what lets each fan-out participant recognize its own
+    # claims rather than the group's. The locator is storage-internal and
+    # never enters the `claim.acquired` payload or protocol v1.
+    holder_host, holder_sid = _reader_locator() or (None, None)
     cursor = connection.execute(
         """
         INSERT INTO events(
@@ -1174,9 +1261,11 @@ def _claim_resource(
           owner_id,
           fence,
           basis_revision,
+          holder_host,
+          holder_sid,
           acquired_at_us,
           expires_at_us
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             claim_id,
@@ -1185,6 +1274,8 @@ def _claim_resource(
             owner_id,
             cursor.lastrowid,
             basis_revision,
+            holder_host,
+            holder_sid,
             now_us,
             expires_at_us,
         ),
@@ -1906,6 +1997,13 @@ def read_status(
     the work -- and its ``released_by_self`` field is true only for a
     released lease this very session gave up, the recorded signal that
     this caller finished draining on purpose.
+
+    ``claims`` reports two counts. ``active`` is scope-wide: every live
+    claim, whoever holds it. ``active_this_session`` narrows that to the
+    claims whose recorded holder locator names this very session, which
+    is the only count a session may be held answerable for -- ``active``
+    alone cannot separate one person's concurrent sessions, because
+    ``owner_id`` defaults to the OS user.
     """
 
     if ready_limit < 1 or ready_limit > 64:
@@ -1919,7 +2017,7 @@ def read_status(
         "project": default_project_label(scope),
         "messages": message_counts,
         "tasks": task_counts,
-        "claims": {"active": 0},
+        "claims": {"active": 0, "active_this_session": 0},
         "reader": _reader_status_summary(
             None,
             _reader_lease_public(None, reader_id=reader_id, now_us=0),
@@ -2026,6 +2124,12 @@ def read_status(
             """,
             (effective_now,),
         ).fetchone()["total"]
+        result["claims"]["active_this_session"] = (
+            _count_active_claims_this_session(
+                connection,
+                now_us=effective_now,
+            )
+        )
         reader_row = _read_reader_lease_row(connection)
         result["reader"] = _reader_status_summary(
             reader_row,
