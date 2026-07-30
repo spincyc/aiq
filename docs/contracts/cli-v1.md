@@ -20,6 +20,13 @@ This document defines AIQ's first public machine-facing CLI protocol.
 - An empty inbox or queue is successful and returns an empty array or `null`.
 - Object consumers ignore unknown fields. Required field removal or changed
   meaning requires a new protocol version.
+- A documented enumeration is closed unless this document declares it
+  **extensible**. Where it does, adding a value is a compatible addition
+  within protocol v1 — the envelope versions the response *shape*, and a
+  longer value list is not a changed shape — and a consumer must treat an
+  unrecognized value as unknown rather than mapping it onto a documented one.
+  Declared extensible today: `status` on
+  [`reader release --json`](#reader-lease).
 - IDs are opaque strings except task IDs (`TASK-` plus a positive decimal) and
   effects-local aliases.
 - Timestamps are RFC 3339 UTC strings with microsecond precision. Both legal
@@ -217,7 +224,7 @@ what the lease recorded:
   completion signal was written. **A configured `reader` therefore cannot end
   a bounded run**; see [`configuration.md`](../configuration.md#reader-identity-and-session-identity).
 
-`reader release` never fails on state, and says which of four things it did:
+`reader release` never fails on state, and says what it did:
 
 | `status` | Meaning |
 |---|---|
@@ -225,6 +232,16 @@ what the lease recorded:
 | `already_released` | The recorded lease is the caller's, was already released, and has not yet passed its own expiry; the earlier declaration still stands |
 | `forced` | `--force` broke a live lease the caller could not prove holding. The role is free and the holder locator is cleared, so the row records no declaration for anybody — not for the breaker, who never held it, and not for the former holder, who never gave it up |
 | `not_held` | Nothing of the caller's was there to release — no lease, one belonging to a session the caller cannot prove itself to be, an abandoned lease whose holder is provably gone, or the caller's own lease already lapsed. Nothing was recorded |
+
+**`status` is an extensible enumeration**, under the rule in
+[Common rules](#common-rules). The four values above are what this version
+reports; a later version may report a distinct outcome under a new name, and
+doing so is a compatible addition that keeps the envelope at `v: 1`, because
+the response shape — which fields exist and what each means — does not change.
+A consumer must therefore branch on the values it knows and treat anything
+else as unknown, never as the nearest documented value. A consumer that wants
+one answer rather than a taxonomy should read the booleans below, which are
+closed by construction: `declared` answers the question a bounded run has.
 
 `released` (boolean) is true only in the first case: it means the lease moved
 to released here, which a forced break explicitly is not. `replayed` answers
@@ -310,7 +327,7 @@ The tables list fields in addition to top-level `v`.
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `reader status --json` | `reader` containing the [Reader lease](#reader-lease) object, `scope` |
 | `reader acquire --json` | `status: "acquired"`, `acquired`, `reader` |
-| `reader release --json` | `status`: `"released"`, `"already_released"`, `"forced"`, or `"not_held"`; `released`, `declared`, `replayed`, `claims_held`, `reader` |
+| `reader release --json` | `status` (extensible; see [Reader lease](#reader-lease)): `"released"`, `"already_released"`, `"forced"`, or `"not_held"`; `released`, `declared`, `replayed`, `claims_held`, `reader` |
 | `status --json` | `messages`, `tasks`, `project`, `claims`, `reader`, `ready`, `blocked`, `scope` |
 | `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
@@ -1050,11 +1067,18 @@ and continue the turn. When the loop guard is set, the
 gate exits 0 silently.
 
 Runnable work obligates the session that may drain it, so the gate follows
-the [reader lease](#reader-lease). It derives its own reader identity exactly
-as the CLI does — configuration or `AIQ_READER`, defaulting to the host and
-POSIX session id — and reads the lease from the same snapshot as the counts.
-Exactly two readings stand the gate down, each with exit 0 and one stderr
-notice.
+the [reader lease](#reader-lease). Its *reader* identity is resolved as the
+CLI's is — configuration or `AIQ_READER`, otherwise the session identity. Its
+*session* identity is not derived at all where the payload supplies one: a
+`Stop` payload carries the host's own `session_id`, which is authoritative for
+the session being gated and is inherited by nothing, and the gate prefers it
+over anything it could derive, behind only an explicit `AIQ_SESSION_ID`. That
+is what lets the gate and the commands of one session agree on who they are
+even though neither can see the other's environment; see [Status](#status) for
+the comparison rule and [`configuration.md`](../configuration.md#session-identity)
+for the full precedence. The gate reads the lease from the same snapshot as
+the counts. Exactly two readings stand the gate down, each with exit 0 and one
+stderr notice.
 
 The first is `reader.self` false with `reader.live` true: the role is held by a
 session proved to be alive, on this host, and not this process's own. That
@@ -1083,11 +1107,13 @@ The count is `claims.active_this_session`, never the scope-wide
 `claims.active`: blocking on the latter would block this session for a
 concurrent session's claim, which it cannot settle or release honestly. A
 claim with no recorded locator is not this session's and does not block it —
-see [Status](#status) for why that direction is the safe one, and for the
-known limitation both this condition and `reader.released_by_self` inherit
-from POSIX session identity. Where that identity does not survive between
-invocations, this line is unreachable and the ordinary block line above
-applies instead, still naming the outstanding claim.
+see [Status](#status) for why that direction is the safe one. This condition
+and `reader.released_by_self` both need a session identity the caller can be
+recognized by across invocations, which a payload-supplied or host-supplied
+identity gives the gate for free and `AIQ_SESSION_ID` gives it anywhere. Only
+where neither exists does the POSIX fallback decide, and where that does not
+survive between invocations this line is unreachable and the ordinary block
+line above applies instead, still naming the outstanding claim.
 This is what makes a bounded run — one task, or a fixed batch — end cleanly
 with ready work deliberately left behind, instead of absorbing a spurious
 block. The notice still names the remaining work, so nothing is hidden. The
@@ -1109,8 +1135,10 @@ The bias is conservative because a harness may give each shell invocation its
 own POSIX session, so leases outlive their sessions routinely; honoring an
 abandoned one would silently stop enforcing completion. Proof of foreignness,
 not absence of doubt, is required because a hook process does not inherit the
-agent shell's environment: the gate can derive a different identity than the
-CLI that took the lease, so an unproven holder may be this very session.
+agent shell's environment: an `AIQ_READER` or configured `reader` the CLI saw
+may be invisible to the gate, and where no session identity is supplied at all
+the two sides may derive different ones — so an unproven holder may be this
+very session.
 A deliberate shared-`AIQ_READER` fan-out therefore keeps blocking every
 participant, which is the safe direction. Nothing runnable is unaffected by
 the role: the parked notice and silent allow behave the same for holder and

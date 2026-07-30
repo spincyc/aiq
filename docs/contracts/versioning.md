@@ -84,7 +84,11 @@ capture hooks, and the `Stop` completion gate. Opening a journal whose stored
 schema is older than the installed version runs the pending migration in place,
 after writing an automatic pre-migration backup. Migration is forward-only —
 AIQ has no downgrade path — and it changes the file for every installation at
-once.
+once. Which journal that is follows from scope resolution alone, so the
+`--scope` a command resolves decides which journal a migration commits:
+`auto`, the default, means user scope wherever Git confirms the working
+directory is outside a repository. Use `aiq journal path --json`, which
+resolves without opening, when the answer is not obvious.
 
 Journal access itself fails closed: once a journal has been migrated, any AIQ
 older than that schema refuses it entirely with
@@ -101,7 +105,7 @@ in:
 
 The capture and gate rows are the dangerous ones: neither stops the user, so a
 stale installation degrades quietly. Every schema bump triggers all of it, and
-0.2.0a1 is the release that last did. An installation understands exactly one
+0.3.0a1 is the release that last did. An installation understands exactly one
 schema — the one its own code declares — migrating an older journal forward on
 open and refusing a newer one outright, so the version an installation reports
 answers which journals it can still open:
@@ -111,7 +115,7 @@ answers which journals it can still open:
 | 0.1.0a1 | 2 | the first packaged storage |
 | 0.1.0a2 | 2, then 3, then 4 | schema 3 added a claims lookup index; schema 4 added the `reader_leases` table |
 | 0.2.0a1 | 4 | the release that shipped schema 4 |
-| next release | 5, then 6 | schema 5 records the claiming session's locator on each claim; schema 6 adds the host-supplied session identity to that locator and to the reader lease |
+| 0.3.0a1 | 6 | reached in two steps taken in one release: schema 5 records the claiming session's locator on each claim, and schema 6 adds the host-supplied session identity to that locator and to the reader lease |
 
 Only 0.2.0a1 and later answer the question by number. 0.1.0a1 and 0.1.0a2 were
 never released: the version stayed at 0.1.0a2 across both migrations, so an
@@ -181,7 +185,7 @@ migration locks out a schema-3 peer exactly as totally as 3 → 6 does, and AIQ
 cannot see how many installations share a journal, so it cannot condition on
 the risk that actually matters. Worse, a multi-version hop is the *ordinary*
 upgrade: the table above shows a 0.1.0a2 installation may hold schema 2 while
-the next release holds 6. Gating it would demand human interaction on the
+0.3.0a1 holds 6. Gating it would demand human interaction on the
 common single-installation path, and the hook paths have no way to
 acknowledge anything — capture would fail every prompt and the gate would
 stand down until somebody ran a CLI by hand.

@@ -283,8 +283,8 @@ blocked   [DEMO: TASK-2]	p0	Ship the integration	blocked by TASK-1
 
 | You want | Say | Stops on |
 |---|---|---|
-| A single unit of work, then review | "just the one" | the reader release (see the limitation above) |
-| A bounded batch | "three tasks, then stop" | the reader release (see the limitation above) |
+| A single unit of work, then review | "just the one" | the reader release (see the two conditions above) |
+| A bounded batch | "three tasks, then stop" | the reader release (see the two conditions above) |
 | Everything that can be done | "drain the queue" | an empty `dequeue`, inbox, and claim set |
 
 Any mode you did not name is a guess. "Work on AIQ tasks" is the ambiguous

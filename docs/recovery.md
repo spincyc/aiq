@@ -242,7 +242,9 @@ journal has passed `aiq journal check` and normal work has resumed.
 
 The migration happened because some installation newer than the journal opened
 it. Keep every AIQ that reaches one journal on one version, and name the scope
-you mean — `--scope repo`, `--scope user`, or `--scope agent-root` — whenever
-the working directory is not obviously inside the repository you intend.
+you mean — `--scope repo` or `--scope user` — whenever the working directory
+is not obviously inside the repository you intend, because `--scope auto`
+outside a repository silently means user scope, which is the journal every
+installed hook is bound to.
 `aiq journal path` answers which journal a command would use, before it runs.
 See [`versioning.md`](contracts/versioning.md#journal-schema-and-shared-installations).

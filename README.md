@@ -32,15 +32,15 @@ the Python standard library. Its distribution contract is installer-neutral:
 
 | Method | Install | Resolve the launcher |
 |---|---|---|
-| `pipx` | `pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.2.0a1'` | `aiq_bin="$(pipx environment --value PIPX_BIN_DIR)/aiq"` |
-| Standard venv | `python3 -m venv ./aiq-venv`<br>`./aiq-venv/bin/python -m pip install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.2.0a1'` | `aiq_bin="$(pwd)/aiq-venv/bin/aiq"` |
+| `pipx` | `pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.3.0a1'` | `aiq_bin="$(pipx environment --value PIPX_BIN_DIR)/aiq"` |
+| Standard venv | `python3 -m venv ./aiq-venv`<br>`./aiq-venv/bin/python -m pip install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.3.0a1'` | `aiq_bin="$(pwd)/aiq-venv/bin/aiq"` |
 
 Direct GitHub installs require Git and network access. The ref after `@`
 selects the channel:
 
 | Channel | Ref | Contract |
 |---|---|---|
-| Release | `@v0.2.0a1` | Recommended; one fixed, tagged revision |
+| Release | `@v0.3.0a1` | Recommended; one fixed, tagged revision |
 | Development | `@main` | Unreleased work; changes without notice |
 
 ```sh
@@ -93,11 +93,11 @@ reinstalling over the existing install and naming the ref you want:
 
 ```sh
 pipx install --force \
-  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.2.0a1'
+  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.3.0a1'
 "$(pipx environment --value PIPX_BIN_DIR)/aiq" --version
 
 ./aiq-venv/bin/python -m pip install --force-reinstall \
-  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.2.0a1'
+  'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@v0.3.0a1'
 ./aiq-venv/bin/aiq --version
 ```
 
