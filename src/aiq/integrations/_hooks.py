@@ -124,7 +124,21 @@ def run_receive_hook_main(
 
 @dataclass(frozen=True)
 class ReceivePayloadSpec:
-    """Adapter-specific shape of one received hook payload."""
+    """Adapter-specific shape of one received hook payload.
+
+    ``injected_prefixes`` and ``injected_wrappers`` declare the adapter's
+    harness-injected prompt markers. Some hosts deliver machine-generated
+    content (background-agent notifications, harness reminders) through
+    the same prompt channel as typed user input; such content must not be
+    captured as a user message the agent is then obligated to settle. The
+    skip rule is deliberately conservative — only a prompt that is
+    unambiguously harness-injected is skipped, never anything a human
+    plausibly typed: after stripping surrounding whitespace, the prompt
+    either starts with an ``injected_prefixes`` entry (an opening tag such
+    as ``<task-notification``) or is one whole ``<tag>…</tag>`` block for
+    an ``injected_wrappers`` tag name. A prompt that merely mentions a
+    marker mid-string is captured normally.
+    """
 
     source: str
     input_label: str
@@ -132,6 +146,22 @@ class ReceivePayloadSpec:
     required_fields: tuple[str, ...]
     turn_field: str
     turn_required: bool
+    injected_prefixes: tuple[str, ...] = ()
+    injected_wrappers: tuple[str, ...] = ()
+
+
+def _is_injected_prompt(prompt: str, receive: ReceivePayloadSpec) -> bool:
+    """Report whether one prompt matches the adapter's injected markers."""
+
+    stripped = prompt.strip()
+    if receive.injected_prefixes and stripped.startswith(
+        receive.injected_prefixes
+    ):
+        return True
+    return any(
+        stripped.startswith(f"<{tag}>") and stripped.endswith(f"</{tag}>")
+        for tag in receive.injected_wrappers
+    )
 
 
 @dataclass(frozen=True)
@@ -1581,6 +1611,11 @@ def receive_hook(
         raise spec.error_class(
             f"{spec.display_name} hook has no non-empty string prompt"
         )
+    if _is_injected_prompt(prompt, receive):
+        # Harness-injected content is not a user request: acknowledge it
+        # successfully without ingesting and without creating a journal.
+        # The distinct receipt shape lets callers tell skip from capture.
+        return {"skipped": "injected-notification", "source": receive.source}
     values: dict[str, str] = {}
     for field_name in receive.required_fields:
         value = document.get(field_name)

@@ -130,6 +130,15 @@ SPEC = _hooks.HookIntegrationSpec(
         required_fields=("session_id", "cwd"),
         turn_field="prompt_id",
         turn_required=False,
+        # Claude Code injects machine-generated content through the same
+        # UserPromptSubmit channel as typed prompts: background-agent task
+        # notifications open with `<task-notification`, and harness
+        # reminders arrive as one whole `<system-reminder>…</system-reminder>`
+        # block. Only those unambiguous shapes are skipped (after stripping
+        # surrounding whitespace); a prompt that merely mentions a marker
+        # mid-string is still captured.
+        injected_prefixes=("<task-notification",),
+        injected_wrappers=("system-reminder",),
     ),
 )
 

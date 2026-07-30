@@ -69,6 +69,14 @@ The adapter's idempotency identity covers `session_id`, the per-prompt
 re-delivered event deduplicates, and any difference is captured as a new
 message.
 
+Claude Code also injects machine-generated content through the same
+`UserPromptSubmit` channel. Capture skips a prompt only when it is
+unambiguously harness-injected: after stripping surrounding whitespace, it
+starts with `<task-notification` or is one whole
+`<system-reminder>…</system-reminder>` block. A skipped prompt exits 0 with a
+distinct `skipped` receipt, ingests nothing, and creates no journal; a prompt
+that merely mentions a marker mid-string is captured normally.
+
 ## Completion gate
 
 The installed command is also registered under the `Stop` event. When Claude

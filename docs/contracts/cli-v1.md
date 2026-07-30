@@ -541,6 +541,13 @@ Claude Code treats exit 2 from a `UserPromptSubmit` hook as a blocking error
 that erases the user's prompt, and a journal problem must never block
 prompting.
 
+An adapter may declare harness-injected prompt markers. A prompt matching
+them — for `claude`, after stripping surrounding whitespace it starts with
+`<task-notification` or is one whole `<system-reminder>…</system-reminder>`
+block — is not a user request: capture skips it with exit 0, ingests
+nothing, creates no journal, and reports a distinct
+`{"skipped": "injected-notification"}` receipt instead of a capture result.
+
 The `Stop` completion gate enforces the AGENTS.md practice that no required
 runnable work may remain at completion. It performs one read-only journal
 snapshot — a missing journal counts as nothing runnable and creates no

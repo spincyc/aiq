@@ -377,6 +377,95 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertTrue(expanded["created"])
             self.assertEqual(checked["messages"], 2)
 
+    def test_receive_hook_skips_injected_prompts_and_captures_mentions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = support.init_repository(root / "repository")
+            base = {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "session",
+                "cwd": str(repository),
+            }
+            notification = receive_hook(
+                json.dumps(
+                    {
+                        **base,
+                        "prompt": (
+                            "<task-notification>\n"
+                            "Background agent finished.\n"
+                            "</task-notification>"
+                        ),
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
+            reminder = receive_hook(
+                json.dumps(
+                    {
+                        **base,
+                        "prompt": (
+                            "  <system-reminder>\n"
+                            "Injected context block.\n"
+                            "</system-reminder>\n"
+                        ),
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
+            scope = resolve_scope("repo", cwd=repository)
+
+            self.assertEqual(notification["skipped"], "injected-notification")
+            self.assertEqual(reminder["skipped"], "injected-notification")
+            self.assertNotIn("created", notification)
+            self.assertFalse(scope.journal_path.exists())
+
+            errors = io.StringIO()
+            skipped_main = receive_hook_main(
+                input_stream=io.BytesIO(
+                    json.dumps(
+                        {**base, "prompt": "<task-notification>done"}
+                    ).encode()
+                ),
+                error_stream=errors,
+                git_executable=self.git_executable(),
+            )
+            self.assertEqual(skipped_main, 0)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertFalse(scope.journal_path.exists())
+
+            plain = receive_hook(
+                json.dumps({**base, "prompt": "capture this request"}),
+                git_executable=self.git_executable(),
+            )
+            mention = receive_hook(
+                json.dumps(
+                    {
+                        **base,
+                        "prompt": (
+                            "explain how the <task-notification> and "
+                            "<system-reminder> markers are skipped"
+                        ),
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
+            unclosed = receive_hook(
+                json.dumps(
+                    {
+                        **base,
+                        "prompt": "<system-reminder> is a tag I grep for",
+                    }
+                ),
+                git_executable=self.git_executable(),
+            )
+
+            self.assertTrue(plain["created"])
+            self.assertTrue(mention["created"])
+            self.assertTrue(unclosed["created"])
+            self.assertEqual(check_journal(scope)["messages"], 3)
+
     def test_receive_hook_main_is_silent_on_success_and_exit_one_on_failure(
         self,
     ) -> None:

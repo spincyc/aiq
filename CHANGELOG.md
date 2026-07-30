@@ -83,6 +83,11 @@ effects documents, capability contracts, and integration manifests.
 
 ### Fixed
 
+- Claude Code capture no longer ingests harness-injected prompts as user
+  messages: a prompt that starts with `<task-notification` or is one whole
+  `<system-reminder>` block (after stripping surrounding whitespace) is
+  skipped with exit 0, no journal write, and a distinct
+  `{"skipped": "injected-notification"}` receipt.
 - A parked `needs_input` message is claimable again through an explicit
   `inbox claim MESSAGE_ID`, so it can resume once the missing input
   arrives and then be applied or failed; previously parked messages were
