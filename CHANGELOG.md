@@ -8,6 +8,22 @@ effects documents, capability contracts, and integration manifests.
 
 ## [Unreleased]
 
+## [0.2.0a1] - 2026-07-30
+
+### Breaking changes at a glance
+
+Three changes in this release can stop working setups. Each is detailed under
+Changed below.
+
+- **Hook capture is opt-in per repository.** Repositories without a journal
+  capture nothing; run `aiq journal init --scope repo` to opt one in.
+- **One reader per journal.** A second live consumer is refused with
+  `reader_held` (exit 4); export a shared `AIQ_READER` for deliberate fan-out.
+- **Journal storage moves to schema 4.** Upgrading migrates on first open with
+  an automatic pre-migration backup, after which an older AIQ refuses the
+  journal. Reinstall every AIQ sharing it — including installed hooks, whose
+  capture stops until they run the new version.
+
 ### Added
 
 - A scope-level reader lease enforcing many writers, one reader. Any session
@@ -177,8 +193,6 @@ effects documents, capability contracts, and integration manifests.
 - New retryable `contention` error code (exit 4) for journal write
   contention; `not_found` and `not_claimable` are now code-driven. Internal
   engine and journal read-path consolidation.
-- Distribution version bumped to `0.1.0a2` for the workflow-command feature
-  set.
 - A `failed` message is no longer terminally unclaimable: an explicit
   `inbox claim MESSAGE_ID` reopens it, and the reopened claim can then
   apply effects or record a disposition. An unaddressed claim still draws
@@ -217,4 +231,5 @@ effects documents, capability contracts, and integration manifests.
   effects-alias errors as exit 2; the JSON envelope version invariant is
   pinned; capability and integration commands honor `AIQ_OUTPUT=json`.
 
-[Unreleased]: https://github.com/spincyc/aiq/commits/main
+[Unreleased]: https://github.com/spincyc/aiq/compare/v0.2.0a1...HEAD
+[0.2.0a1]: https://github.com/spincyc/aiq/releases/tag/v0.2.0a1

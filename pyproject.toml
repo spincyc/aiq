@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiq-workqueue"
-version = "0.1.0a2"
+version = "0.2.0a1"
 description = "Deterministic, local-first work ledger for humans and AI agents"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
