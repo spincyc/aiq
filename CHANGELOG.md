@@ -60,6 +60,13 @@ effects documents, capability contracts, and integration manifests.
 - Capability descriptors `task.enqueue`, `task.done`, `task.overview`, and
   `queue.dequeue` for the new operations.
 
+### Fixed
+
+- Hook capture no longer loses a message when the journal is busy: lock
+  acquisition on the capture path is bounded well below the host's hook
+  timeout and reports a retryable `contention` failure with one stderr
+  line, instead of blocking until the host kills the hook silently.
+
 ### Changed
 
 - Contract prose now states honestly that any command or hook opening a

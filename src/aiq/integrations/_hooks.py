@@ -46,6 +46,12 @@ TARGET_MAX_BYTES = 1_048_576
 PROMPT_EVENT = "UserPromptSubmit"
 STOP_EVENT = "Stop"
 
+# Installed hooks declare a 10s host timeout, and a hook the host kills
+# reports nothing: the message would be lost silently. Capture therefore
+# waits only this long for a journal lock, leaving room to fail visibly
+# with a diagnostic while the host is still listening.
+CAPTURE_LOCK_TIMEOUT_SECONDS = 5.0
+
 
 class HookIntegrationError(JournalError):
     """A hook integration cannot be inspected or changed safely."""
@@ -1710,6 +1716,7 @@ def receive_hook(
         session_id=values["session_id"],
         turn_id=turn_id,
         cwd=resolved_cwd,
+        lock_timeout=CAPTURE_LOCK_TIMEOUT_SECONDS,
     )
     return result.to_dict()
 

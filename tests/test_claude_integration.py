@@ -6,11 +6,14 @@ import os
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import unittest
 
 from unittest.mock import patch
 
 import support
+from aiq import journal
+from aiq.integrations import _hooks
 from aiq.integrations.claude import (
     ClaudeIntegrationError,
     INTEGRATION_ID,
@@ -498,6 +501,42 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertTrue(sandwiched["created"])
             self.assertTrue(adjacent["created"])
             self.assertEqual(check_journal(scope)["messages"], 5)
+
+    def test_receive_hook_reports_a_busy_journal_before_the_host_timeout(
+        self,
+    ) -> None:
+        # A hook the host kills at its timeout loses the message with no
+        # diagnostic, so capture must give up while it can still report.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
+            scope = resolve_scope("repo", cwd=repository)
+            payload = json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "cwd": str(repository),
+                    "prompt": "capture me while the journal is busy",
+                }
+            )
+            errors = io.StringIO()
+
+            with patch.object(_hooks, "CAPTURE_LOCK_TIMEOUT_SECONDS", 0.2):
+                with journal.lifecycle_lock(scope, exclusive=True):
+                    started = time.monotonic()
+                    code = receive_hook_main(
+                        input_stream=io.BytesIO(payload.encode()),
+                        error_stream=errors,
+                        git_executable=self.git_executable(),
+                    )
+                    elapsed = time.monotonic() - started
+
+            self.assertEqual(code, 1)
+            self.assertLess(elapsed, 5)
+            self.assertEqual(errors.getvalue().count("\n"), 1)
+            self.assertIn("journal is busy", errors.getvalue())
+            self.assertEqual(check_journal(scope)["messages"], 0)
 
     def test_receive_hook_skips_uninitialized_repo_without_storage(
         self,

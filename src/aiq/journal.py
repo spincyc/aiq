@@ -151,23 +151,66 @@ def _lifecycle_lock_path(scope: JournalScope) -> Path:
     return _scope_lifecycle_lock_path(scope.journal_path)
 
 
+def _flock_until(
+    lock_file: Any,
+    operation: int,
+    *,
+    timeout: float | None,
+    lock_path: Path,
+) -> None:
+    """Take one file lock, waiting at most ``timeout`` seconds for it.
+
+    A ``None`` timeout waits indefinitely, which suits interactive
+    commands. A bounded wait suits callers the host kills on a deadline —
+    an installed capture hook must report a busy journal while it still
+    can, because a killed hook loses the message silently.
+    """
+
+    if timeout is None:
+        try:
+            fcntl.flock(lock_file, operation)
+        except OSError as error:
+            raise JournalError(
+                f"cannot acquire journal lock: {lock_path}"
+            ) from error
+        return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(lock_file, operation | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise JournalError(
+                    "journal is busy: another process holds "
+                    f"{lock_path} beyond {timeout:g}s",
+                    code="contention",
+                ) from None
+            time.sleep(0.05)
+        except OSError as error:
+            raise JournalError(
+                f"cannot acquire journal lock: {lock_path}"
+            ) from error
+
+
 @contextmanager
 def lifecycle_lock(
     scope: JournalScope,
     *,
     exclusive: bool,
+    timeout: float | None = None,
 ) -> Iterator[None]:
     """Coordinate normal access with destructive operations for one scope."""
     lock_path = _lifecycle_lock_path(scope)
     _ensure_private_directory(lock_path.parent)
     with _open_private_lock(lock_path) as lock_file:
         operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        try:
-            fcntl.flock(lock_file, operation)
-        except OSError as error:
-            raise JournalError(
-                f"cannot acquire journal lifecycle lock: {lock_path}"
-            ) from error
+        _flock_until(
+            lock_file,
+            operation,
+            timeout=timeout,
+            lock_path=lock_path,
+        )
         try:
             yield
         finally:
@@ -1335,12 +1378,21 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
     return scope.journal_path
 
 
-def _initialize_journal(scope: JournalScope) -> Path:
+def _initialize_journal(
+    scope: JournalScope,
+    *,
+    lock_timeout: float | None = None,
+) -> Path:
     _require_sqlite_runtime()
     _ensure_private_directory(scope.journal_path.parent)
     lock_path = scope.journal_path.parent / "initialization.lock"
     with _open_private_lock(lock_path) as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        _flock_until(
+            lock_file,
+            fcntl.LOCK_EX,
+            timeout=lock_timeout,
+            lock_path=lock_path,
+        )
         if os.path.lexists(scope.journal_path):
             _validate_private_file(scope.journal_path)
         else:
@@ -1380,13 +1432,17 @@ class _LifecycleConnection(sqlite3.Connection):
             pass
 
 
-def _connect(scope: JournalScope) -> sqlite3.Connection:
+def _connect(
+    scope: JournalScope,
+    *,
+    lock_timeout: float | None = None,
+) -> sqlite3.Connection:
     _require_sqlite_runtime()
-    context = lifecycle_lock(scope, exclusive=False)
+    context = lifecycle_lock(scope, exclusive=False, timeout=lock_timeout)
     context.__enter__()
     connection: _LifecycleConnection | None = None
     try:
-        _initialize_journal(scope)
+        _initialize_journal(scope, lock_timeout=lock_timeout)
         connection = sqlite3.connect(
             scope.journal_path,
             timeout=10,
@@ -1667,6 +1723,7 @@ def ingest_message(
     turn_id: str | None = None,
     cwd: str | None = None,
     if_new: bool = False,
+    lock_timeout: float | None = None,
 ) -> IngestResult:
     # Reject noncanonical input before any storage exists or mutates.
     _canonical_ingest_event(
@@ -1677,7 +1734,7 @@ def ingest_message(
         turn_id=turn_id,
         cwd=cwd,
     )
-    connection = _connect(scope)
+    connection = _connect(scope, lock_timeout=lock_timeout)
     try:
         _begin_immediate(connection)
         result = _ingest_connected(

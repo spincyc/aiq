@@ -391,8 +391,8 @@ class JournalTest(unittest.TestCase):
 
             original_connect = journal_module._connect
 
-            def impatient_connect(target_scope):
-                connection = original_connect(target_scope)
+            def impatient_connect(target_scope, **keywords):
+                connection = original_connect(target_scope, **keywords)
                 connection.execute("PRAGMA busy_timeout = 50")
                 return connection
 
