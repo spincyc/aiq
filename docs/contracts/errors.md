@@ -62,6 +62,14 @@ Automation should use both and must not parse `error`. `aiq doctor` and
 `aiq reconcile --user` additionally exit 1, with no error envelope, when the
 report they emit on standard output contains findings.
 
+This taxonomy versions with the distribution, not with the JSON envelope. A
+failure that moves from one exit category to another is a breaking
+distribution change — a minor version bump plus a release note enumerating the
+movements — while the response envelope stays `v: 1` and no capability
+`version` changes. Automation should therefore pin classification to the AIQ
+version it runs. See
+[Exit-code categories](versioning.md#exit-code-categories).
+
 ## Stable codes
 
 | Code | Meaning |

@@ -68,6 +68,17 @@ effects documents, capability contracts, and integration manifests.
     `invalid_document` at exit 2 in every case. It previously reported
     `invalid_document` or `state_conflict` depending on how the event layer
     happened to word the diagnostic.
+- `versioning.md` now rules where the exit-code taxonomy is versioned, which it
+  previously left contradictory: the taxonomy travels with the distribution,
+  not with the JSON envelope, so a reclassification like the one above needs a
+  minor version bump and a release note enumerating the movements while the
+  envelope stays `v: 1` and no capability `version` changes — error
+  classification is stated to be no part of a descriptor's command contract.
+  The sentence that called an exit-code category change incompatible *within
+  protocol v1* is corrected, and the lone remark that 0.2.0a1 moved storage to
+  schema 4 is replaced by a version-to-schema table covering every released and
+  unreleased version, so an operator can tell which installations a migration
+  locks out without reading the source.
 - Contract documentation now matches the shipped surface. `cli-v1.md` states
   that both RFC 3339 UTC designators occur (`Z` from the internal clock,
   `+00:00` from stored timestamps) and that consumers must parse RFC 3339

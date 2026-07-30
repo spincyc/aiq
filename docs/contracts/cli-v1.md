@@ -377,7 +377,7 @@ aiq ingest (--message TEXT | --stdin | --event-json FILE|-)
 | Option | Contract |
 |---|---|
 | `--message TEXT` | Content is the argument text, taken verbatim |
-| `--stdin` | Content is standard input decoded as UTF-8; invalid UTF-8 is `state_conflict` |
+| `--stdin` | Content is standard input decoded as UTF-8; invalid UTF-8 is `invalid_document` |
 | `--event-json FILE\|-` | Content and provenance come from one canonical event object; see [Canonical event JSON](#canonical-event-json) |
 | `--source NAME` | Provenance label, default `user`, at most 64 UTF-8 bytes. Ignored with `--event-json`, which carries its own `source` |
 | `--idempotency-key KEY` | Retry identity, at most 512 UTF-8 bytes. Reuse with the identical message identity replays the original `message_id` with `created: false`; reuse with a different identity is `state_conflict` |
