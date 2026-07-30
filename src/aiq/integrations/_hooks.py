@@ -453,10 +453,11 @@ def executable_path(
 ) -> Path:
     """Resolve one absolute executable, or raise with a pinned code.
 
-    Two of the codes are parameters because the launcher and the Git and
-    Python runtimes were classified differently before codes were pinned;
-    the defaults are what Git and Python produced and ``launcher_path``
-    overrides them. See ``docs/contracts/errors.md``.
+    Two of the codes stay parameters so a caller can classify its own
+    executable, but every caller now takes the defaults: a malformed
+    caller-supplied path is ``invalid_argument`` and a resolved path the
+    host cannot execute is ``unsupported_environment``, for the launcher
+    exactly as for Git and Python. See ``docs/contracts/errors.md``.
     """
 
     if candidate is None and command is not None:
@@ -523,12 +524,6 @@ def launcher_path(
         flag="--launcher",
         command="aiq" if candidate is None else None,
         environment=environment,
-        # Preserved accidents of the substring era: the launcher wording
-        # matched neither the argument rules nor the executable rules, so
-        # both failures fell through to integration drift. Listed in
-        # docs/contracts/errors.md as pending reclassification.
-        control_characters_code="integration_drift",
-        not_executable_code="integration_drift",
     )
 
 
@@ -770,19 +765,13 @@ def _validate_manifest(
             or not Path(value).is_absolute()
             or any(character in value for character in ("\0", "\r", "\n"))
         ):
-            # One corrupt manifest field, two codes: naming Git or Python in
-            # the diagnostic matched the executable rules before codes were
-            # pinned, so the failure reported an unsupported environment
-            # rather than drift. Preserved deliberately and listed in
-            # docs/contracts/errors.md as pending reclassification.
-            if field_name == "launcher":
-                raise spec.error_class(
-                    f"integration manifest {description} is invalid",
-                    code="integration_drift",
-                )
+            # One code for all three fields: a stored manifest that no
+            # longer describes a usable path is drift, whichever field
+            # holds it. Naming Git or Python here says nothing about the
+            # host, which was never consulted.
             raise spec.error_class(
                 f"integration manifest {description} is invalid",
-                code="unsupported_environment",
+                code="integration_drift",
             )
     containers = manifest["created_containers"]
     if (

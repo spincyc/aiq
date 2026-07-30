@@ -21,7 +21,8 @@ from aiq.cli import (
     build_parser,
 )
 from aiq.cli._errors import _JOURNAL_ERROR_CODE_EXITS
-from aiq.integrations.codex import CodexIntegrationError
+from aiq.integrations import _hooks
+from aiq.integrations.codex import SPEC as CODEX_SPEC, CodexIntegrationError
 from aiq.journal import (
     SCHEMA_VERSION,
     JournalError,
@@ -639,11 +640,34 @@ class CliProtocolTests(unittest.TestCase):
                 self.assertEqual(payload["v"], 1)
                 self.assertIn(key, payload)
 
-    def test_python_runtime_errors_are_environment_errors(self) -> None:
+    def test_an_uncoded_integration_error_is_a_defect_not_a_guess(self) -> None:
+        # The retired substring rules read "Python executable" out of this
+        # wording and answered ``unsupported_environment``. Wording now
+        # classifies nothing: an integration error reaching the CLI with no
+        # code is an AIQ defect and is reported as one.
         self.assertEqual(
             _classify_error(
                 CodexIntegrationError("Python executable is unavailable")
             ),
+            ("internal_error", 70),
+        )
+        # An unregistered code is the same defect, not a partial match.
+        self.assertEqual(
+            _classify_error(
+                CodexIntegrationError("drifted", code="no_such_code")
+            ),
+            ("internal_error", 70),
+        )
+        # What users see for this failure is unchanged, because the real
+        # raise site pins the code the wording used to imply.
+        with self.assertRaises(CodexIntegrationError) as raised:
+            _hooks.python_executable_path(
+                str(self.root / "absent" / "python"),
+                error_class=CodexIntegrationError,
+            )
+        self.assertEqual(raised.exception.code, "unsupported_environment")
+        self.assertEqual(
+            _classify_error(raised.exception),
             ("unsupported_environment", 6),
         )
 
@@ -725,7 +749,7 @@ class JournalErrorCodeIdentityTests(unittest.TestCase):
     Each test provokes the real raise site and reads ``JournalError.code``
     directly, so rewording a diagnostic cannot silently change the
     documented code. Classification is asserted too, pinning the
-    code-to-exit mapping without going through the substring fallback.
+    code-to-exit mapping.
     """
 
     def setUp(self) -> None:
@@ -1083,6 +1107,87 @@ class JournalErrorCodeIdentityTests(unittest.TestCase):
             ingest_message(self.scope, "hello", source="Bad Source")
         self.assert_raise_site_code(raised.exception, "invalid_document", 2)
 
+    # The three integration classifications below were pinned to whatever
+    # the substring rules produced and recorded in errors.md as accidents
+    # awaiting correction. Each test pins the corrected code at its raise
+    # site so the correction cannot silently regress.
+
+    def test_launcher_control_characters_are_an_invalid_argument(self) -> None:
+        # A malformed caller-supplied scalar, exactly as it already was for
+        # ``--git-executable``. This moved from ``integration_drift`` at
+        # exit 6, a breaking exit-category change.
+        with self.assertRaises(CodexIntegrationError) as raised:
+            _hooks.launcher_path(
+                str(self.root / "bin") + "/ai\nq",
+                error_class=CodexIntegrationError,
+            )
+        self.assertIn("control characters", str(raised.exception))
+        self.assert_raise_site_code(raised.exception, "invalid_argument", 2)
+
+    def test_a_launcher_that_cannot_run_is_an_unsupported_environment(
+        self,
+    ) -> None:
+        # A resolved path the host cannot execute, as it already was for
+        # Git and Python. This moved from ``integration_drift``; both codes
+        # exit 6, so the change is code-only.
+        launcher = self.root / "aiq"
+        launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        launcher.chmod(0o600)
+        with self.assertRaises(CodexIntegrationError) as raised:
+            _hooks.launcher_path(
+                str(launcher), error_class=CodexIntegrationError
+            )
+        self.assertIn("not executable", str(raised.exception))
+        self.assert_raise_site_code(
+            raised.exception, "unsupported_environment", 6
+        )
+
+    def manifest_with(self, **overrides: object) -> dict[str, object]:
+        """A manifest valid through the executable-field checks."""
+
+        manifest: dict[str, object] = {
+            "backups": [],
+            "config_sha256": None,
+            "created_containers": [],
+            "created_file": False,
+            "integration": CODEX_SPEC.integration,
+            "integration_id": CODEX_SPEC.integration_id,
+            "git_executable": "/usr/bin/git",
+            "launcher": "/usr/local/bin/aiq",
+            "managed_group": {},
+            "managed_group_sha256": None,
+            "python_executable": "/usr/bin/python3",
+            "status": "uninstalled",
+            "target": os.fspath(self.root / "config.toml"),
+            "v": 1,
+        }
+        manifest.update(overrides)
+        return manifest
+
+    def test_a_corrupt_manifest_executable_field_is_drift(self) -> None:
+        # The manifest is bad, not the host, which was never consulted.
+        # The Git and Python fields moved from ``unsupported_environment``;
+        # both codes exit 6, so the change is code-only. The sibling
+        # ``launcher`` field already reported drift and still does.
+        for field_name, description in (
+            ("git_executable", "Git executable"),
+            ("python_executable", "Python executable"),
+            ("launcher", "launcher"),
+        ):
+            for corrupt in ("relative/path", "/abs/with\nnewline", 7):
+                with self.subTest(field=field_name, value=corrupt):
+                    with self.assertRaises(CodexIntegrationError) as raised:
+                        _hooks._validate_manifest(
+                            CODEX_SPEC,
+                            self.manifest_with(**{field_name: corrupt}),
+                            state_directory=self.root / "state",
+                            target=self.root / "config.toml",
+                        )
+                    self.assertIn(description, str(raised.exception))
+                    self.assert_raise_site_code(
+                        raised.exception, "integration_drift", 6
+                    )
+
     def test_pinned_code_beats_a_rival_phrase_in_its_own_message(self) -> None:
         # ``validate_project_label`` is pinned ``invalid_argument`` while its
         # diagnostic contains "must be", which the retired fallback rules
@@ -1263,8 +1368,8 @@ class JournalErrorRaiseSiteCoverageTests(unittest.TestCase):
 
         ``executable_path`` takes its control-character and
         not-executable codes as arguments, so the literals live at the
-        signature defaults and at the wrapper call sites rather than at
-        the raise. Both positions are checked here. A ``_code`` name
+        signature defaults rather than at the raise. Both the defaults
+        and any overriding call site are checked here. A ``_code`` name
         bound to a non-string, such as ``failure_exit_code``, is a
         different kind of code and is left alone.
         """

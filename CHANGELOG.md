@@ -97,6 +97,24 @@ effects documents, capability contracts, and integration manifests.
     `invalid_document` at exit 2 in every case. It previously reported
     `invalid_document` or `state_conflict` depending on how the event layer
     happened to word the diagnostic.
+- **Breaking: the last three integration classifications are corrected, one of
+  them across exit categories.** These were pinned to whatever the substring
+  matcher produced and recorded in [`errors.md`](docs/contracts/errors.md) as
+  accidents rather than corrected silently; they are now fixed, and the
+  matcher itself is deleted rather than merely unreachable, so no rule in the
+  classifier reads a message. `aiq integration install` with a `--launcher`
+  path containing control characters now reports `invalid_argument` at exit 2
+  instead of `integration_drift` at exit 6 — the only exit-category movement,
+  and the answer `--git-executable` already gave for the same malformed
+  scalar. A resolved launcher that is not an executable file now reports
+  `unsupported_environment` instead of `integration_drift`, as Git and Python
+  already did. A stored integration manifest whose `git_executable` or
+  `python_executable` field is not an absolute, control-character-free path
+  now reports `integration_drift` instead of `unsupported_environment`,
+  matching its sibling `launcher` field: the manifest is corrupt and the host
+  was never consulted. Those last two stay at exit 6 and change only the code.
+  `integration plan` and `integration check` remain report-only and still exit
+  0 with a `blocked_reason` for all three conditions.
 - `versioning.md` now rules where the exit-code taxonomy is versioned, which it
   previously left contradictory: the taxonomy travels with the distribution,
   not with the JSON envelope, so a reclassification like the one above needs a

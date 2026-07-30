@@ -18,7 +18,10 @@ attribute. Every code in the table below is pinnable, `not_found`,
 integrity codes. `JournalErrorRaiseSiteCoverageTests` in
 `tests/test_cli_protocol.py` enforces this: it derives the subclass names
 from the tree, so a new error class is covered without editing the test, and
-it fails on a raise site that sets no code or an unregistered one.
+it fails on a raise site that sets no code or an unregistered one. Because
+coverage is total, AIQ keeps no rule that infers a code from message text: an
+error that somehow reaches the CLI without a registered code is reported as an
+implementation defect rather than guessed at from its wording.
 
 ## Classification precedence
 
@@ -29,19 +32,16 @@ Classification applies exactly one rule, in this order:
    first for every `JournalError` subclass. Nothing below can override it.
 2. **Class-based rules.** Configuration and event errors, which are not
    journal errors, map to `invalid_config` and `invalid_document`.
-3. **Legacy substring rules.** Retained only for an integration error that
-   reaches the CLI without a code. No raise site in AIQ can reach them, so
-   nothing AIQ raises is classified by wording; they exist so an error built
-   outside the tree degrades predictably rather than as a defect.
-4. **Residue.** A `JournalError` with no code, or with a code missing from
+3. **Residue.** A `JournalError` with no code, or with a code missing from
    the exit table, is an AIQ defect and reports `internal_error`, never a
    guess.
 
-Ordering is load-bearing. `HookIntegrationError` and
-`GuidanceIntegrationError` are `JournalError` subclasses, so testing the
-class-based and substring rules before the explicit code would make `code=`
-inert on exactly the raise sites that set it most. No consumer should infer a
-code from message wording.
+There is no wording rule. Message text is read by nobody: no substring,
+prefix, or phrase participates in classification, and no consumer should
+infer a code from message wording. Ordering is still load-bearing.
+`HookIntegrationError` and `GuidanceIntegrationError` are `JournalError`
+subclasses, so a class-based arm for either one, tested before the explicit
+code, would make `code=` inert on exactly the raise sites that set it most.
 
 ## JSON form
 
@@ -118,9 +118,9 @@ version it runs. See
 | `internal_error` | An uncategorized implementation defect escaped normal handling |
 
 Pinning a code at its raise site fixed how a code is carried, not which code
-each site deserved. Sites were first pinned to whatever the substring rules
-already produced, which preserved several inherited accidents; those have
-since been corrected, changing the code and exit status of the affected
+each site deserved. Sites were first pinned to whatever the retired substring
+rules already produced, which preserved several inherited accidents; those
+have since been corrected, changing the code and exit status of the affected
 failures. The correction applied four rules:
 
 - A stored-data violation found by an audit or a read is `integrity_failed`
@@ -141,23 +141,26 @@ transition or mutation that the current state rejects. It is no longer the
 residue category it became by default.
 
 The integration raise sites were pinned the same way, to whatever the
-substring rules already produced, and the same kind of accident survives in
-three of them. They are recorded here rather than corrected silently, because
-changing them moves a failure between exit categories and so is a breaking
-distribution change under the rule above. Each is reachable only through the
-integration command family:
+substring rules already produced, and three of them carried the same kind of
+accident. They are now corrected: a malformed caller-supplied scalar is
+`invalid_argument` by the fourth rule above, a resolved path the host cannot
+execute is `unsupported_environment`, and a stored manifest that no longer
+describes a usable path is `integration_drift`. Each is reachable only
+through the integration command family:
 
-| Site | Today | Deserves |
+| Site | Was | Now |
 |---|---|---|
-| `--launcher` path contains control characters | `integration_drift`, exit 6 | `invalid_argument`, exit 2 — it is a malformed caller-supplied scalar, and `--git-executable` already reports that |
-| Resolved launcher is not an executable file | `integration_drift`, exit 6 | `unsupported_environment`, exit 6 — a missing host facility, as it already is for Git and Python; exit is unchanged |
-| Manifest `git_executable` or `python_executable` field is corrupt | `unsupported_environment`, exit 6 | `integration_drift`, exit 6 — the environment is fine, the stored manifest is not; the sibling `launcher` field already reports drift; exit is unchanged |
+| `--launcher` path contains control characters | `integration_drift`, exit 6 | `invalid_argument`, exit 2 — it is a malformed caller-supplied scalar, and `--git-executable` already reported that |
+| Resolved launcher is not an executable file | `integration_drift`, exit 6 | `unsupported_environment`, exit 6 — a missing host facility, as it already was for Git and Python; exit is unchanged |
+| Manifest `git_executable` or `python_executable` field is corrupt | `unsupported_environment`, exit 6 | `integration_drift`, exit 6 — the environment is fine, the stored manifest is not; the sibling `launcher` field already reported drift; exit is unchanged |
 
-The launcher wording matched neither the argument rules nor the executable
-rules, so both of its failures fell through to drift; the manifest wording
-named Git and Python, so it matched the executable rules it had nothing to do
-with. Two of the three keep their exit category and could be corrected as
-a code-only change.
+The launcher wording had matched neither the argument rules nor the
+executable rules, so both of its failures fell through to drift; the manifest
+wording named Git and Python, so it matched the executable rules it had
+nothing to do with. Only the first of the three changes exit category, and it
+is enumerated in the release note the rule above requires. The launcher is now
+resolved and classified exactly as Git and Python are, and all three manifest
+path fields report drift alike.
 
 Retry behavior depends on the code. `revision_conflict` requires rereading task
 state. `claim_expired` requires acquiring a new claim. `not_claimable` may be a
@@ -198,11 +201,13 @@ valid on retry and require changing what was submitted.
 | `inbox apply` | Effects document references an unknown local alias | `invalid_document` |
 | `journal destroy --confirm` | Missing, wrong, or stale inventory token | `state_conflict` |
 | Integration install/uninstall | Owned configuration or manifest has drifted | `integration_drift` |
-| Integration install | Explicit `--launcher` is relative | `invalid_argument` |
+| Integration install/uninstall | Stored manifest `launcher`, `git_executable`, or `python_executable` is not an absolute path free of control characters | `integration_drift` |
+| Integration install | Explicit `--launcher` is relative or contains control characters | `invalid_argument` |
 | Integration install | Explicit `--git-executable` is relative or contains control characters | `invalid_argument` |
-| Integration install | Required launcher or host facility is unavailable | `unsupported_environment` |
+| Integration install | Launcher cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
 | Integration install | Required Python runtime is unavailable or not executable | `unsupported_environment` |
 | Integration install | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
+| Integration install | A required host facility is unavailable | `unsupported_environment` |
 | Automatic or repo scope | Git is unavailable or repository discovery fails unexpectedly | `unsupported_environment` |
 | Configuration loading | Unknown, forbidden, malformed, or out-of-range setting | `invalid_config` |
 | `report` | No `--to` and no configured `dev_report_repo` | `invalid_config` |
@@ -212,11 +217,13 @@ valid on retry and require changing what was submitted.
 The integration rows above describe `install`, which is the verb that must
 resolve an executable before it writes. `plan` and `check` are report-only:
 the same conditions — a relative or control-character `--launcher` or
-`--git-executable`, and an unavailable launcher, Python runtime, or Git —
-leave them at exit 0 with `{"action":"block","status":"unsafe",...}` and a
-`blocked_reason`, never an error envelope. `uninstall` accepts neither
-option and resolves no executable, so it rejects them as
-`invalid_argument` from argument parsing alone.
+`--git-executable`, an unavailable launcher, Python runtime, or Git, and a
+corrupt stored manifest — leave them at exit 0 with
+`{"action":"block","status":"unsafe",...}` and a `blocked_reason`, never an
+error envelope. `uninstall` accepts neither option and resolves no
+executable, so it rejects them as `invalid_argument` from argument parsing
+alone; it does read the stored manifest, so a corrupt one fails it with
+`integration_drift`.
 
 Read-only empty results are not failures. For the session holding the reader
 lease, `inbox claim` returns null claim and message fields, and queue
