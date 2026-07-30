@@ -50,6 +50,15 @@ effects documents, capability contracts, and integration manifests.
   message, so rewording a diagnostic cannot silently change a documented code
   and a message that merely contains a matched phrase is no longer
   misclassified. Codes and exit codes are unchanged.
+- The remaining stable codes are now set at their raise sites too. `not_found`,
+  `invalid_argument`, `invalid_document`, `not_claimable`, and `state_conflict`
+  were still recovered by matching the human message across two hundred raise
+  sites, ending in a catch-all that returned `state_conflict` for anything
+  unmatched, so most diagnostics could not be reworded safely after all. Every
+  raise site now carries its code, each pinned to the classification callers
+  already received, and a test fails on any new site that omits one. The single
+  documented exception is ingest's canonical-event validation, whose diagnostic
+  is produced by another layer. Codes and exit codes are unchanged.
 
 ## [0.2.0a1] - 2026-07-30
 

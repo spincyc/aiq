@@ -35,18 +35,17 @@ def _classify_journal_error(error: JournalError) -> tuple[str, int]:
     explicit = _JOURNAL_ERROR_CODE_EXITS.get(getattr(error, "code", None))
     if explicit is not None:
         return explicit
-    # TRANSITIONAL FALLBACK. Every raise site that produces `claim_expired`,
-    # `claim_mismatch`, `revision_conflict`, `integrity_failed`,
-    # `schema_incompatible`, or `unsupported_environment` in `aiq.journal`
-    # and `aiq.queue` now sets `code=` explicitly, so for those the rules
-    # below are belt-and-braces. They remain load-bearing for raise sites
-    # this pass could not reach: JournalErrors raised outside those two
-    # modules (`aiq.privacy` still raises `integrity_failed` and
-    # `schema_incompatible` by message), errors whose message is forwarded
-    # verbatim from another layer (`JournalError(str(error))` wrapping an
-    # `EventError`), and the remaining codes, which are only partly pinned
-    # at their raise sites. Prefer `code=` at any new raise site; these
-    # rules match the human diagnostic and must not be relied upon.
+    # TRANSITIONAL FALLBACK. Every `JournalError` raise site in the tree
+    # now sets `code=` explicitly, with exactly one exception:
+    # `aiq.journal._canonical_ingest_event`, which re-raises the message of
+    # an `EventError` built in `aiq.events` verbatim. That message is not
+    # known at the wrapping site, so the rules below still decide it — and
+    # they decide it inconsistently, splitting one validation failure
+    # between `invalid_document` and `state_conflict` on wording alone.
+    # Retiring the rules means giving that wrap a code of its own, which
+    # changes the classification of some ingest failures and so belongs in
+    # its own change. Prefer `code=` at any new raise site; these rules
+    # match the human diagnostic and must not be relied upon.
     message = str(error).lower()
     if "not found" in message or "does not exist" in message:
         return "not_found", 3

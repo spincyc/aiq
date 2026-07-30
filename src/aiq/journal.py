@@ -79,11 +79,17 @@ def _ensure_private_directory(path: Path) -> None:
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
-        raise JournalError(f"journal directory is not a real directory: {path}") from error
+        raise JournalError(
+            f"journal directory is not a real directory: {path}",
+            code="state_conflict",
+        ) from error
     try:
         status = os.fstat(descriptor)
         if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
-            raise JournalError(f"journal directory is not private: {path}")
+            raise JournalError(
+                f"journal directory is not private: {path}",
+                code="state_conflict",
+            )
         os.fchmod(descriptor, 0o700)
     finally:
         os.close(descriptor)
@@ -97,7 +103,10 @@ def _validate_private_file(path: Path) -> None:
         or status.st_uid != os.getuid()
         or status.st_nlink != 1
     ):
-        raise JournalError(f"journal file is not a private regular file: {path}")
+        raise JournalError(
+            f"journal file is not a private regular file: {path}",
+            code="state_conflict",
+        )
 
 
 def _chmod_private_file(path: Path) -> None:
@@ -108,7 +117,8 @@ def _chmod_private_file(path: Path) -> None:
         descriptor = os.open(path, flags)
     except OSError as error:
         raise JournalError(
-            f"journal file is not a private regular file: {path}"
+            f"journal file is not a private regular file: {path}",
+            code="state_conflict",
         ) from error
     try:
         status = os.fstat(descriptor)
@@ -118,7 +128,8 @@ def _chmod_private_file(path: Path) -> None:
             or status.st_nlink != 1
         ):
             raise JournalError(
-                f"journal file is not a private regular file: {path}"
+                f"journal file is not a private regular file: {path}",
+                code="state_conflict",
             )
         os.fchmod(descriptor, 0o600)
     finally:
@@ -132,7 +143,10 @@ def _open_private_lock(path: Path):
     try:
         descriptor = os.open(path, flags, 0o600)
     except OSError as error:
-        raise JournalError(f"cannot open private journal lock: {path}") from error
+        raise JournalError(
+            f"cannot open private journal lock: {path}",
+            code="state_conflict",
+        ) from error
     status = os.fstat(descriptor)
     if (
         not stat.S_ISREG(status.st_mode)
@@ -140,7 +154,10 @@ def _open_private_lock(path: Path):
         or status.st_nlink != 1
     ):
         os.close(descriptor)
-        raise JournalError(f"journal lock is not a private regular file: {path}")
+        raise JournalError(
+            f"journal lock is not a private regular file: {path}",
+            code="state_conflict",
+        )
     os.fchmod(descriptor, 0o600)
     return os.fdopen(descriptor, "a+")
 
@@ -149,7 +166,10 @@ def _scope_lifecycle_lock_path(
     journal_path: Path,
 ) -> Path:
     if not journal_path.is_absolute():
-        raise JournalError("journal path must be absolute")
+        raise JournalError(
+            "journal path must be absolute",
+            code="invalid_document",
+        )
     return journal_path.parent / "lifecycle.lock"
 
 
@@ -179,7 +199,8 @@ def _flock_until(
             fcntl.flock(lock_file, operation)
         except OSError as error:
             raise JournalError(
-                f"cannot acquire journal lock: {lock_path}"
+                f"cannot acquire journal lock: {lock_path}",
+                code="state_conflict",
             ) from error
         return
     deadline = time.monotonic() + timeout
@@ -197,7 +218,8 @@ def _flock_until(
             time.sleep(0.05)
         except OSError as error:
             raise JournalError(
-                f"cannot acquire journal lock: {lock_path}"
+                f"cannot acquire journal lock: {lock_path}",
+                code="state_conflict",
             ) from error
 
 
@@ -226,7 +248,8 @@ def lifecycle_lock(
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
             except OSError as error:
                 raise JournalError(
-                    f"cannot release journal lifecycle lock: {lock_path}"
+                    f"cannot release journal lifecycle lock: {lock_path}",
+                    code="state_conflict",
                 ) from error
 
 
@@ -824,12 +847,18 @@ def _git_path(
         raw_executable = os.fspath(git_executable)
         executable = Path(raw_executable)
         if not executable.is_absolute():
-            raise JournalError("Git executable must be an absolute path")
+            raise JournalError(
+                "Git executable must be an absolute path",
+                code="invalid_document",
+            )
         if any(
             character in raw_executable
             for character in ("\0", "\r", "\n")
         ):
-            raise JournalError("Git executable path contains control characters")
+            raise JournalError(
+                "Git executable path contains control characters",
+                code="state_conflict",
+            )
         try:
             status = executable.stat()
         except OSError as error:
@@ -892,7 +921,10 @@ def _state_home() -> Path:
     if configured:
         state_home = Path(configured)
         if not state_home.is_absolute():
-            raise JournalError("XDG_STATE_HOME must be an absolute path")
+            raise JournalError(
+                "XDG_STATE_HOME must be an absolute path",
+                code="state_conflict",
+            )
         return state_home
     return Path.home() / ".local" / "state"
 
@@ -1175,7 +1207,8 @@ def _validate_metadata(
         if metadata.get(key) != value:
             raise JournalError(
                 f"journal metadata mismatch for {key}: "
-                f"expected {value!r}, found {metadata.get(key)!r}"
+                f"expected {value!r}, found {metadata.get(key)!r}",
+                code="state_conflict",
             )
 
 
@@ -1258,7 +1291,10 @@ def _execute_script_statements(
             connection.execute(statement)
             statement = ""
     if statement.strip():
-        raise JournalError("incomplete schema statement")
+        raise JournalError(
+            "incomplete schema statement",
+            code="state_conflict",
+        )
 
 
 def _validate_schema_objects(
@@ -1327,7 +1363,10 @@ def _validate_schema_objects(
     missing = sorted(required - actual)
     if missing:
         formatted = ", ".join(f"{kind}:{name}" for kind, name in missing)
-        raise JournalError(f"journal schema objects are missing: {formatted}")
+        raise JournalError(
+            f"journal schema objects are missing: {formatted}",
+            code="state_conflict",
+        )
 
 
 def _migration_backup(
@@ -1438,14 +1477,16 @@ def _initialize_journal_locked(
                     metadata = _metadata(connection)
                 except sqlite3.OperationalError as error:
                     raise JournalError(
-                        "existing journal has no readable metadata"
+                        "existing journal has no readable metadata",
+                        code="state_conflict",
                     ) from error
                 raw_version = metadata.get("schema_version")
                 try:
                     version = int(raw_version or "")
                 except ValueError as error:
                     raise JournalError(
-                        f"invalid journal schema version: {raw_version!r}"
+                        f"invalid journal schema version: {raw_version!r}",
+                        code="state_conflict",
                     ) from error
                 if version > SCHEMA_VERSION:
                     raise JournalError(
@@ -1475,7 +1516,8 @@ def _initialize_journal_locked(
                         current_version = _metadata(connection).get("schema_version")
                         if current_version != str(version):
                             raise JournalError(
-                                "journal schema changed during migration"
+                                "journal schema changed during migration",
+                                code="state_conflict",
                             )
                         backup_name = _migration_backup(
                             scope,
@@ -1512,7 +1554,8 @@ def _initialize_journal_locked(
                         )
                         if cursor.rowcount != 1:
                             raise JournalError(
-                                "journal schema changed during migration"
+                                "journal schema changed during migration",
+                                code="state_conflict",
                             )
                         _normalize_repo_metadata(connection, scope)
                         _validate_schema_objects(
@@ -2022,7 +2065,10 @@ def list_inbox(
     include_content: bool = False,
 ) -> list[dict[str, Any]]:
     if limit < 1:
-        raise JournalError("inbox limit must be positive")
+        raise JournalError(
+            "inbox limit must be positive",
+            code="invalid_argument",
+        )
     if not scope.journal_path.exists():
         return []
     connection = _connect(scope)
@@ -2111,7 +2157,10 @@ def create_snapshot(
     keep: int = 5,
 ) -> dict[str, Any]:
     if keep < 1:
-        raise JournalError("snapshot retention must be positive")
+        raise JournalError(
+            "snapshot retention must be positive",
+            code="invalid_argument",
+        )
     if not scope.journal_path.exists():
         raise JournalError(
             f"journal does not exist: {scope.journal_path}",
@@ -2205,7 +2254,8 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
             actual_hash = hashlib.sha256(message["content"].encode()).hexdigest()
             if actual_hash != message["content_sha256"]:
                 raise JournalError(
-                    f"message content hash mismatch: {message['message_id']}"
+                    f"message content hash mismatch: {message['message_id']}",
+                    code="state_conflict",
                 )
             received_count = connection.execute(
                 """
@@ -2220,7 +2270,8 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
             if received_count != 1:
                 raise JournalError(
                     f"message received event count is {received_count}: "
-                    f"{message['message_id']}"
+                    f"{message['message_id']}",
+                    code="state_conflict",
                 )
         label = _read_project_label(connection)
 
@@ -2233,7 +2284,8 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
     mode = stat.S_IMODE(scope.journal_path.stat().st_mode)
     if mode != 0o600:
         raise JournalError(
-            f"journal permissions are {mode:04o}; expected 0600"
+            f"journal permissions are {mode:04o}; expected 0600",
+            code="state_conflict",
         )
 
     return {

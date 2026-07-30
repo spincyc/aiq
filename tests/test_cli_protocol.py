@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from datetime import datetime
 import json
 import os
@@ -10,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import support
+from support import REPOSITORY_ROOT
 from aiq.cli import (
     CONFIG_OUTPUT_COMMANDS,
     _classify_error,
@@ -17,15 +19,26 @@ from aiq.cli import (
     _versioned,
     build_parser,
 )
+from aiq.cli._errors import _JOURNAL_ERROR_CODE_EXITS
 from aiq.integrations.codex import CodexIntegrationError
 from aiq.journal import (
     SCHEMA_VERSION,
     JournalError,
     check_journal,
     ingest_message,
+    list_inbox,
     resolve_scope,
+    validate_project_label,
 )
-from aiq.queue import _now_us, apply_effects, claim_message, release_claim
+from aiq.privacy import export_journal
+from aiq.queue import (
+    _now_us,
+    apply_effects,
+    claim_message,
+    claim_task,
+    release_claim,
+    show_task,
+)
 JSON_COMMAND_PATHS = {
     tuple(name.split("."))
     for name in """
@@ -861,6 +874,216 @@ class JournalErrorCodeIdentityTests(unittest.TestCase):
             ),
             ("reader_held", 4),
         )
+
+    def created_task(self, title: str = "Pin the code") -> str:
+        message_id, claim_id = self.claimed_message(f"create: {title}")
+        created = apply_effects(
+            self.scope,
+            message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$task", {"title": title}]],
+            },
+            claim_id=claim_id,
+        )
+        return created["aliases"]["$task"]
+
+    def test_not_found_is_set_at_the_raise_site(self) -> None:
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        with self.assertRaises(JournalError) as raised:
+            show_task(self.scope, "TASK-404")
+        self.assert_raise_site_code(raised.exception, "not_found", 3)
+
+    def test_invalid_argument_is_set_at_the_raise_site(self) -> None:
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        with self.assertRaises(JournalError) as raised:
+            list_inbox(self.scope, limit=0)
+        self.assert_raise_site_code(raised.exception, "invalid_argument", 2)
+
+    def test_invalid_document_is_set_at_the_raise_site(self) -> None:
+        message_id, claim_id = self.claimed_message("apply a bad document")
+        with self.assertRaises(JournalError) as raised:
+            apply_effects(
+                self.scope,
+                message_id,
+                {"v": 2, "expect": {}, "effects": []},
+                claim_id=claim_id,
+            )
+        self.assert_raise_site_code(raised.exception, "invalid_document", 2)
+
+    def test_not_claimable_is_set_at_the_raise_site(self) -> None:
+        task_id = self.created_task()
+        self.assertIsNotNone(
+            claim_task(self.scope, task_id, owner_id="code-identity-test")
+        )
+        with self.assertRaises(JournalError) as raised:
+            claim_task(self.scope, task_id, owner_id="second-worker")
+        self.assert_raise_site_code(raised.exception, "not_claimable", 4)
+
+    def test_state_conflict_is_set_at_the_raise_site(self) -> None:
+        task_id = self.created_task()
+        message_id, claim_id = self.claimed_message("depend on itself")
+        with self.assertRaises(JournalError) as raised:
+            apply_effects(
+                self.scope,
+                message_id,
+                {
+                    "v": 1,
+                    "expect": {task_id: 1},
+                    "effects": [["require", task_id, task_id]],
+                },
+                claim_id=claim_id,
+            )
+        self.assert_raise_site_code(raised.exception, "state_conflict", 4)
+
+    def test_export_integrity_failure_is_set_at_the_raise_site(self) -> None:
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        connection = sqlite3.connect(self.scope.journal_path)
+        try:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute(
+                """
+                INSERT INTO events(
+                  event_id,
+                  occurred_at,
+                  event_type,
+                  message_id,
+                  payload_json
+                )
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_dangling",
+                    "2026-01-01T00:00:00Z",
+                    "message.ingested",
+                    "msg_missing",
+                    "{}",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(JournalError) as raised:
+            export_journal(self.scope, self.root / "export.jsonl")
+        self.assert_raise_site_code(raised.exception, "integrity_failed", 5)
+
+    def test_export_schema_mismatch_is_set_at_the_raise_site(self) -> None:
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        connection = sqlite3.connect(self.scope.journal_path)
+        try:
+            connection.execute(
+                "UPDATE journal_metadata SET value = ? "
+                "WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION + 1),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(JournalError) as raised:
+            export_journal(self.scope, self.root / "export.jsonl")
+        self.assert_raise_site_code(raised.exception, "schema_incompatible", 5)
+
+    def test_pinned_code_beats_a_rival_phrase_in_its_own_message(self) -> None:
+        # ``validate_project_label`` is pinned ``invalid_argument`` while its
+        # diagnostic contains "must be", the phrase the fallback rules read as
+        # ``invalid_document``. The raise-site code has to win.
+        with self.assertRaises(JournalError) as raised:
+            validate_project_label("   ")
+        self.assert_raise_site_code(raised.exception, "invalid_argument", 2)
+        self.assertIn("must be", str(raised.exception))
+        self.assertEqual(
+            _classify_journal_error(JournalError(str(raised.exception))),
+            ("invalid_document", 2),
+        )
+        # The same independence in the other direction: an earlier rule's
+        # phrase in the message does not outrank a later rule's pinned code.
+        self.assertEqual(
+            _classify_journal_error(
+                JournalError("task not found: TASK-1", code="state_conflict")
+            ),
+            ("state_conflict", 4),
+        )
+
+
+class JournalErrorRaiseSiteCoverageTests(unittest.TestCase):
+    """Every ``JournalError`` raise site carries its own stable code.
+
+    The substring fallback in ``aiq.cli._errors`` is documented as
+    transitional. This test is what keeps it that way: a new raise site
+    without ``code=`` fails here rather than silently re-entering the
+    wording-dependent path.
+    """
+
+    # ``_canonical_ingest_event`` re-raises the message of an ``EventError``
+    # built in ``aiq.events``; the code is not knowable at the wrapping site,
+    # so this one site is still classified by message.
+    EXEMPT = {("journal.py", "_canonical_ingest_event")}
+    RAISED = {"JournalError", "_NotGitRepository"}
+
+    def test_every_raise_site_sets_a_code(self) -> None:
+        unpinned: list[str] = []
+        total = 0
+        for path in sorted((REPOSITORY_ROOT / "src" / "aiq").rglob("*.py")):
+            tree = ast.parse(path.read_text())
+            owner: dict[int, str] = {}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    end = node.end_lineno or node.lineno
+                    for line in range(node.lineno, end + 1):
+                        owner[line] = node.name
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Raise):
+                    continue
+                call = node.exc
+                if not isinstance(call, ast.Call):
+                    continue
+                function = call.func
+                name = (
+                    function.id
+                    if isinstance(function, ast.Name)
+                    else getattr(function, "attr", None)
+                )
+                if name not in self.RAISED:
+                    continue
+                total += 1
+                if any(keyword.arg == "code" for keyword in call.keywords):
+                    continue
+                site = (path.name, owner.get(node.lineno, "<module>"))
+                if site in self.EXEMPT:
+                    continue
+                unpinned.append(f"{path.name}:{node.lineno} in {site[1]}")
+        self.assertEqual(unpinned, [], "raise sites without code=")
+        self.assertGreater(total, 200)
+
+    def test_every_pinned_code_is_a_known_stable_code(self) -> None:
+        for path in sorted((REPOSITORY_ROOT / "src" / "aiq").rglob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Raise):
+                    continue
+                call = node.exc
+                if not isinstance(call, ast.Call):
+                    continue
+                function = call.func
+                name = (
+                    function.id
+                    if isinstance(function, ast.Name)
+                    else getattr(function, "attr", None)
+                )
+                if name not in self.RAISED:
+                    continue
+                for keyword in call.keywords:
+                    if keyword.arg != "code":
+                        continue
+                    self.assertIsInstance(keyword.value, ast.Constant)
+                    self.assertIn(
+                        keyword.value.value,
+                        _JOURNAL_ERROR_CODE_EXITS,
+                        f"{path.name}:{node.lineno}",
+                    )
 
 
 if __name__ == "__main__":

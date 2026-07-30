@@ -120,12 +120,16 @@ def _report(arguments: argparse.Namespace) -> int:
         )
     target = _report_target(arguments)
     if not target.is_dir():
-        raise JournalError(f"dev report target does not exist: {target}")
+        raise JournalError(
+            f"dev report target does not exist: {target}",
+            code="not_found",
+        )
     scope = resolve_scope("repo", cwd=target)
     if not scope.journal_path.is_file():
         raise JournalError(
             f"dev report target journal does not exist: {scope.journal_path} "
-            "(initialize the development checkout with: aiq journal init)"
+            "(initialize the development checkout with: aiq journal init)",
+            code="not_found",
         )
     content = json.dumps(
         {"aiq_version": __version__, "detail": detail, "summary": summary},

@@ -146,7 +146,10 @@ def _emit_error(code: str, message: str, *, as_json: bool) -> None:
 def _read_stdin_bounded(maximum_bytes: int, *, label: str) -> bytes:
     data = sys.stdin.buffer.read(maximum_bytes + 1)
     if len(data) > maximum_bytes:
-        raise JournalError(f"{label} exceeds {maximum_bytes} bytes")
+        raise JournalError(
+            f"{label} exceeds {maximum_bytes} bytes",
+            code="invalid_document",
+        )
     return data
 
 
@@ -154,7 +157,10 @@ def _read_file_bounded(path: Path, maximum_bytes: int, *, label: str) -> bytes:
     with path.open("rb") as input_file:
         data = input_file.read(maximum_bytes + 1)
     if len(data) > maximum_bytes:
-        raise JournalError(f"{label} exceeds {maximum_bytes} bytes")
+        raise JournalError(
+            f"{label} exceeds {maximum_bytes} bytes",
+            code="invalid_document",
+        )
     return data
 
 
@@ -162,7 +168,10 @@ def _decode_utf8(data: bytes, *, label: str) -> str:
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError as error:
-        raise JournalError(f"{label} is not valid UTF-8") from error
+        raise JournalError(
+            f"{label} is not valid UTF-8",
+            code="state_conflict",
+        ) from error
 
 
 def _read_text_argument(

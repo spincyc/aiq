@@ -477,5 +477,8 @@ def show_capability(capability_id: str) -> dict[str, Any]:
     try:
         capability = CAPABILITIES[capability_id]
     except KeyError as error:
-        raise JournalError(f"capability not found: {capability_id}") from error
+        raise JournalError(
+            f"capability not found: {capability_id}",
+            code="not_found",
+        ) from error
     return {"id": capability_id, **deepcopy(capability)}

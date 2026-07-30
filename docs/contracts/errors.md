@@ -6,10 +6,20 @@ AIQ separates human diagnostics from stable machine classification. Error
 messages may improve without changing the error code: a code is chosen at the
 raise site that detects the failure and travels with the error, so it is
 independent of the wording, punctuation, and interpolated values of the
-diagnostic. A residual substring fallback still classifies journal errors
-raised outside `aiq.journal` and `aiq.queue`, and those whose text is
-forwarded from another layer; it is transitional, and no consumer should
-infer a code from message wording.
+diagnostic. Every journal-error raise site in AIQ now sets its own code, for
+every code in the table below — `not_found`, `invalid_argument`,
+`invalid_document`, `not_claimable`, and `state_conflict` included, not only
+the fence and integrity codes.
+
+One residue remains, in exactly one place. Ingest validates its request as a
+canonical event first, and when that validation fails the event layer's own
+diagnostic is re-raised without a code, because the code is not known where
+the re-raise happens. A substring fallback still classifies that one message,
+so an ingest validation failure reports `invalid_document` or
+`state_conflict` depending on how the event layer worded it. That path is
+expected to settle on `invalid_document`; until it does, treat the
+distinction as unstable. No consumer should infer a code from message
+wording anywhere.
 
 ## JSON form
 
@@ -76,6 +86,17 @@ report they emit on standard output contains findings.
 | `integration_drift` | Installed integration state differs from its manifest |
 | `unsupported_environment` | The host lacks a required supported facility |
 | `internal_error` | An uncategorized implementation defect escaped normal handling |
+
+Pinning a code at its raise site fixed how a code is carried, not which code
+each site deserves. Every site was pinned to the classification callers were
+already receiving, so no observable behavior changed, and some of those
+classifications are inherited accidents rather than judgments. The known
+ones, all of which need a deliberate contract change rather than a
+refactor: the journal and queue integrity audits behind `journal check`
+report `state_conflict` at exit 4 for most stored-data violations, while the
+SQLite integrity and foreign-key checks beside them report `integrity_failed`
+at exit 5; and filesystem, permission, and lock preconditions on journal
+state report `state_conflict` rather than an exit-6 environment code.
 
 Retry behavior depends on the code. `revision_conflict` requires rereading task
 state. `claim_expired` requires acquiring a new claim. `not_claimable` may be a

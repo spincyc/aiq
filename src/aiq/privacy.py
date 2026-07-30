@@ -94,7 +94,10 @@ def _write_hashed(
 
 def _quote_identifier(identifier: str) -> str:
     if not identifier.replace("_", "").isalnum():
-        raise JournalError(f"invalid export identifier: {identifier}")
+        raise JournalError(
+            f"invalid export identifier: {identifier}",
+            code="state_conflict",
+        )
     return f'"{identifier}"'
 
 
@@ -125,7 +128,8 @@ def _export_rows(
         unexpected = sorted(actual_tables - _SCHEMA_V2_TABLE_NAMES)
         raise JournalError(
             "journal tables do not match export format "
-            f"(missing={missing}, unexpected={unexpected})"
+            f"(missing={missing}, unexpected={unexpected})",
+            code="state_conflict",
         )
 
     for record_type, table, order_columns, json_columns in _EXPORT_RECORDS:
@@ -143,7 +147,9 @@ def _export_rows(
                     semantic_row[public_name] = json.loads(raw_value)
                 except (json.JSONDecodeError, TypeError) as error:
                     raise JournalError(
-                        f"journal contains invalid JSON in {table}.{stored_name}"
+                        f"journal contains invalid JSON in "
+                        f"{table}.{stored_name}",
+                        code="invalid_document",
                     ) from error
             yield record_type, semantic_row
 
@@ -163,7 +169,10 @@ def _validated_output_path(scope: JournalScope, output_path: Path) -> Path:
         )
     target = parent / requested.name
     if os.path.lexists(target):
-        raise JournalError(f"export output already exists: {target}")
+        raise JournalError(
+            f"export output already exists: {target}",
+            code="state_conflict",
+        )
 
     journal_directory = scope.journal_path.parent.resolve(strict=False)
     try:
@@ -190,7 +199,10 @@ def _publish_new_file(temporary_path: Path, output_path: Path) -> None:
         temporary_path.unlink()
         _fsync_directory(output_path.parent)
     except FileExistsError as error:
-        raise JournalError(f"export output already exists: {output_path}") from error
+        raise JournalError(
+            f"export output already exists: {output_path}",
+            code="state_conflict",
+        ) from error
     except OSError as error:
         if published:
             output_path.unlink(missing_ok=True)
@@ -198,7 +210,10 @@ def _publish_new_file(temporary_path: Path, output_path: Path) -> None:
                 _fsync_directory(output_path.parent)
             except OSError:
                 pass
-        raise JournalError(f"cannot publish export: {output_path}") from error
+        raise JournalError(
+            f"cannot publish export: {output_path}",
+            code="state_conflict",
+        ) from error
 
 
 def export_journal(
@@ -225,7 +240,8 @@ def export_journal(
             with journal.lifecycle_lock(scope, exclusive=False):
                 if not os.path.lexists(scope.journal_path):
                     raise JournalError(
-                        f"journal does not exist: {scope.journal_path}"
+                        f"journal does not exist: {scope.journal_path}",
+                        code="not_found",
                     )
                 journal._validate_private_file(scope.journal_path)
                 connection = _readonly_connection(scope.journal_path)
@@ -236,10 +252,14 @@ def export_journal(
                     ).fetchone()[0]
                     if integrity != "ok":
                         raise JournalError(
-                            f"SQLite integrity check failed: {integrity}"
+                            f"SQLite integrity check failed: {integrity}",
+                            code="integrity_failed",
                         )
                     if connection.execute("PRAGMA foreign_key_check").fetchall():
-                        raise JournalError("SQLite foreign-key check failed")
+                        raise JournalError(
+                            "SQLite foreign-key check failed",
+                            code="integrity_failed",
+                        )
 
                     metadata = dict(
                         connection.execute(
@@ -251,12 +271,14 @@ def export_journal(
                         schema_version = int(raw_schema_version or "")
                     except ValueError as error:
                         raise JournalError(
-                            "journal has an invalid schema version"
+                            "journal has an invalid schema version",
+                            code="state_conflict",
                         ) from error
                     if schema_version != journal.SCHEMA_VERSION:
                         raise JournalError(
                             f"journal schema {schema_version} is unsupported "
-                            f"by export format {EXPORT_FORMAT_VERSION}"
+                            f"by export format {EXPORT_FORMAT_VERSION}",
+                            code="schema_incompatible",
                         )
 
                     byte_count += _write_hashed(
@@ -332,7 +354,10 @@ def _private_directory(path: Path, *, label: str) -> os.stat_result | None:
         or status.st_uid != os.getuid()
         or stat.S_IMODE(status.st_mode) != 0o700
     ):
-        raise JournalError(f"{label} is not a private directory: {path}")
+        raise JournalError(
+            f"{label} is not a private directory: {path}",
+            code="state_conflict",
+        )
     return status
 
 
@@ -345,7 +370,10 @@ def _owned_regular_file(path: Path) -> os.stat_result:
         or status.st_nlink != 1
         or stat.S_IMODE(status.st_mode) != 0o600
     ):
-        raise JournalError(f"managed journal path is unsafe: {path}")
+        raise JournalError(
+            f"managed journal path is unsafe: {path}",
+            code="state_conflict",
+        )
     return status
 
 
@@ -396,7 +424,8 @@ def _managed_inventory(scope: JournalScope) -> list[_ManagedEntry]:
         for path in sorted(backup_directory.iterdir(), key=lambda item: item.name):
             if not _is_backup_name(path.name):
                 raise JournalError(
-                    f"backup directory contains an unmanaged entry: {path}"
+                    f"backup directory contains an unmanaged entry: {path}",
+                    code="state_conflict",
                 )
             kind = (
                 "backup_temporary"
@@ -520,7 +549,10 @@ def _open_private_directory(
             dir_fd=directory_descriptor,
         )
     except OSError as error:
-        raise JournalError(f"{label} is not a private directory: {path}") from error
+        raise JournalError(
+            f"{label} is not a private directory: {path}",
+            code="state_conflict",
+        ) from error
     status = os.fstat(descriptor)
     if (
         not stat.S_ISDIR(status.st_mode)
@@ -528,7 +560,10 @@ def _open_private_directory(
         or stat.S_IMODE(status.st_mode) != 0o700
     ):
         os.close(descriptor)
-        raise JournalError(f"{label} is not a private directory: {path}")
+        raise JournalError(
+            f"{label} is not a private directory: {path}",
+            code="state_conflict",
+        )
     return descriptor
 
 
@@ -581,11 +616,13 @@ def _unlink_unchanged(
         )
     except OSError as error:
         raise JournalError(
-            f"managed journal path changed after confirmation: {entry.path}"
+            f"managed journal path changed after confirmation: {entry.path}",
+            code="state_conflict",
         ) from error
     if not _same_entry(entry.status, current):
         raise JournalError(
-            f"managed journal path changed after confirmation: {entry.path}"
+            f"managed journal path changed after confirmation: {entry.path}",
+            code="state_conflict",
         )
     os.unlink(entry.path.name, dir_fd=directory_descriptor)
 
@@ -619,7 +656,8 @@ def _delete_inventory(
                 os.fstat(backup_descriptor),
             ):
                 raise JournalError(
-                    "backup directory changed after confirmation"
+                    "backup directory changed after confirmation",
+                    code="state_conflict",
                 )
 
         for entry in inventory:
@@ -646,7 +684,8 @@ def _delete_inventory(
             assert backup_entry is not None
             if not _same_directory(backup_entry.status, current_backup):
                 raise JournalError(
-                    "backup directory changed after confirmation"
+                    "backup directory changed after confirmation",
+                    code="state_conflict",
                 )
             os.rmdir("backups", dir_fd=journal_descriptor)
         os.fsync(journal_descriptor)
@@ -675,7 +714,8 @@ def destroy_journal(
             expected_token,
         ):
             raise JournalError(
-                "journal destroy confirmation is missing, invalid, or stale"
+                "journal destroy confirmation is missing, invalid, or stale",
+                code="state_conflict",
             )
 
         deleted_files = sum(
