@@ -130,6 +130,8 @@ def _inbox_claim(arguments: argparse.Namespace) -> int:
         owner_id=owner,
         lease_seconds=lease,
         message_id=arguments.message_id,
+        reader_id=config.reader,
+        reader_lease_seconds=config.reader_lease_seconds,
     )
     if result is None:
         payload: dict[str, Any] = {"claim": None, "message": None}
@@ -137,12 +139,14 @@ def _inbox_claim(arguments: argparse.Namespace) -> int:
         payload = {
             "claim": _claim_public(result),
             "message": result["message"],
+            "reader_acquired": result["reader_acquired"],
         }
     _emit(payload, as_json=arguments.json)
     return 0
 
 
 def _inbox_apply(arguments: argparse.Namespace) -> int:
+    config = arguments.effective_config
     result = apply_effects(
         _scope(arguments),
         arguments.message_id,
@@ -154,18 +158,23 @@ def _inbox_apply(arguments: argparse.Namespace) -> int:
             )
         ),
         claim_id=arguments.claim,
+        reader_id=config.reader,
+        reader_lease_seconds=config.reader_lease_seconds,
     )
     _emit(_application_public(result), as_json=arguments.json)
     return 0
 
 
 def _inbox_dispose(arguments: argparse.Namespace) -> int:
+    config = arguments.effective_config
     result = dispose_message(
         _scope(arguments),
         arguments.message_id,
         claim_id=arguments.claim,
         disposition=arguments.disposition,
         reason=arguments.reason,
+        reader_id=config.reader,
+        reader_lease_seconds=config.reader_lease_seconds,
     )
     _emit(
         {

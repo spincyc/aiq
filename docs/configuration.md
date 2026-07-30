@@ -25,11 +25,13 @@ Both TOML files are optional, flat, and must declare `version = 1`.
 | `scope` | `auto`, `repo`, `user` | `auto` | yes | no |
 | `owner` | Nonempty local identity | OS user | yes | no |
 | `lease_seconds` | `1`–`86400` | `900` | yes | yes |
+| `reader` | Nonempty session identity | Host and session | yes | no |
+| `reader_lease_seconds` | `60`–`86400` | `1800` | yes | yes |
 | `snapshot_keep` | `1`–`10000` | `5` | yes | no |
 | `output` | `human`, `json` | `human` | yes | no |
 | `dev_report_repo` | Absolute path | `None` | yes | no |
 
-Repository configuration can set only bounded lease duration. It cannot choose
+Repository configuration can set only bounded lease durations. It cannot choose
 scope, identity, output, or retention. `snapshot_keep` controls snapshot
 retention only; it never removes messages or task history. `dev_report_repo`
 names the local AIQ development checkout that receives `aiq report` bug
@@ -37,6 +39,16 @@ reports; it is deliberately excluded from repository configuration so a cloned
 repository cannot redirect reports. The additional `agent-root` value visible
 in the CLI `--scope` choices is an internal, unstable hook and is not a
 configurable scope.
+
+`owner` and `reader` are different identities on purpose. `owner` labels who
+holds a message or task claim and defaults to the OS user, so two concurrent
+sessions of one person share it. `reader` names the session allowed to drain
+the scope's queue, and its default — the host plus the POSIX session id — is
+inherited by every short-lived process of one terminal, including host hooks,
+while differing between terminals. Set `reader_lease_seconds` at or above
+`lease_seconds` so the reader role never expires before the items it holds.
+Exporting one shared `AIQ_READER` is the documented way to let several
+cooperating workers drain a single journal on purpose.
 
 Example user configuration:
 
@@ -63,6 +75,8 @@ lease_seconds = 1200
 | `AIQ_SCOPE` | `scope` |
 | `AIQ_OWNER` | `owner` |
 | `AIQ_LEASE_SECONDS` | `lease_seconds` |
+| `AIQ_READER` | `reader` |
+| `AIQ_READER_LEASE_SECONDS` | `reader_lease_seconds` |
 | `AIQ_SNAPSHOT_KEEP` | `snapshot_keep` |
 | `AIQ_OUTPUT` | `output` |
 | `AIQ_DEV_REPORT_REPO` | `dev_report_repo` |

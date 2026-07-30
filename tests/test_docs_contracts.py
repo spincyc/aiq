@@ -416,6 +416,7 @@ class DocumentationContractTests(unittest.TestCase):
             user_path=None,
             repo_path=None,
             default_owner="OS user",
+            default_reader="Host and session",
         ).to_dict()
         documented_defaults = {
             key: values["default"] for key, values in matrix.items()

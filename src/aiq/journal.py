@@ -17,7 +17,7 @@ from typing import Any, Iterator
 import uuid
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SQLITE_MINIMUM_VERSION = (3, 37, 0)
 
 # Journal-level project label: the human-readable name of the repository
@@ -659,6 +659,35 @@ SCHEMA_V3_STATEMENTS = (
     """,
 )
 
+# The scope-level reader lease: at most one row, naming the single
+# session currently allowed to consume work while any number of sessions
+# keep writing. The row survives release and expiry so `epoch` stays
+# monotonic and the last holder remains nameable.
+#
+# Deliberately mutable: renewal rewrites the row in place, so this table
+# carries no append-only trigger and no replace guard, and lease churn
+# writes no events. A reader lease is coordination state, not ledger
+# truth; the ledger already records what the reader did with the role.
+SCHEMA_V4_STATEMENTS = (
+    """
+    CREATE TABLE reader_leases (
+      lease_scope INTEGER PRIMARY KEY CHECK (lease_scope = 0),
+      lease_id TEXT NOT NULL,
+      epoch INTEGER NOT NULL CHECK (epoch > 0),
+      owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 200),
+      reader_id TEXT NOT NULL CHECK (length(reader_id) BETWEEN 1 AND 200),
+      holder_host TEXT,
+      holder_sid INTEGER CHECK (holder_sid IS NULL OR holder_sid > 0),
+      acquired_at_us INTEGER NOT NULL,
+      renewed_at_us INTEGER NOT NULL CHECK (renewed_at_us >= acquired_at_us),
+      expires_at_us INTEGER NOT NULL CHECK (expires_at_us > acquired_at_us),
+      released_at_us INTEGER CHECK (
+        released_at_us IS NULL OR released_at_us >= acquired_at_us
+      )
+    ) STRICT
+    """,
+)
+
 APPEND_ONLY_V2_TABLES = (
     "schema_migrations",
     "task_numbers",
@@ -1194,6 +1223,11 @@ def _create_v3_schema(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _create_v4_schema(connection: sqlite3.Connection) -> None:
+    for statement in SCHEMA_V4_STATEMENTS:
+        connection.execute(statement)
+
+
 def _execute_script_statements(
     connection: sqlite3.Connection,
     script: str,
@@ -1259,6 +1293,8 @@ def _validate_schema_objects(
         )
     if schema_version >= 3:
         required.add(("index", "claims_resource_lookup"))
+    if schema_version >= 4:
+        required.add(("table", "reader_leases"))
     actual = {
         (row[0], row[1])
         for row in connection.execute(
@@ -1344,6 +1380,7 @@ def _initialize_journal_locked(
                     _execute_script_statements(connection, SCHEMA_SQL)
                     _create_v2_schema(connection)
                     _create_v3_schema(connection)
+                    _create_v4_schema(connection)
                     metadata = {
                         "schema_version": str(SCHEMA_VERSION),
                         **_scope_metadata(scope),
@@ -1427,6 +1464,8 @@ def _initialize_journal_locked(
                             _create_v2_schema(connection)
                         if version < 3:
                             _create_v3_schema(connection)
+                        if version < 4:
+                            _create_v4_schema(connection)
                         connection.execute(
                             """
                             INSERT INTO schema_migrations(

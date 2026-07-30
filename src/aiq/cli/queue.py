@@ -46,20 +46,31 @@ def _queue_next(arguments: argparse.Namespace) -> int:
         if arguments.lease_seconds is not None
         else config.lease_seconds
     )
+    claimed = claim_next_tasks(
+        _scope(arguments),
+        owner_id=owner,
+        lease_seconds=lease,
+        limit=arguments.limit,
+        reader_id=config.reader,
+        reader_lease_seconds=config.reader_lease_seconds,
+    )
     items = [
         {
             "task": _task_summary(item["task"]),
             "claim": _claim_public(item["claim"]),
         }
-        for item in claim_next_tasks(
-            _scope(arguments),
-            owner_id=owner,
-            lease_seconds=lease,
-            limit=arguments.limit,
-        )
+        for item in claimed
     ]
     if arguments.json:
-        _emit({"items": items}, as_json=True)
+        _emit(
+            {
+                "items": items,
+                "reader_acquired": any(
+                    item["reader_acquired"] for item in claimed
+                ),
+            },
+            as_json=True,
+        )
         return 0
     for item in items:
         task = item["task"]

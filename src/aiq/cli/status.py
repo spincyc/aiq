@@ -14,7 +14,7 @@ from aiq.queue import MESSAGE_STATES, TASK_STATES, read_status
 
 def _status(arguments: argparse.Namespace) -> int:
     scope = _scope(arguments)
-    result = read_status(scope)
+    result = read_status(scope, reader_id=arguments.effective_config.reader)
     if arguments.json:
         _emit({**result, "scope": scope.to_dict()}, as_json=True)
         return 0

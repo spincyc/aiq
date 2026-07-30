@@ -162,10 +162,13 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "Lease one unapplied message and return its exact content; an "
         "explicit MESSAGE_ID may also resume a parked needs_input message "
         "once its missing input has arrived, or reopen a failed message "
-        "whose disposition was misjudged.",
+        "whose disposition was misjudged. Requires the scope's reader "
+        "lease, which a successful claim takes implicitly when it is "
+        "free; another live reader is refused with reader_held.",
         "aiq inbox claim [MESSAGE_ID] [--owner OWNER] [--json]",
         mutates=True,
         idempotency="not retry-safe after a lost receipt",
+        version=2,
     ),
     "inbox.fail": _capability(
         "Close a claimed message that cannot be processed.",
@@ -295,6 +298,29 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "--if-new returns the existing received message for identical "
         "content with a deduped flag instead of storing a duplicate",
     ),
+    "reader.acquire": _capability(
+        "Hold the scope's single reader role without consuming work, so "
+        "an idle session keeps the right to drain.",
+        (
+            "aiq reader acquire [--reader ID] [--owner OWNER] "
+            "[--lease-seconds N] [--json]"
+        ),
+        mutates=True,
+        idempotency="acquiring while holding renews the same lease",
+    ),
+    "reader.release": _capability(
+        "Give up the scope's reader role, leaving every held claim "
+        "untouched to recover on its own schedule.",
+        "aiq reader release [--reader ID] [--json]",
+        mutates=True,
+        idempotency="safe retry; already released or expired replays",
+    ),
+    "reader.status": _capability(
+        "Read who currently holds the scope's reader role and until when.",
+        "aiq reader status [--json]",
+        mutates=False,
+        idempotency="read-only",
+    ),
     "reconcile.run": _capability(
         "Report AIQ-owned integration and journal health after an external "
         "installer upgrades AIQ; --apply repairs planned AIQ-owned drift "
@@ -321,16 +347,21 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     "queue.dequeue": _capability(
         "Lease the highest-priority eligible task; the ergonomic synonym "
         "of queue.next with identical time-bounded lease semantics, never "
-        "removal.",
+        "removal, and the identical reader-lease requirement.",
         "aiq dequeue [--owner OWNER] [--limit N] [--json]",
         mutates=True,
         idempotency="not retry-safe after a lost receipt",
+        version=2,
     ),
     "queue.next": _capability(
-        "Lease the highest-priority eligible task.",
+        "Lease the highest-priority eligible task. Requires the scope's "
+        "reader lease, which a successful lease takes implicitly when it "
+        "is free; another live reader is refused with reader_held, even "
+        "when the queue is empty.",
         "aiq queue next [--owner OWNER] [--limit N] [--json]",
         mutates=True,
         idempotency="not retry-safe after a lost receipt",
+        version=2,
     ),
     "queue.peek": _capability(
         "Preview bounded eligible work without reserving it.",
@@ -350,7 +381,11 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     "task.done": _capability(
         "Settle one or more ready or owned active tasks as done through "
         "one recorded summary message and one atomic effects application; "
-        "any ineligible task fails the whole command.",
+        "any ineligible task fails the whole command. Single-reader "
+        "governs dispatch, not settlement: settling a task already active "
+        "under the caller stays open to every session, while settling a "
+        "merely ready task leases it here and needs the reader lease. It "
+        "never takes the lease implicitly.",
         (
             "aiq task done TASK_ID [TASK_ID ...] --summary TEXT "
             "[--owner OWNER] [--json]"
@@ -358,6 +393,7 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         mutates=True,
         idempotency="all-or-nothing; a retry after success fails because "
         "done tasks are terminal",
+        version=2,
     ),
     "task.enqueue": _capability(
         "Create one task in one transaction through an auto-recorded "

@@ -23,6 +23,7 @@ class ConfigTests(unittest.TestCase):
             user_path=None,
             repo_path=None,
             default_owner="tester",
+            default_reader="tester-session",
         )
 
         self.assertEqual(
@@ -32,6 +33,8 @@ class ConfigTests(unittest.TestCase):
                 "scope": "auto",
                 "owner": "tester",
                 "lease_seconds": 900,
+                "reader": "tester-session",
+                "reader_lease_seconds": 1800,
                 "snapshot_keep": 5,
                 "output": "human",
                 "dev_report_repo": None,

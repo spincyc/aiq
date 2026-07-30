@@ -195,6 +195,7 @@ def _add_config_arguments(
     parser.add_argument("--json", action="store_true")
     if not operational:
         parser.add_argument("--owner")
+        parser.add_argument("--reader")
         parser.add_argument("--lease-seconds", type=int)
         parser.add_argument("--snapshot-keep", type=int)
 
@@ -204,6 +205,7 @@ def _config_cli_values(arguments: argparse.Namespace) -> dict[str, object]:
         "scope": getattr(arguments, "scope", None),
         "owner": getattr(arguments, "owner", None),
         "lease_seconds": getattr(arguments, "lease_seconds", None),
+        "reader": getattr(arguments, "reader", None),
         "snapshot_keep": getattr(arguments, "snapshot_keep", None),
         "output": None,
     }
@@ -298,6 +300,7 @@ CONFIG_OUTPUT_COMMANDS = frozenset(
         "journal",
         "list",
         "queue",
+        "reader",
         "reconcile",
         "report",
         "status",

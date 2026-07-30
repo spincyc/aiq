@@ -50,6 +50,7 @@ _EXPORT_RECORDS = (
 _SCHEMA_V2_TABLE_NAMES = frozenset(
     {
         "journal_metadata",
+        "reader_leases",
         "schema_migrations",
         "task_numbers",
         *(table for _, table, _, _ in _EXPORT_RECORDS),

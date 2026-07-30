@@ -921,6 +921,8 @@ class QueueTest(unittest.TestCase):
         message = self.ingest("Claim exactly once")
         barrier = threading.Barrier(8)
 
+        # One shared reader identity, so the reader lease admits every
+        # competitor and the claim layer alone decides the winner.
         def compete(index: int):
             barrier.wait()
             try:
@@ -928,6 +930,7 @@ class QueueTest(unittest.TestCase):
                     self.scope,
                     owner_id=f"owner-{index}",
                     message_id=message.message_id,
+                    reader_id="shared-reader",
                 )
             except JournalError:
                 return None
@@ -1348,6 +1351,8 @@ class QueueTest(unittest.TestCase):
         task_id = result["aliases"]["$work"]
         barrier = threading.Barrier(8)
 
+        # One shared reader identity, as above: this test is about the
+        # task claim race, not about who holds the reader role.
         def compete(index: int):
             barrier.wait()
             try:
@@ -1355,6 +1360,7 @@ class QueueTest(unittest.TestCase):
                     self.scope,
                     task_id,
                     owner_id=f"owner-{index}",
+                    reader_id="shared-reader",
                 )
             except JournalError:
                 return None
@@ -1650,6 +1656,14 @@ class QueueTest(unittest.TestCase):
                     "superseded": 0,
                 },
                 "claims": {"active": 0},
+                "reader": {
+                    "status": "absent",
+                    "held": False,
+                    "self": None,
+                    "owner_id": None,
+                    "reader_id": None,
+                    "expires_at": None,
+                },
                 "ready": [],
                 "blocked": [],
             },

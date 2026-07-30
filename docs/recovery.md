@@ -8,6 +8,7 @@ Start with the smallest read-only check that can identify the problem.
 | Suspected corruption or drift | `aiq journal check --json` |
 | Worker stopped while holding work | Wait for lease expiry, then claim again |
 | Worker can no longer finish | `aiq claim release CLAIM_ID` |
+| Consuming fails with `reader_held` | `aiq reader status` |
 | Message needs clarification | `aiq inbox needs-input … --reason TEXT` |
 | Message cannot be processed | `aiq inbox fail … --reason TEXT` |
 | Before a risky local change | `aiq journal snapshot` |
@@ -46,6 +47,28 @@ aiq claim release CLAIM_ID
 ```
 
 Repeating a successful release returns the stored release result.
+
+## Stale reader leases
+
+One scope has one reader role, so a crashed consumer can leave it held. Find
+the holder first:
+
+```sh
+aiq reader status
+```
+
+A `held` lease with an `expires_at` in the past is already recoverable and the
+next consume takes it over. A live lease from a session that has genuinely
+gone away is reclaimed one of three ways, in order of preference: have the
+holder run `aiq reader release`; wait for `expires_at`, bounded by
+`reader_lease_seconds`; or, when the holder derived its identity on this host
+and its session is provably gone, the next consume takes over immediately.
+There is deliberately no force or steal — a live lease is refused rather than
+broken, because breaking one risks two sessions draining a journal at once.
+
+Losing the role revokes nothing. Claims the old holder still holds recover on
+their own lease schedule, and the old holder can still apply, park, fail,
+release, and complete the work it already claimed.
 
 ## Export is not restore
 

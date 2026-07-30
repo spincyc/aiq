@@ -72,8 +72,9 @@ never touches that copy; erase it through the development checkout's journal.
 Export writes a new private `aiq-journal-jsonl` v1 file with media type
 `application/x-ndjson`. It includes exact messages, events, task history,
 applications, and claims with stored JSON decoded into semantic values. It
-excludes physical scope identity, schema migrations, internal metadata, and
-allocator state.
+excludes physical scope identity, schema migrations, internal metadata,
+allocator state, and the ephemeral reader lease, whose host and session
+identifiers are live coordination state rather than semantic history.
 
 ```sh
 export_directory="${XDG_STATE_HOME:-$HOME/.local/state}/aiq-exports"

@@ -19,6 +19,7 @@ _JOURNAL_ERROR_CODE_EXITS: dict[str, tuple[str, int]] = {
     "invalid_document": ("invalid_document", 2),
     "not_claimable": ("not_claimable", 4),
     "not_found": ("not_found", 3),
+    "reader_held": ("reader_held", 4),
     "state_conflict": ("state_conflict", 4),
 }
 

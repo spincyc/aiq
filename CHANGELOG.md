@@ -10,6 +10,20 @@ effects documents, capability contracts, and integration manifests.
 
 ### Added
 
+- A scope-level reader lease enforcing many writers, one reader. Any session
+  may `ingest`, `enqueue`, and `report`; exactly one at a time may consume
+  through `inbox claim`, `queue next`, or `dequeue`, which take the role
+  implicitly on a successful consume and slide its expiry forward. New
+  `aiq reader status|acquire|release` commands inspect and manage the role
+  explicitly, with matching `reader.status`, `reader.acquire`, and
+  `reader.release` capability descriptors. New configuration keys `reader`
+  (default: this host plus POSIX session id, also settable through
+  `AIQ_READER`) and `reader_lease_seconds` (default 1800, also settable
+  through `AIQ_READER_LEASE_SECONDS`). New JSON fields, all optional and
+  additive: `reader` on `status` and `reader status`, and `reader_acquired`
+  on `inbox claim`, `queue next`, and `dequeue` receipts. Schema version 4
+  adds a `reader_leases` table; existing journals migrate on first open with
+  the usual pre-migration backup.
 - Journal-level project labels naming the repository or orchestrating project
   a journal's tasks belong to. The label defaults to the repository root
   directory's name (`user` for user scope), is set explicitly by
@@ -78,6 +92,20 @@ effects documents, capability contracts, and integration manifests.
   line, instead of blocking until the host kills the hook silently.
 
 ### Changed
+
+- Several concurrent workers draining one journal now fail. A session that is
+  not the scope's reader gets the new stable error code `reader_held` and
+  exit 4 from `inbox claim`, `queue next`, and `dequeue` — including when the
+  queue is empty, because the truthful answer is that it is not the reader —
+  and from `task done` when it would dispatch a merely `ready` task. A single
+  working session is unaffected: the first successful consume takes the role.
+  Intentional fan-out stays possible by exporting one shared `AIQ_READER`
+  across the cooperating workers. Single-reader governs dispatch, not
+  settlement: `inbox apply`, `inbox needs-input`, `inbox fail`,
+  `claim release`, and settling a task already active under the caller stay
+  open to every session, and losing the role never revokes a held claim.
+  Capability `version` rises to 2 for `inbox.claim`, `queue.next`,
+  `queue.dequeue`, and `task.done`.
 
 - Contract prose now states honestly that any command or hook opening a
   journal whose stored schema is older than the installed version first

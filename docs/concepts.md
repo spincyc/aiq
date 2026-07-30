@@ -16,6 +16,7 @@ message → claim → atomic effects → versioned tasks → ready queue → lea
 | Dependency | A hard requirement that another task finish first |
 | Priority | Soft ordering among otherwise ready tasks |
 | Claim | Time-bounded ownership of a message or task |
+| Reader lease | Time-bounded right to consume a whole scope's work |
 | Capability | Compact, load-on-demand operation contract |
 
 ## Messages and effects
@@ -84,6 +85,29 @@ one atomic effects document, never bypassing the pipeline.
 Expired claims cannot authorize effects or completion. AIQ recovers expired
 work during later claim operations; `claim release` returns uncompleted work
 voluntarily.
+
+## Many writers, one reader
+
+A claim reserves one item. A reader lease reserves the right to hand items
+out at all, for a whole scope.
+
+Any number of sessions may add work: `ingest`, `enqueue`, and `report` are
+never gated, and neither is any read. Exactly one session at a time may drain
+it: `inbox claim`, `queue next`, and `dequeue` require the scope's reader
+lease, and a successful consume takes it implicitly when it is free, so a
+single working session never notices the rule. A second concurrent consumer
+is refused with `reader_held` — including when the queue is empty, because the
+honest answer is that it is not the reader, not that there is no work.
+
+The role is keyed on a session identity, not on `owner`, which defaults to the
+OS user and is therefore shared by one person's concurrent terminals. The role
+slides forward on every gated command and is taken over once it is released,
+expires, or its holder is provably gone.
+
+Single-reader governs dispatch, not settlement. A session that already holds a
+claim keeps applying, parking, failing, releasing, and completing that work
+after losing the role: the claim itself proves legitimate consumption, and
+none of those steps hands out new work. Losing the role never revokes a claim.
 
 ## Scope
 

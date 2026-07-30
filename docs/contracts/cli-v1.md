@@ -95,6 +95,48 @@ JSON `task_id` values are never prefixed.
 Fence counters, acquisition event sequences, and microsecond storage values are
 internal and never appear in protocol v1.
 
+### Reader lease
+
+Every journal has one scope-level reader role: many sessions may write, and
+one at a time may consume. `ingest`, `enqueue`, and `report` are writes and
+stay open to everyone. `inbox claim`, `queue next`, and `dequeue` are
+dispatch and require the role, which a successful consume takes implicitly
+when it is free — today's single-session use therefore needs no new command.
+Another live holder is refused with [`reader_held`](errors.md) and exit 4,
+even when the queue and inbox are empty, because the truthful answer for a
+non-holder is that it is not the reader.
+
+The role is keyed on the `reader` identity, not `owner`: `owner` defaults to
+the OS user and so is shared by one person's concurrent sessions, while the
+default `reader` is the host plus the POSIX session id, which every process of
+one terminal inherits and two terminals never share. Export a single
+`AIQ_READER` to let cooperating workers drain one journal on purpose. See
+[`configuration.md`](../configuration.md).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | `absent`, `held`, `expired`, or `released` | Lease state at the read instant |
+| `held` | boolean | Whether the lease is live |
+| `self` | boolean or null | Whether the caller's reader identity is the recorded holder; null when the caller supplied none |
+| `owner_id` | string or null | Holder's owner at acquisition |
+| `reader_id` | string or null | Holder's reader identity |
+| `acquired_at` | RFC 3339 string or null | When the role was last taken |
+| `expires_at` | RFC 3339 string or null | Lease deadline |
+| `expires_in_seconds` | integer or null | Whole seconds remaining, floored at zero |
+| `epoch` | positive integer or null | Monotonic count of acquisitions |
+
+Every gated command slides `expires_at` forward; there is no heartbeat.
+`inbox apply`, `inbox needs-input`, `inbox fail`, and `claim release` are
+ungated and only renew a lease already held: the per-item claim already proves
+legitimate consumption of that item, and none of them hands out new work, so
+gating them would strand an item claimed before a takeover. Losing the role
+never revokes a claim; claims recover on their own schedule.
+
+The role may be taken over when no row exists, when it was released, when it
+has expired, or when its holder is provably dead. Takeover advances `epoch`
+and leaves every existing claim untouched. `status`, `list`, `queue peek`,
+`inbox list`, `claim list`, and the `task` read commands are never gated.
+
 ### Task summary
 
 | Field | Type |
@@ -125,7 +167,7 @@ The tables list fields in addition to top-level `v`.
 
 | Command | Success fields |
 |---|---|
-| `config show --json` | `version`, `scope`, `owner`, `lease_seconds`, `snapshot_keep`, `output`, `dev_report_repo`; optional `sources` |
+| `config show --json` | `version`, `scope`, `owner`, `lease_seconds`, `reader`, `reader_lease_seconds`, `snapshot_keep`, `output`, `dev_report_repo`; optional `sources` |
 | `config check --json` | `status: "ok"` |
 | `doctor --json` | `status: "ok"` or `"failed"`, ordered `checks` of `{check, status, detail}` |
 | `journal path --json` | `project`, `scope` |
@@ -137,7 +179,7 @@ The tables list fields in addition to top-level `v`.
 | `journal destroy --confirm TOKEN --json` | `status: "destroyed"` or `"already_absent"`, `deleted_files`, `scope` |
 | `ingest --json` | `message_id`, `state`, `created`, `scope`; with `--if-new`, adds `deduped` |
 | `inbox list --json` | `messages` containing message summaries |
-| `inbox claim --json` | `claim`, `message`; both null when none is claimable |
+| `inbox claim --json` | `claim`, `message`; both null when none is claimable, and `reader_acquired` when one was claimed |
 | `inbox apply --json` | application receipt described below |
 | `inbox needs-input --json` | `status: "needs_input"`, `message_id`, `claim_id`, `replayed` |
 | `inbox fail --json` | `status: "failed"`, `message_id`, `claim_id`, `replayed` |
@@ -147,13 +189,16 @@ The tables list fields in addition to top-level `v`.
 | `task explain --json` | `explain` containing eligibility detail and `explanation` |
 | `task history --json` | `task_id`, `events` newest first, each with `occurred_at`, `type`, `detail` |
 | `queue peek --json` | `tasks` containing task summaries |
-| `queue next --json` | `items`, each containing separate `task` summary and `claim` |
+| `queue next --json` | `items`, each containing separate `task` summary and `claim`; `reader_acquired` |
 | `enqueue --json` | `task_id`, `state`, `message_id` |
 | `dequeue --json` | identical to `queue next` |
 | `list --json` | `tasks` of `task_id`, `revision`, `state`, `priority`, and `title` |
 | `claim list --json` | `claims` containing unreleased lease summaries with `status` |
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
-| `status --json` | `messages`, `tasks`, `claims`, `ready`, `blocked`, `scope` |
+| `reader status --json` | `reader` containing the [Reader lease](#reader-lease) object, `scope` |
+| `reader acquire --json` | `status: "acquired"`, `acquired`, `reader` |
+| `reader release --json` | `status: "released"`, `replayed`, `reader` |
+| `status --json` | `messages`, `tasks`, `claims`, `reader`, `ready`, `blocked`, `scope` |
 | `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
 | `capability show NAME --json` | capability `id`, `version`, purpose, command, and selected contract |
@@ -189,10 +234,10 @@ integers, null, arrays, and objects; non-finite numbers are invalid.
 Configuration inspection is read-only:
 
 ```text
-aiq config show [--sources] [--scope SCOPE] [--owner OWNER]
+aiq config show [--sources] [--scope SCOPE] [--owner OWNER] [--reader ID]
                      [--lease-seconds SECONDS] [--snapshot-keep COUNT]
                      [--cwd PATH] [--no-repo-config] [--json]
-aiq config check [--scope SCOPE] [--owner OWNER]
+aiq config check [--scope SCOPE] [--owner OWNER] [--reader ID]
                   [--lease-seconds SECONDS] [--snapshot-keep COUNT]
                   [--cwd PATH] [--no-repo-config] [--json]
 ```
@@ -352,15 +397,43 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 | `tasks` | Effective task-state counts keyed by every task state |
 | `project` | The journal's [project label](#project-label) |
 | `claims` | `active`: unreleased, unexpired message and task leases |
+| `reader` | The [Reader lease](#reader-lease) object reduced to `status`, `held`, `self`, `owner_id`, `reader_id`, and `expires_at`, read from this same snapshot |
 | `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, `title`, and `created_at` |
 | `blocked` | At most five blocked tasks in the same order, each with only `task_id`, `priority`, `title`, and `blocked_by` — the failed prerequisite task IDs causing the block, empty for a directly blocked task |
 | `scope` | The resolved [Scope](#scope) object |
 
 A processing message whose lease has expired counts as `received`. Message and
 prompt content never appears. A missing journal reports zero counts, empty
-`ready` and `blocked` arrays, and the derived project label without creating
-storage. Human-readable `ready` and `blocked` lines render the task reference
+`ready` and `blocked` arrays, an `absent` reader lease, and the derived project
+label without creating storage. `reader.self` compares the recorded holder
+against the caller's configured `reader` identity, so one status read answers
+both what work remains and whether this session may consume it. Human-readable `ready` and `blocked` lines render the task reference
 as `[label: TASK-19]`; the `blocked by` causes stay bare IDs.
+
+## Reader role
+
+The reader commands inspect and manage the [reader lease](#reader-lease)
+directly. They are deliberately separate from the `claim` family, which keys
+on a different identity with a different lifecycle:
+
+```text
+aiq reader status [--scope SCOPE] [--cwd PATH] [--json]
+aiq reader acquire [--reader ID] [--owner OWNER] [--lease-seconds N]
+aiq reader release [--reader ID]
+```
+
+`status` is read-only and creates no storage. `acquire` holds the role
+without consuming anything, so an idle session can keep the right to drain;
+acquiring while already holding renews the same lease and reports
+`acquired: false`. `--lease-seconds` overrides `reader_lease_seconds` for that
+acquisition. `release` gives the role up: holding nothing, an already released
+lease, and an expired lease all replay with `replayed: true` and exit 0, while
+another live holder is `reader_held`. There is no force, steal, or revoke of a
+live lease; wait for its expiry instead.
+
+The gated commands take no `--reader` flag: the identity comes from
+configuration or `AIQ_READER` so one session cannot accidentally consume under
+two identities.
 
 ## Workflow shortcuts
 
@@ -384,8 +457,10 @@ resolved into the document's `expect` internally. Any failure rolls the whole
 request back, including the message.
 
 `dequeue` is the ergonomic synonym of `queue next` with identical semantics:
-it grants a time-bounded lease and never removes the task. The response shape
-is the `queue next` shape.
+it grants a time-bounded lease and never removes the task, and it carries the
+identical [reader lease](#reader-lease) requirement. The response shape is the
+`queue next` shape, including `reader_acquired`, which is true only when that
+invocation took the reader role.
 
 `list` is a top-level task listing that, unlike `task list`, can include
 terminal states: the default shows `queued`, `ready`, `active`, and
@@ -404,6 +479,13 @@ transaction. The command is all-or-nothing: any ineligible task — unknown,
 `queued`, `blocked`, terminal, or `active` under another owner — fails the
 whole command naming the offending task, with no partial changes and no
 stored message.
+
+Single-reader governs dispatch, not settlement. Settling a task already
+`active` under the effective owner is pure settlement and stays open to every
+session, because every session is obliged to record what it finished. Settling
+a merely `ready` task leases it inside the transaction, which is dispatch, and
+is `reader_held` while another live session holds the role. `task done` never
+takes the role implicitly; it only renews one already held.
 
 `ingest --if-new` compares the exact content, by content hash, against the
 messages in the selected scope whose latest state is `received` before

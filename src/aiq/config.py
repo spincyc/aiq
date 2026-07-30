@@ -7,6 +7,7 @@ import getpass
 import os
 from pathlib import Path
 import re
+import socket
 import stat
 import subprocess
 import tomllib
@@ -23,6 +24,8 @@ CONFIG_KEYS = frozenset(
         "scope",
         "owner",
         "lease_seconds",
+        "reader",
+        "reader_lease_seconds",
         "snapshot_keep",
         "output",
         "dev_report_repo",
@@ -32,6 +35,7 @@ USER_CONFIG_KEYS = CONFIG_KEYS
 REPO_CONFIG_KEYS = frozenset(
     {
         "lease_seconds",
+        "reader_lease_seconds",
     }
 )
 
@@ -39,13 +43,22 @@ ENVIRONMENT_KEYS = {
     "AIQ_SCOPE": "scope",
     "AIQ_OWNER": "owner",
     "AIQ_LEASE_SECONDS": "lease_seconds",
+    "AIQ_READER": "reader",
+    "AIQ_READER_LEASE_SECONDS": "reader_lease_seconds",
     "AIQ_SNAPSHOT_KEEP": "snapshot_keep",
     "AIQ_OUTPUT": "output",
     "AIQ_DEV_REPORT_REPO": "dev_report_repo",
 }
 
+_INTEGER_KEYS = frozenset(
+    {"lease_seconds", "reader_lease_seconds", "snapshot_keep"}
+)
 _INTEGER_PATTERN = re.compile(r"[0-9]+\Z")
 _DISCOVER = object()
+
+READER_LEASE_SECONDS_DEFAULT = 1800
+READER_LEASE_SECONDS_MINIMUM = 60
+READER_LEASE_SECONDS_MAXIMUM = 86400
 
 
 class ConfigError(ValueError):
@@ -60,6 +73,8 @@ class Config:
     scope: str
     owner: str
     lease_seconds: int
+    reader: str
+    reader_lease_seconds: int
     snapshot_keep: int
     output: str
     dev_report_repo: str | None
@@ -71,6 +86,8 @@ class Config:
             "scope": self.scope,
             "owner": self.owner,
             "lease_seconds": self.lease_seconds,
+            "reader": self.reader,
+            "reader_lease_seconds": self.reader_lease_seconds,
             "snapshot_keep": self.snapshot_keep,
             "output": self.output,
             "dev_report_repo": self.dev_report_repo,
@@ -126,6 +143,15 @@ def _validate_value(key: str, value: object) -> str | int:
             key=key,
             minimum=1,
             maximum=86400,
+        )
+    if key == "reader":
+        return _validate_string(value, key=key, maximum=200)
+    if key == "reader_lease_seconds":
+        return _validate_integer(
+            value,
+            key=key,
+            minimum=READER_LEASE_SECONDS_MINIMUM,
+            maximum=READER_LEASE_SECONDS_MAXIMUM,
         )
     if key == "snapshot_keep":
         return _validate_integer(
@@ -300,7 +326,7 @@ def _environment_layer(
         if environment_key not in environ:
             continue
         raw = environ[environment_key]
-        if config_key in {"lease_seconds", "snapshot_keep"}:
+        if config_key in _INTEGER_KEYS:
             if not _INTEGER_PATTERN.fullmatch(raw):
                 raise ConfigError(
                     f"{environment_key} must be an unsigned decimal integer"
@@ -326,6 +352,46 @@ def _default_owner() -> str:
     return _validate_string(owner, key="owner", maximum=200)
 
 
+def _reader_locator() -> tuple[str, int] | None:
+    """Return this process's host and POSIX session id, when derivable.
+
+    The pair locates the session that a derived reader identity names, so
+    a later holder-liveness probe can tell a crashed session from a live
+    one. Hosts without POSIX sessions report nothing rather than guess.
+    """
+
+    try:
+        return socket.gethostname(), os.getsid(0)
+    except (AttributeError, OSError):
+        return None
+
+
+def _default_reader() -> str:
+    """Derive the default reader identity for this POSIX session.
+
+    Owner cannot serve as the reader identity: it defaults to the OS user
+    and is therefore identical across one human's concurrent sessions,
+    which is exactly the case single-reader enforcement must separate.
+    The POSIX session id is inherited by every short-lived process of one
+    session -- including host hooks, which run as children of it -- and
+    differs between two terminals, so it identifies a session stably
+    without a handshake.
+    """
+
+    locator = _reader_locator()
+    if locator is None:
+        candidate = f"pid-{os.getpid()}"
+    else:
+        host, session = locator
+        cleaned = "".join(
+            character
+            for character in host
+            if character.isprintable() and not character.isspace()
+        )
+        candidate = f"{cleaned or 'host'}-{session}"[:200]
+    return _validate_string(candidate, key="reader", maximum=200)
+
+
 def resolve_config(
     *,
     cwd: Path | None = None,
@@ -334,6 +400,7 @@ def resolve_config(
     user_path: Path | None | object = _DISCOVER,
     repo_path: Path | None | object = _DISCOVER,
     default_owner: str | None = None,
+    default_reader: str | None = None,
 ) -> Config:
     """Resolve defaults < user < repository < environment < CLI.
 
@@ -347,10 +414,16 @@ def resolve_config(
         "owner",
         _default_owner() if default_owner is None else default_owner,
     )
+    reader = _validate_value(
+        "reader",
+        _default_reader() if default_reader is None else default_reader,
+    )
     values: dict[str, str | int | None] = {
         "scope": "auto",
         "owner": owner,
         "lease_seconds": 900,
+        "reader": reader,
+        "reader_lease_seconds": READER_LEASE_SECONDS_DEFAULT,
         "snapshot_keep": 5,
         "output": "human",
         "dev_report_repo": None,
@@ -398,6 +471,8 @@ def resolve_config(
         scope=str(values["scope"]),
         owner=str(values["owner"]),
         lease_seconds=int(values["lease_seconds"]),
+        reader=str(values["reader"]),
+        reader_lease_seconds=int(values["reader_lease_seconds"]),
         snapshot_keep=int(values["snapshot_keep"]),
         output=str(values["output"]),
         dev_report_repo=(

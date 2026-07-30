@@ -24,7 +24,8 @@ JSON_COMMAND_PATHS = {
         integration.install integration.list integration.plan
         integration.print integration.uninstall journal.check journal.destroy
         journal.export journal.init journal.path journal.snapshot list
-        queue.next queue.peek reconcile report status task.done task.explain
+        queue.next queue.peek reader.acquire reader.release reader.status
+        reconcile report status task.done task.explain
         task.history task.list task.show
     """.split()
 }
@@ -227,6 +228,7 @@ class CliProtocolTests(unittest.TestCase):
                 "claims",
                 "messages",
                 "project",
+                "reader",
                 "ready",
                 "scope",
                 "tasks",
@@ -248,7 +250,10 @@ class CliProtocolTests(unittest.TestCase):
         next_result = self.ok(
             "queue", "next", "--owner", "protocol-test", *self.scope,
         )
-        self.assertEqual(set(next_result), {"items", "v"})
+        self.assertEqual(set(next_result), {"items", "reader_acquired", "v"})
+        # The earlier inbox claim already took the reader role for this
+        # session, so leasing the task renewed it rather than taking it.
+        self.assertFalse(next_result["reader_acquired"])
         self.assertEqual(len(next_result["items"]), 1)
         item = next_result["items"][0]
         self.assertEqual(set(item), {"claim", "task"})
@@ -278,7 +283,7 @@ class CliProtocolTests(unittest.TestCase):
             {"priority", "revision", "state", "task_id", "title"},
         )
         dequeued = self.ok("dequeue", "--owner", "protocol-test", *self.scope)
-        self.assertEqual(set(dequeued), {"items", "v"})
+        self.assertEqual(set(dequeued), {"items", "reader_acquired", "v"})
         self.assertEqual(dequeued["items"][0]["task"]["task_id"], task_id)
         settled = self.ok(
             "task", "done", task_id, "--summary", "Protocol settlement",
@@ -333,6 +338,20 @@ class CliProtocolTests(unittest.TestCase):
                 "--reason", "protocol coverage", *self.scope,
             )
             self.assertEqual(disposed["status"], status)
+
+        reader_state = self.ok("reader", "status", *self.scope)
+        self.assertEqual(set(reader_state), {"reader", "scope", "v"})
+        self.assertEqual(reader_state["reader"]["status"], "held")
+        self.assertTrue(reader_state["reader"]["self"])
+        acquired = self.ok("reader", "acquire", *self.scope)
+        self.assertEqual(set(acquired), {"acquired", "reader", "status", "v"})
+        # Acquiring while already holding renews the same lease.
+        self.assertFalse(acquired["acquired"])
+        self.assertEqual(acquired["reader"]["epoch"], 1)
+        released = self.ok("reader", "release", *self.scope)
+        self.assertEqual(set(released), {"reader", "replayed", "status", "v"})
+        self.assertFalse(released["replayed"])
+        self.assertTrue(self.ok("reader", "release", *self.scope)["replayed"])
 
         reported = self.ok(
             "report", "--summary", "Protocol report",

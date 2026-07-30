@@ -39,7 +39,7 @@ which never blocks the host prompt.
 | 0 | Success, including an empty queue or no claimable message | — |
 | 2 | Invalid invocation, configuration, or input document | `invalid_argument`, `invalid_config`, `invalid_document` |
 | 3 | Requested resource does not exist | `not_found` |
-| 4 | Resource exists but its state or fence rejects the operation | `not_claimable`, `claim_expired`, `claim_mismatch`, `revision_conflict`, `state_conflict`, `contention` |
+| 4 | Resource exists but its state or fence rejects the operation | `not_claimable`, `claim_expired`, `claim_mismatch`, `revision_conflict`, `state_conflict`, `contention`, `reader_held` |
 | 5 | Journal integrity or schema compatibility failure | `integrity_failed`, `schema_incompatible` |
 | 6 | Filesystem, operating-system, or integration failure | `io_error`, `integration_drift`, `unsupported_environment` |
 | 70 | Unexpected AIQ implementation defect | `internal_error` |
@@ -58,6 +58,7 @@ report they emit on standard output contains findings.
 | `invalid_document` | JSON or an effects document violates its versioned contract |
 | `not_found` | A requested message, task, claim, capability, or journal is absent |
 | `not_claimable` | A message or task is not currently eligible for a new claim |
+| `reader_held` | Another live session holds the scope's single reader role |
 | `claim_expired` | The supplied lease expired before the operation committed |
 | `claim_mismatch` | A claim does not own the requested resource or revision |
 | `revision_conflict` | A task revision differs from the effects document fence |
@@ -73,7 +74,13 @@ report they emit on standard output contains findings.
 Retry behavior depends on the code. `revision_conflict` requires rereading task
 state. `claim_expired` requires acquiring a new claim. `not_claimable` may be a
 normal competing-worker result. `contention` is transient and safe to retry
-after a short delay. Integrity and schema errors require repair or
+after a short delay. `reader_held` is not transient in the same way: retrying
+succeeds only once the holder releases the role or its lease expires, so a
+caller should stop consuming and either keep writing — `ingest` and `enqueue`
+stay open — or inspect the holder with `aiq reader status`. The error message
+is a single line naming the holder; the structured channel is
+`aiq reader status --json`, never extra envelope fields. Integrity and schema
+errors require repair or
 a compatible AIQ version; they must never be silently retried as mutations.
 
 ## Operation-specific classification
@@ -84,6 +91,9 @@ a compatible AIQ version; they must never be silently retried as mutations.
 | Any ingest form | Idempotency identity reused with different content | `state_conflict` |
 | `journal export OUTPUT` | Output path names no file, an invalid parent, or managed state | `invalid_argument` |
 | `journal export OUTPUT` | Output already exists | `state_conflict` |
+| `inbox claim`, `queue next`, `dequeue` | Another live session holds the reader lease, empty queue included | `reader_held` |
+| `task done` | A named task is merely `ready` and another live session holds the reader lease | `reader_held` |
+| `reader release` | Another live session holds the reader lease | `reader_held` |
 | `inbox apply` | Effects document references an unknown local alias | `invalid_document` |
 | `journal destroy --confirm` | Missing, wrong, or stale inventory token | `state_conflict` |
 | Integration install/uninstall | Owned configuration or manifest has drifted | `integration_drift` |
@@ -98,7 +108,9 @@ a compatible AIQ version; they must never be silently retried as mutations.
 | `report` | Target directory or its initialized journal is absent | `not_found` |
 | `report` | Over-length `--summary` or `--detail`, or out-of-range `--priority` | `invalid_argument` |
 
-Read-only empty results are not failures. `inbox claim` returns null claim and
-message fields, and queue operations return an empty array, both with exit 0.
-Automatic scope falling back after Git confirms a non-repository is also a
-successful resolution, not an error.
+Read-only empty results are not failures. For the session holding the reader
+lease, `inbox claim` returns null claim and message fields, and queue
+operations return an empty array, both with exit 0. Emptiness never softens
+`reader_held`: a session that is not the reader is told so whether or not work
+happens to be waiting. Automatic scope falling back after Git confirms a
+non-repository is also a successful resolution, not an error.

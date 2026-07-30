@@ -6,11 +6,19 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
 from typing import Any, Iterator
 
+from aiq.config import (
+    READER_LEASE_SECONDS_DEFAULT,
+    READER_LEASE_SECONDS_MAXIMUM,
+    READER_LEASE_SECONDS_MINIMUM,
+    _default_reader,
+    _reader_locator,
+)
 from aiq.journal import (
     MESSAGE_LIFECYCLE_EVENT_SQL,
     JournalError,
@@ -60,6 +68,9 @@ TRANSITIONS = {
 TASK_ID_PATTERN = re.compile(r"TASK-([1-9][0-9]*)\Z")
 ALIAS_PATTERN = re.compile(r"\$[a-z][a-z0-9_-]{0,31}\Z")
 CLAIM_ID_PATTERN = re.compile(r"clm_[0-9a-f]{32}\Z")
+# One journal is one scope is one reader role, so the lease table holds
+# at most this single row.
+READER_LEASE_SCOPE = 0
 
 
 def _now_us() -> int:
@@ -399,6 +410,420 @@ def _task_output(
     }
 
 
+def _read_reader_lease_row(
+    connection: sqlite3.Connection,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT * FROM reader_leases WHERE lease_scope = ?",
+        (READER_LEASE_SCOPE,),
+    ).fetchone()
+
+
+def _reader_lease_status(row: sqlite3.Row | None, now_us: int) -> str:
+    if row is None:
+        return "absent"
+    if row["released_at_us"] is not None:
+        return "released"
+    if row["expires_at_us"] <= now_us:
+        return "expired"
+    return "held"
+
+
+def _reader_holder_locator(reader_id: str) -> tuple[str | None, int | None]:
+    """Return the host and session to record for one reader identity.
+
+    Only an identity this process derived for itself describes a process
+    that can later be probed for liveness. An explicitly configured
+    reader may name any session on any host -- including a deliberately
+    shared fan-out identity -- so it records no locator, which disables
+    the dead-holder fast path instead of guessing about a stranger.
+    """
+
+    if reader_id != _default_reader():
+        return (None, None)
+    locator = _reader_locator()
+    return (None, None) if locator is None else locator
+
+
+def _reader_holder_is_dead(row: sqlite3.Row) -> bool:
+    """True only when the recorded holder's session is provably gone.
+
+    A locator is recorded only for a derived identity, so a matching host
+    proves the session id is comparable here. ``ProcessLookupError`` is
+    the only proof of death: a permission error means some live process
+    owns that id, and every other answer is treated as alive.
+    """
+
+    host = row["holder_host"]
+    session = row["holder_sid"]
+    if host is None or session is None:
+        return False
+    locator = _reader_locator()
+    if locator is None or locator[0] != host:
+        return False
+    try:
+        os.kill(session, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _reader_lease_conflict(
+    row: sqlite3.Row | None,
+    *,
+    reader_id: str,
+    now_us: int,
+) -> sqlite3.Row | None:
+    """Return the live foreign holder standing in ``reader_id``'s way."""
+
+    if row is None or _reader_lease_status(row, now_us) != "held":
+        return None
+    if row["reader_id"] == reader_id or _reader_holder_is_dead(row):
+        return None
+    return row
+
+
+def _raise_reader_held(holder: sqlite3.Row) -> None:
+    owner = holder["owner_id"]
+    reader = holder["reader_id"]
+    expires = _us_timestamp(holder["expires_at_us"])
+    raise JournalError(
+        f'reader lease is held by owner "{owner}" reader "{reader}" '
+        f"until {expires}; ingest and enqueue remain open",
+        code="reader_held",
+    )
+
+
+def _require_reader_lease(
+    connection: sqlite3.Connection,
+    *,
+    reader_id: str | None,
+    now_us: int,
+) -> None:
+    """Refuse dispatch unless ``reader_id`` may hold the reader role.
+
+    Called before the queue is even probed, so a non-holder is told the
+    truthful thing -- that it is not the reader -- whether or not work
+    happens to be waiting. A ``None`` reader identity means the caller
+    supplied none and the role is not enforced for this call.
+    """
+
+    if reader_id is None:
+        return
+    holder = _reader_lease_conflict(
+        _read_reader_lease_row(connection),
+        reader_id=reader_id,
+        now_us=now_us,
+    )
+    if holder is not None:
+        _raise_reader_held(holder)
+
+
+def _renew_reader_lease(
+    connection: sqlite3.Connection,
+    *,
+    reader_id: str | None,
+    lease_seconds: int,
+    now_us: int,
+    owner_id: str | None = None,
+) -> bool:
+    """Slide an already-held lease forward; never take the role.
+
+    The single conditional UPDATE is the atomic self-check: it matches
+    only a live, unreleased lease already naming this reader. An omitted
+    owner leaves the recorded one alone, which suits the commands that
+    only keep a held lease warm.
+    """
+
+    if reader_id is None:
+        return False
+    cursor = connection.execute(
+        """
+        UPDATE reader_leases
+        SET owner_id = COALESCE(?, owner_id),
+            renewed_at_us = ?,
+            expires_at_us = ?
+        WHERE lease_scope = ?
+          AND reader_id = ?
+          AND released_at_us IS NULL
+          AND expires_at_us > ?
+        """,
+        (
+            owner_id,
+            now_us,
+            now_us + lease_seconds * 1_000_000,
+            READER_LEASE_SCOPE,
+            reader_id,
+            now_us,
+        ),
+    )
+    return cursor.rowcount == 1
+
+
+def _hold_reader_lease(
+    connection: sqlite3.Connection,
+    *,
+    owner_id: str,
+    reader_id: str | None,
+    lease_seconds: int,
+    now_us: int,
+) -> bool:
+    """Take or extend the reader role after a successful consume.
+
+    Returns True when this call took the role -- a first acquisition or a
+    takeover of a free, released, expired, or provably dead lease, each
+    of which advances ``epoch`` -- and False when it merely renewed a
+    lease this reader already held, or when no reader identity applies.
+    The conflict re-check runs inside the caller's immediate transaction,
+    so exactly one of several racing readers can win.
+    """
+
+    if reader_id is None:
+        return False
+    if _renew_reader_lease(
+        connection,
+        reader_id=reader_id,
+        lease_seconds=lease_seconds,
+        now_us=now_us,
+        owner_id=owner_id,
+    ):
+        return False
+    row = _read_reader_lease_row(connection)
+    holder = _reader_lease_conflict(row, reader_id=reader_id, now_us=now_us)
+    if holder is not None:
+        _raise_reader_held(holder)
+    host, session = _reader_holder_locator(reader_id)
+    connection.execute(
+        """
+        INSERT INTO reader_leases(
+          lease_scope,
+          lease_id,
+          epoch,
+          owner_id,
+          reader_id,
+          holder_host,
+          holder_sid,
+          acquired_at_us,
+          renewed_at_us,
+          expires_at_us,
+          released_at_us
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(lease_scope) DO UPDATE SET
+          lease_id = excluded.lease_id,
+          epoch = excluded.epoch,
+          owner_id = excluded.owner_id,
+          reader_id = excluded.reader_id,
+          holder_host = excluded.holder_host,
+          holder_sid = excluded.holder_sid,
+          acquired_at_us = excluded.acquired_at_us,
+          renewed_at_us = excluded.renewed_at_us,
+          expires_at_us = excluded.expires_at_us,
+          released_at_us = NULL
+        """,
+        (
+            READER_LEASE_SCOPE,
+            _identifier("rdl"),
+            1 if row is None else row["epoch"] + 1,
+            owner_id,
+            reader_id,
+            host,
+            session,
+            now_us,
+            now_us,
+            now_us + lease_seconds * 1_000_000,
+        ),
+    )
+    return True
+
+
+def _reader_lease_public(
+    row: sqlite3.Row | None,
+    *,
+    reader_id: str | None,
+    now_us: int,
+) -> dict[str, Any]:
+    """Render one reader lease for public output.
+
+    ``self`` is null exactly when the caller supplied no reader identity
+    to compare against, and names the recorded holder otherwise, whether
+    or not that holder's lease is still live.
+    """
+
+    status = _reader_lease_status(row, now_us)
+    if row is None:
+        return {
+            "status": status,
+            "held": False,
+            "self": None if reader_id is None else False,
+            "owner_id": None,
+            "reader_id": None,
+            "acquired_at": None,
+            "expires_at": None,
+            "expires_in_seconds": None,
+            "epoch": None,
+        }
+    return {
+        "status": status,
+        "held": status == "held",
+        "self": None if reader_id is None else row["reader_id"] == reader_id,
+        "owner_id": row["owner_id"],
+        "reader_id": row["reader_id"],
+        "acquired_at": _us_timestamp(row["acquired_at_us"]),
+        "expires_at": _us_timestamp(row["expires_at_us"]),
+        "expires_in_seconds": max(
+            0,
+            (row["expires_at_us"] - now_us) // 1_000_000,
+        ),
+        "epoch": row["epoch"],
+    }
+
+
+def _reader_status_summary(lease: dict[str, Any]) -> dict[str, Any]:
+    """Project the gate-relevant subset carried by :func:`read_status`."""
+
+    return {
+        key: lease[key]
+        for key in (
+            "status",
+            "held",
+            "self",
+            "owner_id",
+            "reader_id",
+            "expires_at",
+        )
+    }
+
+
+def read_reader_lease(
+    scope: JournalScope,
+    *,
+    reader_id: str | None = None,
+    now_us: int | None = None,
+) -> dict[str, Any]:
+    """Report one scope's reader lease without creating storage."""
+
+    if not scope.journal_path.exists():
+        return _reader_lease_public(None, reader_id=reader_id, now_us=0)
+    with _read_snapshot(scope, now_us) as (connection, effective_now):
+        return _reader_lease_public(
+            _read_reader_lease_row(connection),
+            reader_id=reader_id,
+            now_us=effective_now,
+        )
+
+
+def acquire_reader_lease(
+    scope: JournalScope,
+    *,
+    owner_id: str,
+    reader_id: str,
+    lease_seconds: int = READER_LEASE_SECONDS_DEFAULT,
+    now_us: int | None = None,
+) -> dict[str, Any]:
+    """Hold the reader role explicitly, without consuming anything.
+
+    Acquiring while already holding renews the same lease, so a poller
+    can keep the role warm; another live holder is refused.
+    """
+
+    owner = _text(owner_id, path="owner_id", minimum=1, maximum=200)
+    reader = _text(reader_id, path="reader_id", minimum=1, maximum=200)
+    lease = _integer(
+        lease_seconds,
+        path="reader_lease_seconds",
+        minimum=READER_LEASE_SECONDS_MINIMUM,
+        maximum=READER_LEASE_SECONDS_MAXIMUM,
+    )
+    effective_now = _now_us() if now_us is None else now_us
+    connection = _connect(scope)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        acquired = _hold_reader_lease(
+            connection,
+            owner_id=owner,
+            reader_id=reader,
+            lease_seconds=lease,
+            now_us=effective_now,
+        )
+        lease_public = _reader_lease_public(
+            _read_reader_lease_row(connection),
+            reader_id=reader,
+            now_us=effective_now,
+        )
+        connection.commit()
+        return {
+            "status": "acquired",
+            "acquired": acquired,
+            "reader": lease_public,
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def release_reader_lease(
+    scope: JournalScope,
+    *,
+    reader_id: str,
+    now_us: int | None = None,
+) -> dict[str, Any]:
+    """Give up the reader role, leaving every held claim untouched.
+
+    Holding nothing, an already released lease, and an expired lease all
+    replay successfully; only another live holder is refused. Losing the
+    role never revokes a claim, which recovers on its own schedule.
+    """
+
+    reader = _text(reader_id, path="reader_id", minimum=1, maximum=200)
+    effective_now = _now_us() if now_us is None else now_us
+    connection = _connect(scope)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = _read_reader_lease_row(connection)
+        holder = _reader_lease_conflict(
+            row,
+            reader_id=reader,
+            now_us=effective_now,
+        )
+        if holder is not None:
+            _raise_reader_held(holder)
+        held = (
+            row is not None
+            and row["reader_id"] == reader
+            and _reader_lease_status(row, effective_now) == "held"
+        )
+        if held:
+            connection.execute(
+                """
+                UPDATE reader_leases
+                SET released_at_us = ?
+                WHERE lease_scope = ?
+                """,
+                (effective_now, READER_LEASE_SCOPE),
+            )
+            row = _read_reader_lease_row(connection)
+        lease_public = _reader_lease_public(
+            row,
+            reader_id=reader,
+            now_us=effective_now,
+        )
+        connection.commit()
+        return {
+            "status": "released",
+            "replayed": not held,
+            "reader": lease_public,
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def _append_claim_release(
     connection: sqlite3.Connection,
     claim: sqlite3.Row | dict[str, Any],
@@ -634,6 +1059,8 @@ def claim_message(
     owner_id: str,
     lease_seconds: int = 900,
     message_id: str | None = None,
+    reader_id: str | None = None,
+    reader_lease_seconds: int = READER_LEASE_SECONDS_DEFAULT,
     now_us: int | None = None,
 ) -> dict[str, Any] | None:
     owner = _text(owner_id, path="owner_id", minimum=1, maximum=200)
@@ -643,10 +1070,23 @@ def claim_message(
         minimum=1,
         maximum=86400,
     )
+    reader_lease = _integer(
+        reader_lease_seconds,
+        path="reader_lease_seconds",
+        minimum=READER_LEASE_SECONDS_MINIMUM,
+        maximum=READER_LEASE_SECONDS_MAXIMUM,
+    )
     effective_now = _now_us() if now_us is None else now_us
     connection = _connect(scope)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        # Before any write and before the inbox is even probed: an empty
+        # inbox is not a licence for a writer to consume.
+        _require_reader_lease(
+            connection,
+            reader_id=reader_id,
+            now_us=effective_now,
+        )
         _recover_expired_claims(
             connection,
             resource_kind="message",
@@ -722,9 +1162,19 @@ def claim_message(
             lease_seconds=lease,
             now_us=effective_now,
         )
+        # Acquisition follows a successful consume only, so an empty poll
+        # never turns a passing writer into the reader.
+        reader_acquired = _hold_reader_lease(
+            connection,
+            owner_id=owner,
+            reader_id=reader_id,
+            lease_seconds=reader_lease,
+            now_us=effective_now,
+        )
         connection.commit()
         return {
             **claim,
+            "reader_acquired": reader_acquired,
             "message": {
                 "message_id": row["message_id"],
                 "received_at": row["received_at"],
@@ -745,6 +1195,8 @@ def claim_next_tasks(
     owner_id: str,
     lease_seconds: int = 900,
     limit: int = 1,
+    reader_id: str | None = None,
+    reader_lease_seconds: int = READER_LEASE_SECONDS_DEFAULT,
     now_us: int | None = None,
 ) -> list[dict[str, Any]]:
     owner = _text(owner_id, path="owner_id", minimum=1, maximum=200)
@@ -754,12 +1206,25 @@ def claim_next_tasks(
         minimum=1,
         maximum=86400,
     )
+    reader_lease = _integer(
+        reader_lease_seconds,
+        path="reader_lease_seconds",
+        minimum=READER_LEASE_SECONDS_MINIMUM,
+        maximum=READER_LEASE_SECONDS_MAXIMUM,
+    )
     if limit < 1 or limit > 64:
         raise JournalError("queue limit must be between 1 and 64")
     effective_now = _now_us() if now_us is None else now_us
     connection = _connect(scope)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        # Before any write and before the queue is even read: an empty
+        # queue is not a licence for a writer to consume.
+        _require_reader_lease(
+            connection,
+            reader_id=reader_id,
+            now_us=effective_now,
+        )
         _recover_expired_claims(
             connection,
             resource_kind="task",
@@ -791,6 +1256,18 @@ def claim_next_tasks(
                     "claim": claim,
                 }
             )
+        if claimed:
+            # One transaction, one decision: the flag is the same for
+            # every task leased by this call.
+            reader_acquired = _hold_reader_lease(
+                connection,
+                owner_id=owner,
+                reader_id=reader_id,
+                lease_seconds=reader_lease,
+                now_us=effective_now,
+            )
+            for item in claimed:
+                item["reader_acquired"] = reader_acquired
         connection.commit()
         return claimed
     except Exception:
@@ -806,6 +1283,8 @@ def claim_task(
     *,
     owner_id: str,
     lease_seconds: int = 900,
+    reader_id: str | None = None,
+    reader_lease_seconds: int = READER_LEASE_SECONDS_DEFAULT,
     now_us: int | None = None,
 ) -> dict[str, Any]:
     if not TASK_ID_PATTERN.fullmatch(task_id):
@@ -817,10 +1296,23 @@ def claim_task(
         minimum=1,
         maximum=86400,
     )
+    reader_lease = _integer(
+        reader_lease_seconds,
+        path="reader_lease_seconds",
+        minimum=READER_LEASE_SECONDS_MINIMUM,
+        maximum=READER_LEASE_SECONDS_MAXIMUM,
+    )
     effective_now = _now_us() if now_us is None else now_us
     connection = _connect(scope)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        # Naming one ready task is still dispatch, so it is gated like
+        # the unaddressed queue draw.
+        _require_reader_lease(
+            connection,
+            reader_id=reader_id,
+            now_us=effective_now,
+        )
         _recover_expired_claims(
             connection,
             resource_kind="task",
@@ -843,10 +1335,18 @@ def claim_task(
             basis_revision=task["revision"],
         )
         task["claim"] = claim
+        reader_acquired = _hold_reader_lease(
+            connection,
+            owner_id=owner,
+            reader_id=reader_id,
+            lease_seconds=reader_lease,
+            now_us=effective_now,
+        )
         connection.commit()
         return {
             "task": _task_output(task, "active", states),
             "claim": claim,
+            "reader_acquired": reader_acquired,
         }
     except Exception:
         connection.rollback()
@@ -949,6 +1449,8 @@ def dispose_message(
     claim_id: str,
     disposition: str,
     reason: str,
+    reader_id: str | None = None,
+    reader_lease_seconds: int = READER_LEASE_SECONDS_DEFAULT,
     now_us: int | None = None,
 ) -> dict[str, Any]:
     if disposition not in {"needs_input", "failed"}:
@@ -1033,6 +1535,15 @@ def dispose_message(
                 message_id,
                 _canonical_json({"claim_id": claim_id, "reason": explanation}),
             ),
+        )
+        # Ungated for the same reason as inbox apply: parking or closing
+        # a claimed message hands out no work. Renewal only extends a
+        # lease this reader already holds.
+        _renew_reader_lease(
+            connection,
+            reader_id=reader_id,
+            lease_seconds=reader_lease_seconds,
+            now_us=effective_now,
         )
         connection.commit()
         return {
@@ -1130,6 +1641,7 @@ def read_status(
     scope: JournalScope,
     *,
     ready_limit: int = 5,
+    reader_id: str | None = None,
     now_us: int | None = None,
 ) -> dict[str, Any]:
     """Summarize message, task, and claim counts plus the top ready tasks.
@@ -1141,6 +1653,11 @@ def read_status(
     the journal's project label so callers rendering task references need
     no second journal open. A missing journal yields empty counts and the
     derived default label without creating the journal.
+
+    ``reader`` reports the scope's reader lease from this same snapshot,
+    so a caller deciding from one status read needs no second open. Its
+    ``self`` field is null unless ``reader_id`` names whom to compare
+    the recorded holder against.
     """
 
     if ready_limit < 1 or ready_limit > 64:
@@ -1152,6 +1669,9 @@ def read_status(
         "messages": message_counts,
         "tasks": task_counts,
         "claims": {"active": 0},
+        "reader": _reader_status_summary(
+            _reader_lease_public(None, reader_id=reader_id, now_us=0)
+        ),
         "ready": [],
         "blocked": [],
     }
@@ -1254,6 +1774,13 @@ def read_status(
             """,
             (effective_now,),
         ).fetchone()["total"]
+        result["reader"] = _reader_status_summary(
+            _reader_lease_public(
+                _read_reader_lease_row(connection),
+                reader_id=reader_id,
+                now_us=effective_now,
+            )
+        )
         return result
 
 
@@ -1639,6 +2166,9 @@ def apply_effects(
     document: dict[str, Any],
     *,
     claim_id: str,
+    reader_id: str | None = None,
+    reader_lease_seconds: int = READER_LEASE_SECONDS_DEFAULT,
+    now_us: int | None = None,
 ) -> dict[str, Any]:
     connection = _connect(scope)
     try:
@@ -1648,6 +2178,15 @@ def apply_effects(
             message_id,
             document,
             claim_id=claim_id,
+        )
+        # Ungated on purpose: the message claim already proves legitimate
+        # consumption of this message, and applying it hands out no new
+        # work. A reader still holding the role keeps it warm.
+        _renew_reader_lease(
+            connection,
+            reader_id=reader_id,
+            lease_seconds=reader_lease_seconds,
+            now_us=_now_us() if now_us is None else now_us,
         )
         connection.commit()
         return result
@@ -2499,6 +3038,8 @@ def settle_tasks_done(
     owner_id: str,
     lease_seconds: int = 900,
     cwd: str | None = None,
+    reader_id: str | None = None,
+    reader_lease_seconds: int = READER_LEASE_SECONDS_DEFAULT,
     now_us: int | None = None,
 ) -> dict[str, Any]:
     """Transition every named task to done in one atomic transaction.
@@ -2509,6 +3050,12 @@ def settle_tasks_done(
     task already active under ``owner_id`` completes with its existing
     claim; a ready task is leased inside the same transaction. Any
     ineligible task fails the whole command without partial changes.
+
+    Single-reader governs dispatch, not settlement. Settling a task
+    already active under this owner is pure settlement and stays open to
+    every session, because every session is obliged to record what it
+    finished. Settling a merely ready task leases it here, which is
+    dispatch, and therefore requires the reader role.
     """
 
     identifiers = list(task_ids)
@@ -2568,6 +3115,11 @@ def settle_tasks_done(
                     )
                 settlement_claims[task_id] = dict(claim)
             elif state == "ready":
+                _require_reader_lease(
+                    connection,
+                    reader_id=reader_id,
+                    now_us=effective_now,
+                )
                 settlement_claims[task_id] = _claim_resource(
                     connection,
                     resource_kind="task",
@@ -2619,6 +3171,13 @@ def settle_tasks_done(
                 ],
             },
             claim_id=message_claim["claim_id"],
+        )
+        # Settlement never takes the role; it only keeps a held one warm.
+        _renew_reader_lease(
+            connection,
+            reader_id=reader_id,
+            lease_seconds=reader_lease_seconds,
+            now_us=effective_now,
         )
         connection.commit()
         return {

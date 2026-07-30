@@ -117,6 +117,13 @@ class MigrationFixtureTest(unittest.TestCase):
                     FROM schema_migrations
                     """
                 ).fetchone()
+                reader_lease_table = connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = 'reader_leases'
+                    """
+                ).fetchone()
                 current_integrity = connection.execute(
                     "PRAGMA integrity_check"
                 ).fetchone()[0]
@@ -153,6 +160,7 @@ class MigrationFixtureTest(unittest.TestCase):
                 ),
             )
             self.assertEqual(migration[:2], (1, SCHEMA_VERSION))
+            self.assertEqual(reader_lease_table, ("reader_leases",))
             self.assertEqual(current_integrity, "ok")
             self.assertEqual(current_foreign_keys, [])
             self.assertEqual(

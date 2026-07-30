@@ -120,6 +120,8 @@ def _task_done(arguments: argparse.Namespace) -> int:
         owner_id=owner,
         lease_seconds=config.lease_seconds,
         cwd=os.fspath(arguments.cwd.resolve()),
+        reader_id=config.reader,
+        reader_lease_seconds=config.reader_lease_seconds,
     )
     if arguments.json:
         _emit(result, as_json=True)

@@ -98,12 +98,21 @@ class StatusCliTest(unittest.TestCase):
                 "claims",
                 "messages",
                 "project",
+                "reader",
                 "ready",
                 "scope",
                 "tasks",
                 "v",
             },
         )
+        # The Stop gate reads its reader datum from this same snapshot.
+        # The fixture's own `inbox claim` took the reader role
+        # implicitly, and these runs share one POSIX session, so this
+        # caller sees itself holding it.
+        self.assertEqual(payload["reader"]["status"], "held")
+        self.assertTrue(payload["reader"]["held"])
+        self.assertTrue(payload["reader"]["self"])
+        self.assertTrue(payload["reader"]["expires_at"].endswith("Z"))
         # The label rides along once, top level; JSON task IDs stay bare.
         self.assertEqual(payload["project"], "repository")
         self.assertEqual(payload["blocked"], [])
