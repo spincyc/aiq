@@ -694,6 +694,16 @@ class IntrospectionCliTests(IntrospectionTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(stderr)["code"], "invalid_argument")
 
+        code, stdout, stderr = self.run_cli(
+            "inbox", "list", "--limit", "1000", "--json"
+        )
+        self.assertEqual((code, stderr), (0, ""))
+        code, stdout, stderr = self.run_cli(
+            "inbox", "list", "--limit", "1001", "--json"
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(stderr)["code"], "invalid_argument")
+
 
 if __name__ == "__main__":
     unittest.main()

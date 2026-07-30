@@ -442,7 +442,7 @@ and exit 2; it is never silently clamped.
 
 | Command | Default | Accepted range |
 |---|---:|---|
-| `inbox list` | 20 | 1 or greater; no upper bound |
+| `inbox list` | 20 | 1 to 1000 |
 | `task list` | 100 | 1 to 1000 |
 | `list` | 50 | 1 to 1000 |
 | `task history` | 50 | 1 to 1000 |

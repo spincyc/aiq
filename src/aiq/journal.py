@@ -2064,9 +2064,9 @@ def list_inbox(
     limit: int = 20,
     include_content: bool = False,
 ) -> list[dict[str, Any]]:
-    if limit < 1:
+    if limit < 1 or limit > 1000:
         raise JournalError(
-            "inbox limit must be positive",
+            "inbox limit must be between 1 and 1000",
             code="invalid_argument",
         )
     if not scope.journal_path.exists():

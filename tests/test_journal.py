@@ -439,6 +439,26 @@ class JournalTest(unittest.TestCase):
             self.assertNotIn("content", hidden[0])
             self.assertEqual(visible[0]["content"], "secret content")
 
+    def test_inbox_limit_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scope = self.agent_scope(root)
+            for index in range(21):
+                ingest_message(scope, f"message {index}", cwd=str(root))
+
+            # The default page is unchanged, and the ceiling is inclusive.
+            self.assertEqual(len(list_inbox(scope)), 20)
+            self.assertEqual(len(list_inbox(scope, limit=1000)), 21)
+
+            # Out of range is rejected, never clamped.
+            for limit in (-1, 0, 1001):
+                with self.assertRaisesRegex(
+                    JournalError,
+                    "inbox limit must be between 1 and 1000",
+                ) as caught:
+                    list_inbox(scope, limit=limit)
+                self.assertEqual(caught.exception.code, "invalid_argument")
+
     def test_journal_permissions_and_integrity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

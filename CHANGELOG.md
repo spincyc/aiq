@@ -53,6 +53,13 @@ effects documents, capability contracts, and integration manifests.
 - The packaged agent bootstrap (`AGENTS.md`) now covers the reader lease: one
   session consumes at a time, `reader_held` reports that another session holds
   the role, and `ingest` and `enqueue` stay open to every session.
+- **Breaking:** `aiq inbox list --limit` is now bounded at 1000, matching the
+  1–1000 range every other reporting listing already enforced. It was the one
+  listing with no upper bound, so an unbounded page could materialize an entire
+  large journal in memory. A limit above 1000 is now rejected with
+  `invalid_argument` (exit 2) rather than clamped, so a caller passing a larger
+  value today — `--limit 100000` as a stand-in for "everything" — starts
+  failing and must page instead. The default is unchanged at 20.
 
 ### Fixed
 
