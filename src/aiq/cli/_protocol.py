@@ -247,11 +247,21 @@ def _prepare_config(arguments: argparse.Namespace) -> None:
 
 
 def _scope(arguments: argparse.Namespace, *, cwd: Path | None = None):
+    """Resolve the scope for one CLI invocation.
+
+    Every scope-aware command reaches a journal through here, so this is
+    where an in-place schema migration is opted into announcing itself on
+    stderr. `integration receive` resolves its scopes inside the hook
+    engine instead and therefore never announces, which is what keeps the
+    installed capture and gate hooks on their documented stderr
+    contracts. See docs/contracts/versioning.md.
+    """
+
     return resolve_scope(
         arguments.scope,
         cwd=cwd or arguments.cwd,
         agent_root=arguments.agent_root,
-    )
+    ).announcing()
 
 
 def _invoked_console_launcher() -> Path | None:

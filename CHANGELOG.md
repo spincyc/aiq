@@ -10,6 +10,19 @@ effects documents, capability contracts, and integration manifests.
 
 ### Added
 
+- **An in-place journal schema migration now announces itself.** Every
+  journal-opening CLI command writes one stderr line before changing
+  anything — `aiq: migrating journal schema 3 -> 6 in place: PATH (scope user,
+  selected by --scope auto fallback outside any repository); forward-only, so
+  AIQ installations older than schema 6 can no longer open this journal;
+  pre-migration backup: PATH` — naming the journal being changed, the schema
+  hop, and the backup, which already exists by the time the line appears. A
+  scope reached by fallback says so, so a journal the caller never chose is
+  visible at the moment it stops being recoverable for free. The installed
+  capture and completion-gate hooks keep migrating silently, holding their
+  documented stdout silence and exactly-one-line stderr budgets.
+  [`recovery.md`](docs/recovery.md#an-unintended-migration) documents
+  diagnosing and rolling back an unintended migration from its backup.
 - [Using AIQ with an agent](docs/using-with-an-agent.md) documents the system
   for the person who never types an `aiq` command: the setup check, the
   phrases that file work versus run it, the three bounded run modes and their

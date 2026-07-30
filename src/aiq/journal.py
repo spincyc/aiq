@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import fcntl
 from functools import lru_cache
@@ -12,6 +12,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import subprocess
+import sys
 import time
 from typing import Any, Iterator
 import uuid
@@ -260,6 +261,30 @@ class JournalScope:
     scope_id: str
     journal_path: Path
     lifecycle_lock_path: Path | None = None
+    # The scope kind the caller asked for, when it differs from the kind
+    # that was resolved -- in practice only `auto` resolving to `user`
+    # because the working directory is outside any repository. Diagnostics
+    # use it to say that the journal being touched was chosen by fallback
+    # rather than named; nothing else reads it, and `to_dict` deliberately
+    # omits it so the documented Scope response shape is unchanged.
+    requested_kind: str | None = None
+    # Whether opening this scope announces an in-place schema migration on
+    # stderr. Off by default: importing `aiq.journal` must not make a
+    # program write to stderr, and the installed hooks resolve their own
+    # scopes and so stay silent without doing anything. The CLI turns it
+    # on for the scope it resolves; see `announcing()`.
+    announce_migration: bool = False
+
+    def announcing(self) -> "JournalScope":
+        """Return this scope with migration announcement enabled.
+
+        The setting rides on the scope rather than on process state so a
+        CLI invocation cannot switch it on for an installed hook running
+        later in the same process, which is exactly what the test suite
+        does.
+        """
+
+        return replace(self, announce_migration=True)
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -1039,6 +1064,7 @@ def resolve_scope(
             scope_id="user",
             journal_path=journal_path,
             lifecycle_lock_path=_scope_lifecycle_lock_path(journal_path),
+            requested_kind="auto" if scope_kind == "auto" else None,
         )
 
     root_id = _path_id(resolved_agent_root)
@@ -1513,6 +1539,98 @@ def _migration_backup(
     return name
 
 
+# One-line stderr announcement of an in-place schema migration.
+#
+# Migration is forward-only, runs implicitly on first open of an older
+# journal, and locks out every AIQ installation older than the new schema
+# (`docs/contracts/versioning.md`). The one fact AIQ never reported was
+# *which file* it was about to change that way -- precisely what a caller
+# who reached an unintended journal needs, whether it reached it through
+# an `auto` scope that fell through to user scope outside a repository,
+# an explicit `--scope user`, or an unexpected repository.
+#
+# The library announces nothing by default: importing `aiq.journal` must
+# not make a program write to stderr. The CLI opts the scope it resolves
+# in (`JournalScope.announcing`), so every human-facing journal-opening
+# command announces. The installed hook paths resolve their own scopes
+# and therefore stay silent; `docs/contracts/versioning.md` records why
+# that is deliberate rather than an oversight.
+
+
+def _printable_single_line(value: str) -> str:
+    return "".join(
+        character
+        if character.isprintable() and character not in {"\t", "\r", "\n"}
+        else f"\\u{ord(character):04x}"
+        for character in value
+    )
+
+
+def migration_notice(
+    scope: JournalScope,
+    *,
+    from_version: int,
+    to_version: int,
+    backup_path: Path,
+) -> str:
+    """Render the single announcement line for one pending migration.
+
+    A scope reached by fallback rather than named says so, because a
+    caller who did not choose this journal is the caller most likely to
+    be surprised that it is the one being changed.
+    """
+
+    if scope.requested_kind is None:
+        selection = f"scope {scope.kind}"
+    else:
+        selection = (
+            f"scope {scope.kind}, selected by --scope "
+            f"{scope.requested_kind} fallback outside any repository"
+        )
+    return _printable_single_line(
+        f"aiq: migrating journal schema {from_version} -> {to_version} "
+        f"in place: {scope.journal_path} ({selection}); "
+        "forward-only, so AIQ installations older than schema "
+        f"{to_version} can no longer open this journal; "
+        f"pre-migration backup: {backup_path}"
+    )
+
+
+def _announce_migration(
+    scope: JournalScope,
+    *,
+    from_version: int,
+    to_version: int,
+    backup_path: Path,
+) -> None:
+    """Announce one pending migration, or stay silent when not opted in.
+
+    Called once the backup exists and before the first schema statement
+    runs, so the line names the backup file recovery actually needs and
+    its appearance proves that file is already on disk.
+
+    A diagnostic must never turn a working migration into a failure, so a
+    stderr that is missing, closed, or unwritable is ignored.
+    """
+
+    if not scope.announce_migration:
+        return
+    stream = sys.stderr
+    if stream is None:
+        return
+    notice = migration_notice(
+        scope,
+        from_version=from_version,
+        to_version=to_version,
+        backup_path=backup_path,
+    )
+    try:
+        stream.write(f"{notice}\n")
+        stream.flush()
+    except (AttributeError, OSError, ValueError):
+        return
+
+
 def _prune_migration_backups(scope: JournalScope) -> None:
     backup_directory = scope.journal_path.parent / "backups"
     snapshots = sorted(
@@ -1632,6 +1750,16 @@ def _initialize_journal_locked(
                             scope,
                             from_version=version,
                             to_version=SCHEMA_VERSION,
+                        )
+                        _announce_migration(
+                            scope,
+                            from_version=version,
+                            to_version=SCHEMA_VERSION,
+                            backup_path=(
+                                scope.journal_path.parent
+                                / "backups"
+                                / backup_name
+                            ),
                         )
                         if version < 2:
                             _create_v2_schema(connection)

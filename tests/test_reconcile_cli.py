@@ -69,9 +69,19 @@ class ReconcileCliTests(unittest.TestCase):
         result: support.CliResult,
         *,
         returncode: int = 0,
+        silent: bool = True,
     ) -> dict[str, object]:
+        """Assert one clean JSON response, silent on stderr by default.
+
+        ``silent=False`` is for the single call that migrates a journal
+        in place and therefore announces it; that call asserts the
+        announcement itself rather than letting the exception go
+        unexamined.
+        """
+
         self.assertEqual(result.returncode, returncode, result.stderr)
-        self.assertEqual(result.stderr, "")
+        if silent:
+            self.assertEqual(result.stderr, "")
         self.assertEqual(result.stdout.count("\n"), 1, result.stdout)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["v"], 1)
@@ -81,6 +91,7 @@ class ReconcileCliTests(unittest.TestCase):
         self,
         *arguments: str,
         returncode: int = 0,
+        silent: bool = True,
     ) -> dict[str, object]:
         return self.json_payload(
             self.run_aiq(
@@ -88,6 +99,7 @@ class ReconcileCliTests(unittest.TestCase):
                 "--cwd", str(self.root), "--json", *arguments,
             ),
             returncode=returncode,
+            silent=silent,
         )
 
     def install_integration(self) -> None:
@@ -182,7 +194,11 @@ class ReconcileCliTests(unittest.TestCase):
         self.assertIn("migration", report["journal"]["reason"])
         self.assertEqual(self.journal_schema_version(journal_path), 1)
 
-        applied = self.reconcile("--apply")
+        completed = self.run_aiq(
+            "reconcile", "--user", "--scope", "user",
+            "--cwd", str(self.root), "--json", "--apply",
+        )
+        applied = self.json_payload(completed, silent=False)
 
         self.assertEqual(applied["status"], "ok")
         self.assertEqual(applied["journal"]["status"], "ok")
@@ -191,6 +207,17 @@ class ReconcileCliTests(unittest.TestCase):
             self.journal_schema_version(journal_path),
             SCHEMA_VERSION,
         )
+        # `reconcile --apply` is the documented post-upgrade migration
+        # command, so this is exactly where the one-way in-place change
+        # must name the file it is about to rewrite.
+        announcements = completed.stderr.splitlines()
+        self.assertEqual(len(announcements), 1, completed.stderr)
+        self.assertIn(
+            f"aiq: migrating journal schema 1 -> {SCHEMA_VERSION} in place:",
+            announcements[0],
+        )
+        self.assertIn(str(journal_path), announcements[0])
+        self.assertIn("pre-migration backup:", announcements[0])
 
     def test_human_output_uses_uniform_tab_rows(self) -> None:
         completed = self.run_aiq(

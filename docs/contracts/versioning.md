@@ -125,6 +125,81 @@ reports each adapter it could not repair. Nothing already recorded is lost by
 the migration itself; what is lost is whatever an unupgraded hook failed to
 capture in the meantime.
 
+### Announcing a migration
+
+Every journal-opening CLI command announces the migration it is about to run,
+on stderr, before the first schema statement executes:
+
+```text
+aiq: migrating journal schema 3 -> 6 in place: ~/.local/state/aiq/journal.sqlite3 (scope user, selected by --scope auto fallback outside any repository); forward-only, so AIQ installations older than schema 6 can no longer open this journal; pre-migration backup: ~/.local/state/aiq/backups/pre-migration-v3-to-v6-20260730T101112123456Z-9f2c.sqlite3
+```
+
+One line, once per migration; a journal already at the installed schema says
+nothing. It names the resolved journal path, the stored and target schema
+versions, and the pre-migration backup. A scope reached by fallback rather
+than named says so, because the caller who did not choose this journal is the
+caller most likely to be surprised that it is the one being changed; a scope
+the caller named carries a plain `(scope repo)`.
+
+The line is written after the backup exists and before anything is changed, so
+its appearance proves the named backup is already on disk, and
+[`recovery.md`](../recovery.md#an-unintended-migration) can be followed from
+the line alone. It goes to stderr, never stdout, so a `--json` response is
+still one clean document; and a stderr that is missing, closed, or unwritable
+is ignored, because a diagnostic must never turn a working migration into a
+failure.
+
+This is human-readable output and therefore outside the [stability
+boundary](#stability-boundary): its wording is not an interface and no
+consumer may parse it.
+
+The two installed hook paths deliberately do not announce, and keep migrating
+silently:
+
+| Path | Why silent |
+|---|---|
+| `UserPromptSubmit` capture | Documented silent on success and forbidden to write stdout at all, which the host injects into the prompt |
+| `Stop` completion gate | Its block and stand-down outcomes are each exactly one stderr line, and both hosts feed that line back to the model; a second line would put an unrequested notice into a model's context |
+
+Neither hook can choose a surprising journal the way a shell can: both resolve
+scope from the host-supplied payload `cwd`, not from an ambient working
+directory. A hook that migrates is an installation newer than the journal it
+was installed alongside — the ordinary post-upgrade case — and whether a host
+displays stderr from an exit-0 hook is host-dependent anyway.
+
+### Alternatives considered
+
+Recorded so a later session does not re-derive them. The incident that
+prompted this: a checkout newer than the installed AIQ ran with its working
+directory in a non-repository temporary directory, `auto` resolved to user
+scope, and the user's real journal migrated from schema 3 to 6, locking out the
+installed schema-4 CLI along with its capture hook and completion gate.
+
+**Requiring acknowledgement for a migration crossing more than one version —
+rejected.** The hop count is the wrong variable. Lockout is binary: a 3 → 4
+migration locks out a schema-3 peer exactly as totally as 3 → 6 does, and AIQ
+cannot see how many installations share a journal, so it cannot condition on
+the risk that actually matters. Worse, a multi-version hop is the *ordinary*
+upgrade: the table above shows a 0.1.0a2 installation may hold schema 2 while
+the next release holds 6. Gating it would demand human interaction on the
+common single-installation path, and the hook paths have no way to
+acknowledge anything — capture would fail every prompt and the gate would
+stand down until somebody ran a CLI by hand.
+
+**Making `auto` refuse instead of falling back to user scope — rejected, on
+design grounds rather than compatibility.** It is aimed at the wrong act. The
+irreversible step is the migration, and the migration is equally silent under
+an explicit `--scope user`, under `--scope repo` in an unexpected worktree or
+submodule, and on the hook paths — which need "repo, else user" as a
+first-class resolution and would have to keep it under another name. Refusing
+closes one door into a room with several, while the announcement attaches to
+the act itself and so covers all of them. The cost is also misplaced: `auto`
+is the *default*, so refusing taxes every non-repository invocation by every
+user, agent, and CI job, permanently, to guard against an operator error AIQ
+already makes recoverable by design. Closing this at the resolver properly
+would mean retiring the default rather than changing `auto`'s meaning — a
+larger change than the incident warrants.
+
 ### Rollback
 
 Rollback exists as a manual, last-resort operation, not a command. The alpha
