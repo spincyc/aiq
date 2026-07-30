@@ -654,12 +654,15 @@ def claim_message(
         requested = ""
         # An unaddressed claim draws only from `received` messages. An
         # explicit MESSAGE_ID may additionally resume a parked
-        # `needs_input` message once its missing input has arrived.
+        # `needs_input` message once its missing input has arrived, or
+        # reopen a `failed` message whose disposition was misjudged.
         claimable_states = "'message.received'"
         if message_id is not None:
             requested = "AND message.message_id = ?"
             parameters.append(message_id)
-            claimable_states = "'message.received', 'message.needs_input'"
+            claimable_states = (
+                "'message.received', 'message.needs_input', 'message.failed'"
+            )
         row = connection.execute(
             f"""
             WITH lifecycle AS (

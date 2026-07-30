@@ -96,6 +96,14 @@ effects documents, capability contracts, and integration manifests.
   engine and journal read-path consolidation.
 - Distribution version bumped to `0.1.0a2` for the workflow-command feature
   set.
+- A `failed` message is no longer terminally unclaimable: an explicit
+  `inbox claim MESSAGE_ID` reopens it, and the reopened claim can then
+  apply effects or record a disposition. An unaddressed claim still draws
+  only from `received` messages.
+- `aiq ingest --if-new` now deduplicates only against messages whose latest
+  state is `received`: a `needs_input` or `failed` twin already consumed
+  its interpretation, so identical content stores a new message instead of
+  being absorbed into the parked or failed one.
 
 ### Fixed
 

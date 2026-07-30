@@ -160,7 +160,8 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     "inbox.claim": _capability(
         "Lease one unapplied message and return its exact content; an "
         "explicit MESSAGE_ID may also resume a parked needs_input message "
-        "once its missing input has arrived.",
+        "once its missing input has arrived, or reopen a failed message "
+        "whose disposition was misjudged.",
         "aiq inbox claim [MESSAGE_ID] [--owner OWNER] [--json]",
         mutates=True,
         idempotency="not retry-safe after a lost receipt",
@@ -290,7 +291,7 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         ),
         mutates=True,
         idempotency="safe retry when an idempotency key is supplied; "
-        "--if-new returns the existing unapplied message for identical "
+        "--if-new returns the existing received message for identical "
         "content with a deduped flag instead of storing a duplicate",
     ),
     "reconcile.run": _capability(

@@ -1492,6 +1492,11 @@ def _ingest_connected(
         )
 
     if if_new:
+        # Dedupe exists for retries and hook races against messages that
+        # are still awaiting interpretation, so only a latest state of
+        # `received` matches. A parked `needs_input` (or `failed`) message
+        # already consumed its interpretation, so identical content
+        # re-submitted afterwards is new intent and stores a new message.
         duplicate = connection.execute(
             f"""
             WITH lifecycle AS (
@@ -1524,10 +1529,7 @@ def _ingest_connected(
               )
             WHERE m.content_sha256 = ?
               AND m.content = ?
-              AND lifecycle.event_type IN (
-                'message.received',
-                'message.needs_input'
-              )
+              AND lifecycle.event_type = 'message.received'
             ORDER BY received.sequence
             LIMIT 1
             """,

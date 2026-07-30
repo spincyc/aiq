@@ -170,7 +170,7 @@ class IngestIdentityTest(unittest.TestCase):
                 self.assertTrue(without_flag.created)
                 self.assertEqual(len(list_inbox(scope)), 3)
 
-    def test_if_new_matches_needs_input_but_not_settled_messages(self) -> None:
+    def test_if_new_matches_only_received_messages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             with patch.dict(
@@ -196,15 +196,20 @@ class IngestIdentityTest(unittest.TestCase):
                     disposition="needs_input",
                     reason="waiting for input",
                 )
-                parked_match = ingest_message(
+                # A parked twin already consumed its interpretation and
+                # awaits input, so identical content is new intent.
+                after_parking = ingest_message(
                     scope,
                     "parked content",
                     source="test-source",
                     if_new=True,
                 )
-                self.assertTrue(parked_match.deduped)
-                self.assertEqual(parked_match.message_id, parked.message_id)
-                self.assertEqual(parked_match.state, "needs_input")
+                self.assertTrue(after_parking.created)
+                self.assertFalse(after_parking.deduped)
+                self.assertNotEqual(
+                    after_parking.message_id,
+                    parked.message_id,
+                )
 
                 failed = ingest_message(
                     scope,

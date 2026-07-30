@@ -369,15 +369,18 @@ whole command naming the offending task, with no partial changes and no
 stored message.
 
 `ingest --if-new` compares the exact content, by content hash, against the
-unapplied (`received` and `needs_input`) messages in the selected scope
-before persisting. On a match it returns the oldest matching `message_id`
-with `deduped: true` and `created: false` instead of storing a duplicate;
-otherwise it stores normally with `deduped: false`. Message content is never
-printed.
+messages in the selected scope whose latest state is `received` before
+persisting. On a match it returns the oldest matching `message_id` with
+`deduped: true` and `created: false` instead of storing a duplicate;
+otherwise it stores normally with `deduped: false`. Dedupe exists for
+retries and hook races against messages still awaiting interpretation: a
+`needs_input` or `failed` twin already consumed its interpretation, so
+identical content stores a new message. Message content is never printed.
 
 `inbox claim` with an explicit `MESSAGE_ID` may also resume a parked
-`needs_input` message once its missing input has arrived; the resumed claim
-can then apply effects or record a disposition. An unaddressed
+`needs_input` message once its missing input has arrived, or reopen a
+`failed` message whose disposition was misjudged; the resumed or reopened
+claim can then apply effects or record a disposition. An unaddressed
 `inbox claim` still draws only from `received` messages.
 
 ## Dev reports

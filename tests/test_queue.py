@@ -1045,12 +1045,53 @@ class QueueTest(unittest.TestCase):
         )
 
         self.assertEqual(list_inbox(self.scope)[0]["state"], "failed")
-        with self.assertRaisesRegex(JournalError, "not claimable"):
-            claim_message(
-                self.scope,
-                owner_id="worker",
-                message_id=message.message_id,
-            )
+        # A failed message never feeds an unaddressed claim.
+        self.assertIsNone(claim_message(self.scope, owner_id="worker"))
+        self.assertEqual(check_journal(self.scope)["status"], "ok")
+
+    def test_failed_message_reopens_through_explicit_claim(self) -> None:
+        message = self.ingest("Failed by mistake")
+        claim = claim_message(
+            self.scope,
+            owner_id="worker",
+            message_id=message.message_id,
+        )
+        assert claim is not None
+        dispose_message(
+            self.scope,
+            message.message_id,
+            claim_id=claim["claim_id"],
+            disposition="failed",
+            reason="misjudged as unprocessable",
+        )
+
+        # An unaddressed claim never draws a failed message; only the
+        # explicit MESSAGE_ID reopens a misjudged disposition.
+        self.assertIsNone(claim_message(self.scope, owner_id="worker"))
+        reopened = claim_message(
+            self.scope,
+            owner_id="worker",
+            message_id=message.message_id,
+        )
+        assert reopened is not None
+        self.assertEqual(
+            reopened["message"]["content"],
+            "Failed by mistake",
+        )
+
+        applied = apply_effects(
+            self.scope,
+            message.message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$reopened", {"title": "Rescued work"}]],
+            },
+            claim_id=reopened["claim_id"],
+        )
+
+        self.assertEqual(applied["status"], "applied")
+        self.assertEqual(list_inbox(self.scope), [])
         self.assertEqual(check_journal(self.scope)["status"], "ok")
 
     def test_enqueue_is_one_recorded_and_applied_transaction(self) -> None:

@@ -200,8 +200,8 @@ def register(
         action="store_true",
         help=(
             "return the existing message instead of storing a duplicate "
-            "when an unapplied (received or needs_input) message in the "
-            "selected scope already carries the identical content"
+            "when a received message in the selected scope already "
+            "carries the identical content"
         ),
     )
     ingest.add_argument("--quiet", action="store_true")
