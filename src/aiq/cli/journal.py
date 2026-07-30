@@ -4,7 +4,12 @@ import argparse
 from pathlib import Path
 
 from aiq.cli._protocol import _emit, _scope, _scope_parser
-from aiq.journal import check_journal, create_snapshot, initialize_journal
+from aiq.journal import (
+    check_journal,
+    create_snapshot,
+    initialize_journal,
+    project_label,
+)
 from aiq.privacy import (
     destroy_journal,
     export_journal,
@@ -15,7 +20,9 @@ from aiq.privacy import (
 def _journal_path(arguments: argparse.Namespace) -> int:
     scope = _scope(arguments)
     _emit(
-        {"scope": scope.to_dict()} if arguments.json else str(scope.journal_path),
+        {"project": project_label(scope), "scope": scope.to_dict()}
+        if arguments.json
+        else str(scope.journal_path),
         as_json=arguments.json,
     )
     return 0
@@ -23,9 +30,13 @@ def _journal_path(arguments: argparse.Namespace) -> int:
 
 def _journal_init(arguments: argparse.Namespace) -> int:
     scope = _scope(arguments)
-    path = initialize_journal(scope)
+    path = initialize_journal(scope, label=arguments.label)
     _emit(
-        {"status": "initialized", "scope": scope.to_dict()}
+        {
+            "status": "initialized",
+            "project": project_label(scope),
+            "scope": scope.to_dict(),
+        }
         if arguments.json
         else str(path),
         as_json=arguments.json,
@@ -40,6 +51,7 @@ def _journal_check(arguments: argparse.Namespace) -> int:
             key: result[key]
             for key in (
                 "status",
+                "project",
                 "messages",
                 "tasks",
                 "applications",
@@ -95,6 +107,15 @@ def register(
     journal_path = _scope_parser(journal_commands, "path")
     journal_path.set_defaults(handler=_journal_path)
     journal_init = _scope_parser(journal_commands, "init")
+    journal_init.add_argument(
+        "--label",
+        metavar="TEXT",
+        help=(
+            "set this journal's project label, the name human output "
+            "renders in task references; defaults to the repository "
+            "directory name and may be changed by re-running init"
+        ),
+    )
     journal_init.set_defaults(handler=_journal_init)
     journal_check = _scope_parser(journal_commands, "check")
     journal_check.set_defaults(handler=_journal_check)

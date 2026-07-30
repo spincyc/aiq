@@ -20,6 +20,14 @@ import uuid
 SCHEMA_VERSION = 3
 SQLITE_MINIMUM_VERSION = (3, 37, 0)
 
+# Journal-level project label: the human-readable name of the repository
+# or higher-level orchestrating project a journal's tasks belong to.
+# Persisted in journal_metadata under this key; journal_metadata is a
+# plain mutable table (deliberately outside the append-only triggers), so
+# the label can be backfilled and re-labeled in place.
+PROJECT_LABEL_KEY = "project_label"
+PROJECT_LABEL_MAX_LENGTH = 64
+
 # Every event type that can record a message's lifecycle state. The latest
 # of these per message defines its current state. 'message.superseded' is
 # deliberately included even though no current writer emits it and the
@@ -914,6 +922,120 @@ def resolve_scope(
     )
 
 
+def validate_project_label(value: str) -> str:
+    """Validate one explicit project label: a short single printable line."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise JournalError(
+            "project label must be a non-empty single line",
+            code="invalid_argument",
+        )
+    if len(value) > PROJECT_LABEL_MAX_LENGTH:
+        raise JournalError(
+            f"project label must be at most {PROJECT_LABEL_MAX_LENGTH} "
+            "characters",
+            code="invalid_argument",
+        )
+    if any(
+        not character.isprintable() or character in {"\t", "\r", "\n"}
+        for character in value
+    ):
+        raise JournalError(
+            "project label must be a single printable line",
+            code="invalid_argument",
+        )
+    return value
+
+
+def _sanitized_label(value: str) -> str:
+    cleaned = "".join(
+        character
+        for character in value
+        if character.isprintable() and character not in {"\t", "\r", "\n"}
+    )
+    return cleaned[:PROJECT_LABEL_MAX_LENGTH]
+
+
+def default_project_label(scope: JournalScope) -> str:
+    """Derive the default project label for one scope.
+
+    Repo scope labels tasks with the repository root directory's
+    basename — the parent of the Git common directory, so a scope rooted
+    at ``~/git/aiq/.git`` is labeled ``aiq`` and every linked worktree
+    shares the primary repository's label. User scope is ``user``;
+    agent-root scope uses the agent root directory's basename.
+    """
+
+    if scope.kind == "user":
+        return "user"
+    root = scope.root
+    name = root.parent.name if root.name == ".git" else root.name
+    return _sanitized_label(name) or scope.kind
+
+
+def _read_project_label(connection: sqlite3.Connection) -> str | None:
+    row = connection.execute(
+        "SELECT value FROM journal_metadata WHERE key = ?",
+        (PROJECT_LABEL_KEY,),
+    ).fetchone()
+    if row is None:
+        return None
+    value = row[0]
+    return value if value else None
+
+
+def _ensure_project_label(
+    connection: sqlite3.Connection,
+    scope: JournalScope,
+    label: str | None,
+) -> None:
+    """Persist the journal's project label, backfilling when absent.
+
+    journal_metadata carries no append-only triggers and is already
+    updated in place by repo-metadata normalization, so both the lazy
+    backfill for pre-label journals and an explicit ``label`` override
+    write through the normal connection.
+    """
+
+    current = _read_project_label(connection)
+    desired = label if label is not None else current
+    if desired is None:
+        desired = default_project_label(scope)
+    if current == desired:
+        return
+    _begin_immediate(connection)
+    try:
+        connection.execute(
+            """
+            INSERT INTO journal_metadata(key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (PROJECT_LABEL_KEY, desired),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def project_label(scope: JournalScope) -> str:
+    """Return one scope's project label without creating storage.
+
+    A missing journal derives the default label; an existing journal
+    reads the persisted label (backfilling it on this first read).
+    """
+
+    if not scope.journal_path.exists():
+        return default_project_label(scope)
+    connection = _connect(scope)
+    try:
+        stored = _read_project_label(connection)
+    finally:
+        connection.close()
+    return stored if stored is not None else default_project_label(scope)
+
+
 @lru_cache(maxsize=1)
 def _require_sqlite_runtime() -> None:
     if sqlite3.sqlite_version_info < SQLITE_MINIMUM_VERSION:
@@ -1199,7 +1321,10 @@ def _prune_migration_backups(scope: JournalScope) -> None:
         expired_snapshot.unlink(missing_ok=True)
 
 
-def _initialize_journal_locked(scope: JournalScope) -> Path:
+def _initialize_journal_locked(
+    scope: JournalScope,
+    label: str | None = None,
+) -> Path:
     original_umask = os.umask(0o077)
     try:
         connection = sqlite3.connect(scope.journal_path, timeout=10)
@@ -1222,6 +1347,11 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                     metadata = {
                         "schema_version": str(SCHEMA_VERSION),
                         **_scope_metadata(scope),
+                        PROJECT_LABEL_KEY: (
+                            label
+                            if label is not None
+                            else default_project_label(scope)
+                        ),
                     }
                     connection.executemany(
                         """
@@ -1364,6 +1494,11 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                         except Exception:
                             connection.rollback()
                             raise
+            # Every open reaches here under the initialization lock, so
+            # this is the one place that both backfills the project label
+            # for journals written before labels existed and applies an
+            # explicit `aiq journal init --label` override.
+            _ensure_project_label(connection, scope, label)
             _validate_metadata(connection, scope)
             _validate_schema_objects(
                 connection,
@@ -1380,6 +1515,7 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
 
 def _initialize_journal(
     scope: JournalScope,
+    label: str | None = None,
     *,
     lock_timeout: float | None = None,
 ) -> Path:
@@ -1401,13 +1537,19 @@ def _initialize_journal(
                 flags |= os.O_NOFOLLOW
             descriptor = os.open(scope.journal_path, flags, 0o600)
             os.close(descriptor)
-        return _initialize_journal_locked(scope)
+        return _initialize_journal_locked(scope, label)
 
 
-def initialize_journal(scope: JournalScope) -> Path:
+def initialize_journal(
+    scope: JournalScope,
+    *,
+    label: str | None = None,
+) -> Path:
     _require_sqlite_runtime()
+    if label is not None:
+        validate_project_label(label)
     with lifecycle_lock(scope, exclusive=False):
-        return _initialize_journal(scope)
+        return _initialize_journal(scope, label)
 
 
 class _LifecycleConnection(sqlite3.Connection):
@@ -2009,6 +2151,8 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
                     f"message received event count is {received_count}: "
                     f"{message['message_id']}"
                 )
+        label = _read_project_label(connection)
+
         from aiq.queue import audit_queue
 
         queue_audit = audit_queue(connection)
@@ -2024,6 +2168,7 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
     return {
         "status": "ok",
         "schema_version": SCHEMA_VERSION,
+        "project": label if label is not None else default_project_label(scope),
         "messages": message_count,
         "events": event_count,
         "tasks": task_count,

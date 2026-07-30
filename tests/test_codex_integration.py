@@ -848,6 +848,7 @@ class CodexIntegrationTest(unittest.TestCase):
             repository = support.init_repository(root / "repository")
             two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
             status = {
+                "project": "aiq",
                 "messages": {"received": 0, "needs_input": 0},
                 "tasks": {"ready": 2},
                 "claims": {"active": 1},
@@ -887,10 +888,52 @@ class CodexIntegrationTest(unittest.TestCase):
                 (
                     True,
                     "AIQ: runnable work remains: 2 ready tasks, "
-                    '1 active claim: TASK-7 "Ship the release notes" '
-                    f'(open 2h); TASK-9 "{truncated}" '
+                    "1 active claim: [aiq: TASK-7] "
+                    '"Ship the release notes" '
+                    f'(open 2h); [aiq: TASK-9] "{truncated}" '
                     "— settle finished work: aiq task done TASK-7 "
                     "--summary TEXT — or: aiq status",
+                ),
+            )
+
+    def test_stop_gate_omits_label_when_status_reports_none(self) -> None:
+        """A status shape without a project label still blocks, unlabeled.
+
+        The gate's posture is fail-open: a patched or older read_status
+        that reports no ``project`` must degrade to the bare task ID
+        rather than render an empty label such as ``[: TASK-2]``.
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = support.init_repository(root / "repository")
+            status = {
+                "messages": {"received": 0, "needs_input": 0},
+                "tasks": {"ready": 1},
+                "claims": {"active": 0},
+                "ready": [
+                    {"task_id": "TASK-2", "priority": 1, "title": "Unlabeled"}
+                ],
+            }
+
+            with patch("aiq.queue.read_status", return_value=status):
+                reason = gate_hook(
+                    json.dumps(
+                        {
+                            "hook_event_name": "Stop",
+                            "session_id": "session",
+                            "cwd": str(repository),
+                        }
+                    ),
+                    git_executable=self.git_executable(),
+                )
+
+            self.assertEqual(
+                reason,
+                (
+                    True,
+                    'AIQ: runnable work remains: 1 ready task: TASK-2 '
+                    '"Unlabeled" — settle finished work: aiq task done '
+                    "TASK-2 --summary TEXT — or: aiq status",
                 ),
             )
 
@@ -899,6 +942,7 @@ class CodexIntegrationTest(unittest.TestCase):
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
             status = {
+                "project": "aiq",
                 "messages": {"received": 0, "needs_input": 0},
                 "tasks": {"ready": 4},
                 "claims": {"active": 0},
@@ -924,14 +968,18 @@ class CodexIntegrationTest(unittest.TestCase):
             blocking, line = reason
             self.assertTrue(blocking)
             for named in ("TASK-1", "TASK-2", "TASK-3"):
-                self.assertIn(f'{named} "', line)
+                self.assertIn(f'[aiq: {named}] "', line)
             self.assertNotIn("TASK-4", line)
+            # The settle tail names the first ready task bare, so it can
+            # be copied straight into a shell.
+            self.assertIn("aiq task done TASK-1 --summary TEXT", line)
 
     def test_stop_gate_escapes_and_truncates_hostile_titles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
             status = {
+                "project": "aiq",
                 "messages": {"received": 0, "needs_input": 0},
                 "tasks": {"ready": 1},
                 "claims": {"active": 0},
@@ -969,7 +1017,7 @@ class CodexIntegrationTest(unittest.TestCase):
             # The title is truncated to 40 characters first, then the
             # stderr boundary escapes the embedded newline and tab.
             self.assertIn(
-                'TASK-3 "line one\\u000aline two\\u0009'
+                '[aiq: TASK-3] "line one\\u000aline two\\u0009'
                 'tabbed tail that keep…"',
                 lines[0],
             )

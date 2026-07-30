@@ -10,6 +10,16 @@ effects documents, capability contracts, and integration manifests.
 
 ### Added
 
+- Journal-level project labels naming the repository or orchestrating project
+  a journal's tasks belong to. The label defaults to the repository root
+  directory's name (`user` for user scope), is set explicitly by
+  `aiq journal init --label TEXT`, and is backfilled for existing journals on
+  first open. Human-readable task references now render as `[aiq: TASK-19]` in
+  `aiq task list`, `aiq list`, `aiq status`, `aiq claim list`, `aiq task show`,
+  `aiq task history`, and the `Stop`-gate block line; the gate's settle command
+  keeps the bare task ID so it stays copy-pasteable. JSON output is additive
+  only: a new top-level `project` field on `journal path`, `journal init`,
+  `journal check`, and `status`, with `task_id` values never prefixed.
 - Bootstrap and Claude Code integration documentation of the mid-turn capture
   gap: hosts deliver mid-turn user messages without a capture event, so agents
   must ingest them manually with `aiq ingest --if-new`.

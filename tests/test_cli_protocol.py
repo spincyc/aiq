@@ -169,8 +169,15 @@ class CliProtocolTests(unittest.TestCase):
         self.ok("integration", "uninstall", "codex", "--user", "--json")
 
         path = self.ok("journal", "path", *self.scope)
-        self.assertEqual(set(path), {"scope", "v"})
-        self.ok("journal", "init", *self.scope)
+        self.assertEqual(set(path), {"project", "scope", "v"})
+        # Reported before the journal exists, derived, and creating no
+        # storage.
+        self.assertEqual(path["project"], "repository")
+        initialized = self.ok("journal", "init", *self.scope)
+        self.assertEqual(
+            set(initialized), {"project", "scope", "status", "v"}
+        )
+        self.assertEqual(initialized["project"], "repository")
         doctor = self.ok("doctor", *self.scope)
         self.assertEqual(set(doctor), {"checks", "status", "v"})
         ingested = self.ok(
@@ -215,8 +222,18 @@ class CliProtocolTests(unittest.TestCase):
         status = self.ok("status", *self.scope)
         self.assertEqual(
             set(status),
-            {"blocked", "claims", "messages", "ready", "scope", "tasks", "v"},
+            {
+                "blocked",
+                "claims",
+                "messages",
+                "project",
+                "ready",
+                "scope",
+                "tasks",
+                "v",
+            },
         )
+        self.assertEqual(status["project"], "repository")
         self.assertEqual(status["messages"]["applied"], 1)
         self.assertEqual(status["tasks"]["ready"], 1)
         self.assertEqual(status["claims"]["active"], 0)

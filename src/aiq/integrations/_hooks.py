@@ -1877,6 +1877,12 @@ def gate_stop_hook(
     if not isinstance(ready_entries, list):
         ready_entries = []
     now = datetime.now(timezone.utc)
+    # Name each ready task with its project label so a line read in an
+    # orchestrating session says which repository the work belongs to.
+    # The settle tail below deliberately keeps the bare ID: that text is
+    # meant to be copied into a command. Tolerate a patched or older
+    # status shape without a label (fail-open posture).
+    project = str(status.get("project") or "")
     fragments = []
     first_ready_id = ""
     for entry in ready_entries[:3]:
@@ -1887,7 +1893,8 @@ def gate_stop_hook(
             continue
         first_ready_id = first_ready_id or task_id
         title = _truncated_title(str(entry.get("title") or ""))
-        fragment = f'{task_id} "{title}"'
+        reference = f"[{project}: {task_id}]" if project else task_id
+        fragment = f'{reference} "{title}"'
         age = _coarse_age(entry.get("created_at"), now)
         if age is not None:
             fragment += f" (open {age})"

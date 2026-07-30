@@ -1632,6 +1632,7 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(
             read_status(self.scope),
             {
+                "project": "agent",
                 "messages": {
                     "received": 0,
                     "processing": 0,

@@ -5,7 +5,8 @@ import os
 from typing import Any, Mapping
 
 from aiq.cli._protocol import _emit, _scope, _scope_parser, _single_line
-from aiq.cli._render import _task_detail, _task_summary
+from aiq.cli._render import _task_detail, _task_reference, _task_summary
+from aiq.journal import project_label
 from aiq.queue import (
     TASK_STATES,
     explain_task,
@@ -17,10 +18,11 @@ from aiq.queue import (
 
 
 def _task_list(arguments: argparse.Namespace) -> int:
+    scope = _scope(arguments)
     tasks = [
         _task_summary(task)
         for task in list_tasks(
-            _scope(arguments),
+            scope,
             states=set(arguments.state) if arguments.state else None,
             limit=arguments.limit,
         )
@@ -28,9 +30,12 @@ def _task_list(arguments: argparse.Namespace) -> int:
     if arguments.json:
         _emit({"tasks": tasks}, as_json=True)
         return 0
+    # Human output only: JSON never prefixes task IDs, so JSON callers
+    # never pay for this read.
+    project = project_label(scope)
     for task in tasks:
         print(
-            f"{task['task_id']}\t{task['state']}\t"
+            f"{_task_reference(project, task['task_id'])}\t{task['state']}\t"
             f"r{task['revision']}\t{task['priority']}\t"
             f"{_single_line(task['title'])}"
         )
@@ -38,7 +43,10 @@ def _task_list(arguments: argparse.Namespace) -> int:
 
 
 def _task_show(arguments: argparse.Namespace) -> int:
-    detail = _task_detail(show_task(_scope(arguments), arguments.task_id))
+    scope = _scope(arguments)
+    detail = _task_detail(show_task(scope, arguments.task_id))
+    if not arguments.json:
+        print(_task_reference(project_label(scope), detail["task_id"]))
     _emit({"task": detail}, as_json=arguments.json)
     return 0
 
@@ -84,14 +92,16 @@ def _history_compact(entry: Mapping[str, Any]) -> str:
 
 
 def _task_history(arguments: argparse.Namespace) -> int:
+    scope = _scope(arguments)
     events = task_history(
-        _scope(arguments),
+        scope,
         arguments.task_id,
         limit=arguments.limit,
     )
     if arguments.json:
         _emit({"task_id": arguments.task_id, "events": events}, as_json=True)
         return 0
+    print(_task_reference(project_label(scope), arguments.task_id))
     for entry in events:
         print(
             f"{entry['occurred_at']}\t{entry['type']}\t"

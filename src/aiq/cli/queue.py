@@ -10,7 +10,8 @@ from aiq.cli._protocol import (
     _scope_parser,
     _single_line,
 )
-from aiq.cli._render import _claim_public, _task_summary
+from aiq.cli._render import _claim_public, _task_reference, _task_summary
+from aiq.journal import project_label
 from aiq.queue import (
     TASK_STATES,
     claim_next_tasks,
@@ -104,18 +105,20 @@ def _list(arguments: argparse.Namespace) -> int:
         states = set(TASK_STATES)
     else:
         states = None
+    scope = _scope(arguments)
     tasks = overview_tasks(
-        _scope(arguments),
+        scope,
         states=states,
         limit=arguments.limit,
     )
     if arguments.json:
         _emit({"tasks": tasks}, as_json=True)
         return 0
+    project = project_label(scope)
     for task in tasks:
         print(
-            f"{task['task_id']}\t{task['state']}\t{task['priority']}\t"
-            f"{_single_line(task['title'])}"
+            f"{_task_reference(project, task['task_id'])}\t{task['state']}\t"
+            f"{task['priority']}\t{_single_line(task['title'])}"
         )
     return 0
 

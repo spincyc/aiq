@@ -18,7 +18,9 @@ from aiq.journal import (
     _connect,
     _identifier,
     _ingest_connected,
+    _read_project_label,
     _utc_now,
+    default_project_label,
 )
 
 
@@ -1135,8 +1137,10 @@ def read_status(
     Reports bounded counts only -- never message or task content -- from
     one read snapshot, plus two bounded listings: the top ready tasks and
     up to five blocked tasks, each blocked entry naming the failed
-    prerequisites (``blocked_by``) causing the block. A missing journal
-    yields empty counts without creating the journal.
+    prerequisites (``blocked_by``) causing the block. ``project`` carries
+    the journal's project label so callers rendering task references need
+    no second journal open. A missing journal yields empty counts and the
+    derived default label without creating the journal.
     """
 
     if ready_limit < 1 or ready_limit > 64:
@@ -1144,6 +1148,7 @@ def read_status(
     message_counts = dict.fromkeys(MESSAGE_STATES, 0)
     task_counts = dict.fromkeys(TASK_STATES, 0)
     result: dict[str, Any] = {
+        "project": default_project_label(scope),
         "messages": message_counts,
         "tasks": task_counts,
         "claims": {"active": 0},
@@ -1153,6 +1158,9 @@ def read_status(
     if not scope.journal_path.exists():
         return result
     with _read_snapshot(scope, now_us) as (connection, effective_now):
+        stored_label = _read_project_label(connection)
+        if stored_label is not None:
+            result["project"] = stored_label
         rows = connection.execute(
             f"""
             WITH lifecycle AS (

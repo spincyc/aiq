@@ -24,6 +24,10 @@ This document defines AIQ's first public machine-facing CLI protocol.
   effects-local aliases.
 - Timestamps are RFC 3339 UTC strings. Digests are lowercase SHA-256 hex.
 - Human-readable output is terminal-safe but is not versioned.
+- JSON `task_id` values are always bare. The journal's
+  [project label](#project-label) is reported once as a top-level `project`
+  field and never prefixed onto an ID inside JSON; only human-readable output
+  renders the `[label: TASK-19]` form.
 - Successful `ingest --quiet` intentionally emits nothing, including in JSON
   output mode; failures remain visible.
 
@@ -51,6 +55,31 @@ errors as proof that the directory is outside a repository.
 | `root` | string | Canonical scope root |
 | `scope_id` | string | Opaque stable local scope identifier |
 | `journal_path` | string | Local journal path |
+
+### Project label
+
+Every journal carries one project label: the name of the repository or
+higher-level orchestrating project its tasks belong to. It is a short single
+printable line of at most 64 characters, stored in the journal and reported
+as the top-level `project` field of `journal path`, `journal init`,
+`journal check`, and `status`.
+
+The default is derived from the scope and needs no configuration:
+
+| Scope | Default label |
+|---|---|
+| `repo` | The repository root directory's name — the parent of the Git common directory, so a journal under `~/git/aiq/.git` is labeled `aiq`. Linked worktrees share the primary repository's journal and therefore its label |
+| `user` | `user` |
+
+`aiq journal init --label TEXT` sets the label explicitly and may be re-run to
+change it; a rejected label leaves the stored label untouched. Journals
+written before labels existed are backfilled with the derived default the
+first time they are opened.
+
+Human-readable listings render task references as `[label: TASK-19]` so a
+reference stays unambiguous when several repositories are in play. Bare IDs
+are kept wherever the printed text is meant to be copied into a command, and
+JSON `task_id` values are never prefixed.
 
 ### Claim
 
@@ -99,9 +128,9 @@ The tables list fields in addition to top-level `v`.
 | `config show --json` | `version`, `scope`, `owner`, `lease_seconds`, `snapshot_keep`, `output`, `dev_report_repo`; optional `sources` |
 | `config check --json` | `status: "ok"` |
 | `doctor --json` | `status: "ok"` or `"failed"`, ordered `checks` of `{check, status, detail}` |
-| `journal path --json` | `scope` |
-| `journal init --json` | `status: "initialized"`, `scope` |
-| `journal check --json` | `status: "ok"`, message/task/application/claim/snapshot counts, `scope` |
+| `journal path --json` | `project`, `scope` |
+| `journal init --json` | `status: "initialized"`, `project`, `scope` |
+| `journal check --json` | `status: "ok"`, `project`, message/task/application/claim/snapshot counts, `scope` |
 | `journal snapshot --json` | `status: "created"`, `snapshot_path`, `removed`, `retained`, `scope` |
 | `journal export OUTPUT --json` | `status: "exported"`, `output_path`, format fields, record/byte counts, digest, `scope` |
 | `journal destroy --plan --json` | confirmation status, token, inventory totals, targets, `scope` |
@@ -321,14 +350,17 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 |---|---|
 | `messages` | Message counts keyed by `received`, `processing`, `applied`, `needs_input`, and `failed` |
 | `tasks` | Effective task-state counts keyed by every task state |
+| `project` | The journal's [project label](#project-label) |
 | `claims` | `active`: unreleased, unexpired message and task leases |
 | `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, `title`, and `created_at` |
 | `blocked` | At most five blocked tasks in the same order, each with only `task_id`, `priority`, `title`, and `blocked_by` — the failed prerequisite task IDs causing the block, empty for a directly blocked task |
 | `scope` | The resolved [Scope](#scope) object |
 
 A processing message whose lease has expired counts as `received`. Message and
-prompt content never appears. A missing journal reports zero counts and
-empty `ready` and `blocked` arrays without creating storage.
+prompt content never appears. A missing journal reports zero counts, empty
+`ready` and `blocked` arrays, and the derived project label without creating
+storage. Human-readable `ready` and `blocked` lines render the task reference
+as `[label: TASK-19]`; the `blocked by` causes stay bare IDs.
 
 ## Workflow shortcuts
 
@@ -575,9 +607,9 @@ that changes no work state — a missing journal counts as nothing runnable
 and creates no storage, while opening an existing journal at an older
 stored schema first runs the pending migration with an automatic backup —
 and blocks with exit 2 and exactly one stderr line, for example
-`AIQ: runnable work remains: 1 ready task, 1 active claim: TASK-7 "Ship the
-release notes" (open 2h) — settle finished work: aiq task done TASK-7
---summary TEXT — or: aiq status`,
+`AIQ: runnable work remains: 1 ready task, 1 active claim: [aiq: TASK-7]
+"Ship the release notes" (open 2h) — settle finished work: aiq task done
+TASK-7 --summary TEXT — or: aiq status`,
 when ready tasks, unexpired active claims, or unapplied (`received`)
 messages remain and the payload's `stop_hook_active` loop guard is falsy.
 After the counts, the line names up to the first three ready tasks — task

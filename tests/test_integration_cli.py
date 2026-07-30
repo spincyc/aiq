@@ -586,7 +586,9 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertIn("AIQ: runnable work remains:", lines[0])
         self.assertIn("1 ready task", lines[0])
         self.assertIn("1 unapplied message", lines[0])
-        self.assertIn(f'{task_id} "Settle me"', lines[0])
+        # The named ready task carries the project label; the settle tail
+        # keeps the bare ID so it stays copy-pasteable.
+        self.assertIn(f'[repository: {task_id}] "Settle me"', lines[0])
         self.assertIn(f"aiq task done {task_id} --summary TEXT", lines[0])
         self.assertIn("aiq status", lines[0])
 

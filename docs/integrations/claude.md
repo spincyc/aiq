@@ -93,12 +93,14 @@ Code is about to finish a turn, the hook resolves the AIQ scope from the
 event's absolute `cwd` and takes one journal snapshot that changes no work state (an existing journal at an older stored schema first runs the pending migration with an automatic backup). If ready
 tasks, unexpired active claims, or unapplied (`received`) messages remain,
 it exits 2 with a single stderr line such as
-`AIQ: runnable work remains: 1 ready task, 1 active claim: TASK-7 "Ship the
-release notes" (open 2h) — settle finished work: aiq task done TASK-7
---summary TEXT — or: aiq status`.
-After the counts, the line names up to the first three ready tasks — task ID,
-double-quoted title truncated to 40 characters, and a coarse ready-age — and
-ends with the settle command; with claims or messages only, it keeps the
+`AIQ: runnable work remains: 1 ready task, 1 active claim: [aiq: TASK-7]
+"Ship the release notes" (open 2h) — settle finished work: aiq task done
+TASK-7 --summary TEXT — or: aiq status`.
+After the counts, the line names up to the first three ready tasks — the
+task reference carrying the journal's project label, a double-quoted title
+truncated to 40 characters, and a coarse ready-age — and ends with the
+settle command, whose task ID stays bare so it can be copied straight into
+a shell; with claims or messages only, it keeps the
 `— run aiq status` tail. A parked `needs_input` message awaits the user, not
 the agent, and never blocks stopping, but it is surfaced: a block line
 appends a fragment such as `; 2 parked messages await user input` before

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 
 from aiq.cli._protocol import _emit, _scope, _scope_parser, _single_line
+from aiq.cli._render import _task_reference
+from aiq.journal import project_label
 from aiq.queue import list_claims, release_claim
 
 
@@ -25,8 +27,9 @@ def _claim_release(arguments: argparse.Namespace) -> int:
 
 
 def _claim_list(arguments: argparse.Namespace) -> int:
+    scope = _scope(arguments)
     claims = list_claims(
-        _scope(arguments),
+        scope,
         owner_id=arguments.owner,
         resource_kind=arguments.resource,
         status=arguments.status,
@@ -35,10 +38,16 @@ def _claim_list(arguments: argparse.Namespace) -> int:
     if arguments.json:
         _emit({"claims": claims}, as_json=True)
         return 0
+    project = project_label(scope)
     for claim in claims:
+        resource = (
+            _task_reference(project, claim["resource_id"])
+            if claim["resource_kind"] == "task"
+            else claim["resource_id"]
+        )
         print(
             f"{claim['claim_id']}\t{claim['resource_kind']}\t"
-            f"{claim['resource_id']}\t{_single_line(claim['owner_id'])}\t"
+            f"{resource}\t{_single_line(claim['owner_id'])}\t"
             f"{claim['status']}\t{claim['expires_at']}"
         )
     return 0

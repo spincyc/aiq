@@ -93,8 +93,19 @@ class StatusCliTest(unittest.TestCase):
         self.assertEqual(payload["v"], 1)
         self.assertEqual(
             set(payload),
-            {"blocked", "claims", "messages", "ready", "scope", "tasks", "v"},
+            {
+                "blocked",
+                "claims",
+                "messages",
+                "project",
+                "ready",
+                "scope",
+                "tasks",
+                "v",
+            },
         )
+        # The label rides along once, top level; JSON task IDs stay bare.
+        self.assertEqual(payload["project"], "repository")
         self.assertEqual(payload["blocked"], [])
         self.assertEqual(
             payload["messages"],
@@ -137,7 +148,9 @@ class StatusCliTest(unittest.TestCase):
             "done=0  canceled=0  superseded=0",
         )
         self.assertEqual(lines[2], "claims    active=0")
-        self.assertEqual(lines[3], f"ready     {task_id}\tp3\tStatus task")
+        self.assertEqual(
+            lines[3], f"ready     [repository: {task_id}]\tp3\tStatus task"
+        )
 
     def create_blocked_task(self) -> tuple[str, str]:
         """Create a dependent task and cancel its prerequisite.
@@ -229,11 +242,15 @@ class StatusCliTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         lines = completed.stdout.splitlines()
         self.assertEqual(
-            lines[-2], f"ready     {task_id}\tp3\tStatus task"
+            lines[-2], f"ready     [repository: {task_id}]\tp3\tStatus task"
         )
+        # The blocked line's own reference carries the label; the
+        # blocked-by causes stay bare IDs, as elsewhere for secondary
+        # ID lists.
         self.assertEqual(
             lines[-1],
-            f"blocked   {dep_id}\tp6\tBlocked task\tblocked by {prereq_id}",
+            f"blocked   [repository: {dep_id}]\tp6\tBlocked task"
+            f"\tblocked by {prereq_id}",
         )
 
     def test_missing_journal_reports_zeros_without_creating_storage(self) -> None:

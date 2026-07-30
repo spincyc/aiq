@@ -36,6 +36,20 @@ _MESSAGE_SUMMARY_FIELDS = (
 )
 
 
+def _task_reference(project: str, task_id: str) -> str:
+    """Render one task reference for human output: ``[aiq: TASK-19]``.
+
+    Human listings name the project a task belongs to so references stay
+    unambiguous when several repositories or an orchestrating project are
+    in play. JSON output never carries the prefix: ``task_id`` values stay
+    bare and the label is reported once as a top-level ``project`` field.
+    Bare IDs also stay bare wherever the printed text is meant to be
+    copied into a command, such as the Stop gate's settle tail.
+    """
+
+    return f"[{project}: {task_id}]"
+
+
 def _task_summary(task: Mapping[str, Any]) -> dict[str, Any]:
     return {field: task[field] for field in _TASK_SUMMARY_FIELDS}
 

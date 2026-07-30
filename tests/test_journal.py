@@ -19,15 +19,20 @@ from support import run_git
 from aiq import journal as journal_module
 from aiq.journal import (
     JournalError,
+    PROJECT_LABEL_MAX_LENGTH,
     SCHEMA_SQL,
     SCHEMA_VERSION,
     check_journal,
     create_snapshot,
+    default_project_label,
     ingest_message,
     initialize_journal,
     list_inbox,
+    project_label,
     resolve_scope,
+    validate_project_label,
 )
+from aiq.queue import read_status
 
 
 class JournalTest(unittest.TestCase):
@@ -899,6 +904,176 @@ class JournalTest(unittest.TestCase):
             self.assertFalse(json.loads(second.stdout)["created"])
             scope = resolve_scope("repo", cwd=repository)
             self.assertEqual(check_journal(scope)["messages"], 1)
+
+
+class ProjectLabelTest(unittest.TestCase):
+    """The journal-level project label: derivation, storage, override."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def repo_scope(self, name: str = "repository"):
+        repository = self.root / name
+        repository.mkdir()
+        run_git(repository, "init", "-b", "main")
+        return repository, resolve_scope("repo", cwd=repository)
+
+    def stored_label(self, scope) -> str | None:
+        connection = sqlite3.connect(scope.journal_path)
+        try:
+            row = connection.execute(
+                "SELECT value FROM journal_metadata WHERE key = 'project_label'"
+            ).fetchone()
+        finally:
+            connection.close()
+        return None if row is None else row[0]
+
+    def test_repo_label_defaults_to_the_repository_directory_name(self) -> None:
+        _, scope = self.repo_scope("release-tools")
+
+        # The scope root is the Git common directory, so the label comes
+        # from its parent -- the repository root -- not from ".git".
+        self.assertEqual(scope.root.name, ".git")
+        self.assertEqual(default_project_label(scope), "release-tools")
+
+        initialize_journal(scope)
+
+        self.assertEqual(self.stored_label(scope), "release-tools")
+        self.assertEqual(project_label(scope), "release-tools")
+
+    def test_user_scope_is_labeled_user(self) -> None:
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state")}):
+            scope = resolve_scope("user")
+
+            # The user journal's directory is named "aiq"; the label is
+            # the scope's meaning, not that directory's name.
+            self.assertEqual(scope.root.name, "aiq")
+            self.assertEqual(default_project_label(scope), "user")
+            initialize_journal(scope)
+            self.assertEqual(project_label(scope), "user")
+
+    def test_agent_root_scope_uses_the_agent_root_directory_name(self) -> None:
+        agent_root = self.root / "orchestrator"
+        agent_root.mkdir()
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state")}):
+            scope = resolve_scope(
+                "agent-root",
+                cwd=self.root,
+                agent_root=agent_root,
+            )
+
+            self.assertEqual(default_project_label(scope), "orchestrator")
+            initialize_journal(scope)
+            self.assertEqual(project_label(scope), "orchestrator")
+
+    def test_linked_worktrees_share_the_primary_repository_label(self) -> None:
+        repository = self.root / "primary"
+        worktree = self.root / "feature-worktree"
+        repository.mkdir()
+        run_git(repository, "init", "-b", "main")
+        run_git(repository, "config", "user.name", "AIQ Test")
+        run_git(repository, "config", "user.email", "aiq@example.invalid")
+        (repository / "tracked").write_text("initial\n")
+        run_git(repository, "add", "tracked")
+        run_git(repository, "commit", "-m", "Initial")
+        run_git(repository, "worktree", "add", "-b", "task", str(worktree), "main")
+
+        primary = resolve_scope("repo", cwd=repository)
+        linked = resolve_scope("repo", cwd=worktree)
+        initialize_journal(primary)
+
+        # Worktrees share the primary journal, so they share its label:
+        # the worktree directory name never leaks into task references.
+        self.assertEqual(project_label(linked), "primary")
+        self.assertEqual(project_label(primary), project_label(linked))
+
+    def test_missing_journal_derives_the_label_without_creating_storage(
+        self,
+    ) -> None:
+        _, scope = self.repo_scope("unwritten")
+
+        self.assertEqual(project_label(scope), "unwritten")
+        self.assertFalse(scope.journal_path.exists())
+
+    def test_explicit_label_is_persisted_and_can_be_changed(self) -> None:
+        _, scope = self.repo_scope()
+
+        initialize_journal(scope, label="Release Train")
+        self.assertEqual(project_label(scope), "Release Train")
+
+        # journal_metadata is a plain mutable table -- deliberately
+        # outside the append-only triggers -- so a journal can be
+        # relabeled in place.
+        initialize_journal(scope, label="aiq")
+        self.assertEqual(project_label(scope), "aiq")
+
+        # A plain re-init keeps the stored label rather than reverting
+        # to the derived default.
+        initialize_journal(scope)
+        self.assertEqual(project_label(scope), "aiq")
+
+    def test_invalid_labels_are_rejected(self) -> None:
+        _, scope = self.repo_scope()
+        rejected = (
+            "",
+            "   ",
+            "two\nlines",
+            "tabbed\tlabel",
+            "carriage\rreturn",
+            "bell\x07",
+            "x" * (PROJECT_LABEL_MAX_LENGTH + 1),
+        )
+
+        for value in rejected:
+            with self.subTest(label=value):
+                with self.assertRaises(JournalError):
+                    validate_project_label(value)
+                with self.assertRaises(JournalError):
+                    initialize_journal(scope, label=value)
+
+        # A rejected label never reaches storage.
+        self.assertFalse(scope.journal_path.exists())
+        self.assertEqual(
+            validate_project_label("x" * PROJECT_LABEL_MAX_LENGTH),
+            "x" * PROJECT_LABEL_MAX_LENGTH,
+        )
+
+    def test_pre_label_journal_is_backfilled_on_first_open(self) -> None:
+        _, scope = self.repo_scope("legacy")
+        initialize_journal(scope)
+
+        # Simulate a journal written before labels existed.
+        connection = sqlite3.connect(scope.journal_path)
+        try:
+            connection.execute(
+                "DELETE FROM journal_metadata WHERE key = 'project_label'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertIsNone(self.stored_label(scope))
+
+        # Any open backfills it: every read path goes through _connect,
+        # which runs the same initialization under the lifecycle lock.
+        self.assertEqual(read_status(scope)["project"], "legacy")
+        self.assertEqual(self.stored_label(scope), "legacy")
+
+    def test_read_status_and_check_report_the_stored_label(self) -> None:
+        _, scope = self.repo_scope()
+        initialize_journal(scope, label="aiq")
+
+        self.assertEqual(read_status(scope)["project"], "aiq")
+        self.assertEqual(check_journal(scope)["project"], "aiq")
+
+    def test_missing_journal_status_reports_the_derived_label(self) -> None:
+        _, scope = self.repo_scope("underived")
+
+        self.assertEqual(read_status(scope)["project"], "underived")
+        self.assertFalse(scope.journal_path.exists())
 
 
 if __name__ == "__main__":

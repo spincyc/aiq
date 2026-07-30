@@ -557,8 +557,9 @@ class IntrospectionCliTests(IntrospectionTestCase):
         )
         self.assertEqual((code, stderr), (0, ""))
         lines = stdout.splitlines()
-        self.assertEqual(len(lines), 1)
-        self.assertTrue(lines[0].endswith("\ttask.created\tr1 queued"))
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], f"[agent: {first}]")
+        self.assertTrue(lines[1].endswith("\ttask.created\tr1 queued"))
 
     def test_claim_list_json_human_and_filters(self) -> None:
         first, _ = self.create_pair()
@@ -578,7 +579,9 @@ class IntrospectionCliTests(IntrospectionTestCase):
         )
         self.assertEqual((code, stderr), (0, ""))
         line = stdout.splitlines()[0]
-        self.assertTrue(line.startswith(f"{claim['claim_id']}\ttask\t{first}"))
+        self.assertTrue(
+            line.startswith(f"{claim['claim_id']}\ttask\t[agent: {first}]")
+        )
         self.assertIn("\tworker\tactive\t", line)
 
         code, stdout, stderr = self.run_cli(
@@ -586,6 +589,86 @@ class IntrospectionCliTests(IntrospectionTestCase):
         )
         self.assertEqual((code, stderr), (0, ""))
         self.assertEqual(json.loads(stdout)["claims"], [])
+
+    def test_human_listings_label_task_references(self) -> None:
+        first, second = self.create_pair()
+
+        code, stdout, stderr = self.run_cli("task", "list")
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(
+            stdout.splitlines(),
+            [
+                f"[agent: {first}]\tready\tr1\t0\tFirst",
+                f"[agent: {second}]\tqueued\tr1\t0\tSecond",
+            ],
+        )
+
+        code, stdout, stderr = self.run_cli("list")
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(
+            stdout.splitlines(),
+            [
+                f"[agent: {first}]\tready\t0\tFirst",
+                f"[agent: {second}]\tqueued\t0\tSecond",
+            ],
+        )
+
+        code, stdout, stderr = self.run_cli("task", "show", first)
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(stdout.splitlines()[0], f"[agent: {first}]")
+
+    def test_json_listings_keep_task_ids_bare(self) -> None:
+        first, _ = self.create_pair()
+
+        for command in (("task", "list"), ("list",)):
+            with self.subTest(command=command):
+                code, stdout, stderr = self.run_cli(*command, "--json")
+                self.assertEqual((code, stderr), (0, ""))
+                identifiers = [
+                    task["task_id"] for task in json.loads(stdout)["tasks"]
+                ]
+                self.assertIn(first, identifiers)
+                self.assertNotIn("[agent:", stdout)
+
+    def test_journal_init_label_overrides_the_rendered_project(self) -> None:
+        first, _ = self.create_pair()
+
+        code, stdout, stderr = self.run_cli(
+            "journal", "init", "--label", "Release Train", "--json"
+        )
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(json.loads(stdout)["project"], "Release Train")
+
+        code, stdout, stderr = self.run_cli("task", "list")
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(
+            stdout.splitlines()[0],
+            f"[Release Train: {first}]\tready\tr1\t0\tFirst",
+        )
+
+        code, stdout, stderr = self.run_cli("status")
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn(f"ready     [Release Train: {first}]", stdout)
+
+    def test_journal_init_rejects_an_invalid_label(self) -> None:
+        self.create_pair()
+
+        code, stdout, stderr = self.run_cli(
+            "journal", "init", "--label", "two\nlines", "--json"
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        payload = json.loads(stderr)
+        self.assertEqual(
+            (payload["v"], payload["status"], payload["code"]),
+            (1, "error", "invalid_argument"),
+        )
+        self.assertIn("project label", payload["error"])
+
+        # The rejected label never displaced the derived default.
+        code, stdout, stderr = self.run_cli("journal", "path", "--json")
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(json.loads(stdout)["project"], "agent")
 
     def test_errors_use_protocol_envelope(self) -> None:
         self.create_pair()
