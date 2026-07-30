@@ -53,11 +53,17 @@
     <h2>Install</h2>
     <p>Python 3.11–3.14 on Linux or macOS; runtime dependencies come from the
     standard library alone.</p>
-<pre><code>pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'
+<pre><code>pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@TAG'
 aiq --version</code></pre>
+    <p>Replace <code>TAG</code> with the current
+    <a href="https://github.com/spincyc/aiq/releases">release tag</a>. The
+    <a href="https://github.com/spincyc/aiq#install">README</a> names it, along
+    with the plain-venv install and the <code>@main</code> development channel,
+    which carries unreleased work and changes without notice.</p>
     <p>aiq never updates itself. Refresh explicitly with
-    <code>pipx install --force</code>, then run <code>aiq reconcile --user</code>
-    to confirm hooks and journal state still match the installation.</p>
+    <code>pipx install --force</code> naming the new tag, then run
+    <code>aiq reconcile --user</code> to confirm hooks and journal state still
+    match the installation.</p>
   </section>
 
   <section class="wrap">

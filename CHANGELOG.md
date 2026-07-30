@@ -151,6 +151,14 @@ effects documents, capability contracts, and integration manifests.
   `_SOURCE_VERSION`, the newest `CHANGELOG.md` version section, and the tag
   being cut do not all name one version, or when the changelog's section,
   heading, and link-reference structure is malformed.
+- The committed project site no longer contradicts that guidance. Its install
+  section names no channel at all — the command carries a `TAG` placeholder and
+  points at the releases page and the README, so it cannot go stale at the next
+  cut — and the refresh note says the new tag must be named. The origin-story
+  blog post keeps the `@main` command it was published with, since rewriting a
+  dated artifact's commands falsifies it, and gains a dated note recording that
+  a pinned tag is now recommended and that hook capture became opt-in per
+  repository.
 
 ### Fixed
 

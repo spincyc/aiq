@@ -166,6 +166,14 @@
     precisely so agents can depend on them while everything else improves.</p>
 
     <h2>Try it</h2>
+    <p><em>Note added 2026-07-30:</em> this post describes aiq as it stood on
+    the day it was published, and the commands below are the ones it shipped
+    with. Since then the recommended install is a pinned release tag —
+    <code>@main</code> is the development channel, which changes without
+    notice — and hook capture became opt-in per repository, which the
+    <code>journal init --scope repo</code> below already does. The
+    <a href="https://github.com/spincyc/aiq#install">README</a> has the
+    current install.</p>
 <pre><code>pipx install 'aiq-workqueue @ git+https://github.com/spincyc/aiq.git@main'
 aiq journal init --scope repo
 aiq ingest --message "Queue this work"</code></pre>
