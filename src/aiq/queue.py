@@ -1203,6 +1203,7 @@ def read_status(
                 "task_id": task["task_id"],
                 "priority": task["priority"],
                 "title": task["title"],
+                "created_at": task["created_at"],
             }
             for task in ready[:ready_limit]
         ]

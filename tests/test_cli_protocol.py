@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
@@ -220,8 +221,11 @@ class CliProtocolTests(unittest.TestCase):
         self.assertEqual(status["tasks"]["ready"], 1)
         self.assertEqual(status["claims"]["active"], 0)
         self.assertEqual(len(status["ready"]), 1)
+        ready_entry = dict(status["ready"][0])
+        created_at = ready_entry.pop("created_at")
+        datetime.fromisoformat(created_at)
         self.assertEqual(
-            status["ready"][0],
+            ready_entry,
             {"task_id": task_id, "priority": 7, "title": "Protocol task"},
         )
         next_result = self.ok(

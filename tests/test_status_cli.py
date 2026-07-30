@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import json
 from pathlib import Path
 import tempfile
@@ -106,9 +107,12 @@ class StatusCliTest(unittest.TestCase):
         )
         self.assertEqual(payload["tasks"]["ready"], 1)
         self.assertEqual(payload["claims"], {"active": 0})
+        (entry,) = payload["ready"]
+        created_at = entry.pop("created_at")
+        datetime.fromisoformat(created_at)
         self.assertEqual(
-            payload["ready"],
-            [{"task_id": task_id, "priority": 3, "title": "Status task"}],
+            entry,
+            {"task_id": task_id, "priority": 3, "title": "Status task"},
         )
 
     def test_human_status_is_terse_and_content_free(self) -> None:

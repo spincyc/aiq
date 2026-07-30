@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -1667,9 +1668,12 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(status["tasks"]["ready"], 1)
         self.assertEqual(status["tasks"]["queued"], 1)
         self.assertEqual(status["claims"], {"active": 1})
+        (ready_entry,) = status["ready"]
+        created_at = ready_entry.pop("created_at")
+        datetime.fromisoformat(created_at)
         self.assertEqual(
-            status["ready"],
-            [{"task_id": ready_id, "priority": 5, "title": "Ready work"}],
+            ready_entry,
+            {"task_id": ready_id, "priority": 5, "title": "Ready work"},
         )
 
         claimed = claim_next_tasks(self.scope, owner_id="status-test")

@@ -572,16 +572,23 @@ class IntegrationCliTests(unittest.TestCase):
             ),
         )
         self.assertEqual(captured.returncode, 0, captured.stderr)
+        enqueued = self.run_aiq("enqueue", "Settle me", "--json")
+        self.assertEqual(enqueued.returncode, 0, enqueued.stderr)
+        task_id = json.loads(enqueued.stdout)["task_id"]
 
-        # The unapplied message blocks stopping with one stderr line.
+        # The ready task and unapplied message block stopping with one
+        # actionable stderr line naming the task and the settle command.
         blocked = self.receive_stop(stop_payload)
         self.assertEqual(blocked.returncode, 2)
         self.assertEqual(blocked.stdout, "")
         lines = blocked.stderr.splitlines()
         self.assertEqual(len(lines), 1)
         self.assertIn("AIQ: runnable work remains:", lines[0])
+        self.assertIn("1 ready task", lines[0])
         self.assertIn("1 unapplied message", lines[0])
-        self.assertIn("run aiq status", lines[0])
+        self.assertIn(f'{task_id} "Settle me"', lines[0])
+        self.assertIn(f"aiq task done {task_id} --summary TEXT", lines[0])
+        self.assertIn("aiq status", lines[0])
 
         # The host's loop guard allows the next stop attempt.
         guarded = self.receive_stop(

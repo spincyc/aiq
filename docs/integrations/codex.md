@@ -70,10 +70,16 @@ is about to finish a turn, the hook resolves the AIQ scope from the event's
 absolute `cwd` and takes one read-only journal snapshot. If ready tasks,
 unexpired active claims, or unapplied (`received`) messages remain, it exits
 2 with a single stderr line such as
-`AIQ: runnable work remains: 2 ready tasks, 1 active claim — run aiq status`.
-A parked `needs_input` message awaits the user, not the agent, and never
-blocks stopping. Codex feeds that line back to the model and continues the
-turn, so the model can run the remaining work before declaring completion.
+`AIQ: runnable work remains: 1 ready task, 1 active claim: TASK-7 "Ship the
+release notes" (ready 2h) — settle finished work: aiq task done TASK-7
+--summary TEXT — or: aiq status`.
+After the counts, the line names up to the first three ready tasks — task ID,
+double-quoted title truncated to 40 characters, and a coarse ready-age — and
+ends with the settle command; with claims or messages only, it keeps the
+`— run aiq status` tail. A parked `needs_input` message awaits the user, not
+the agent, and never blocks stopping. Codex feeds that line back to the model
+and continues the turn, so the model can run the remaining work before
+declaring completion.
 
 The gate honors the host loop guard: when the `Stop` payload carries a truthy
 `stop_hook_active` — Codex sets it while a turn was already continued by a

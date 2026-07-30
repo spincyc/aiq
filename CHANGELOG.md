@@ -62,6 +62,13 @@ effects documents, capability contracts, and integration manifests.
 
 ### Changed
 
+- The `Stop` completion gate's block line is now actionable: after the
+  counts it names up to the first three ready tasks — task ID,
+  double-quoted title truncated to 40 characters, and a coarse ready-age
+  such as `(ready 5m)` — and ends with the settle command
+  `aiq task done TASK --summary TEXT`; with claims or messages only, it
+  keeps the `— run aiq status` tail. `status --json` ready entries
+  additionally carry `created_at`.
 - Repo-scope hook capture is now opt-in by journal presence: a
   `UserPromptSubmit` event in a Git repository without an initialized repo
   journal exits 0 silently with a distinct

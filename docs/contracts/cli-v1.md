@@ -318,7 +318,7 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 | `messages` | Message counts keyed by `received`, `processing`, `applied`, `needs_input`, and `failed` |
 | `tasks` | Effective task-state counts keyed by every task state |
 | `claims` | `active`: unreleased, unexpired message and task leases |
-| `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, and `title` |
+| `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, `title`, and `created_at` |
 | `scope` | The resolved [Scope](#scope) object |
 
 A processing message whose lease has expired counts as `received`. Message and
@@ -565,9 +565,15 @@ The `Stop` completion gate enforces the AGENTS.md practice that no required
 runnable work may remain at completion. It performs one read-only journal
 snapshot — a missing journal counts as nothing runnable and creates no
 storage — and blocks with exit 2 and exactly one stderr line, for example
-`AIQ: runnable work remains: 2 ready tasks, 1 active claim — run aiq status`,
+`AIQ: runnable work remains: 1 ready task, 1 active claim: TASK-7 "Ship the
+release notes" (ready 2h) — settle finished work: aiq task done TASK-7
+--summary TEXT — or: aiq status`,
 when ready tasks, unexpired active claims, or unapplied (`received`)
-messages remain and the payload's `stop_hook_active` loop guard is falsy. A
+messages remain and the payload's `stop_hook_active` loop guard is falsy.
+After the counts, the line names up to the first three ready tasks — task
+ID, double-quoted title truncated to 40 characters, and a coarse ready-age
+such as `(ready 5m)` — and ends with the settle command; with claims or
+messages only, it keeps the `— run aiq status` tail. A
 parked `needs_input` message awaits the user, not the agent, and never
 counts as runnable work. Both hosts feed that stderr line back to the model
 and continue the turn. When the loop guard is set, or nothing is runnable, the

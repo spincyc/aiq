@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -845,10 +846,27 @@ class CodexIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
             status = {
                 "messages": {"received": 0, "needs_input": 0},
                 "tasks": {"ready": 2},
                 "claims": {"active": 1},
+                "ready": [
+                    {
+                        "task_id": "TASK-7",
+                        "priority": 5,
+                        "title": "Ship the release notes",
+                        "created_at": two_hours_ago.isoformat(),
+                    },
+                    {
+                        "task_id": "TASK-9",
+                        "priority": 3,
+                        # Over the 40-character budget; the age is
+                        # omitted because created_at is unparseable.
+                        "title": "x" * 50,
+                        "created_at": "not-a-timestamp",
+                    },
+                ],
             }
 
             with patch("aiq.queue.read_status", return_value=status):
@@ -863,11 +881,64 @@ class CodexIntegrationTest(unittest.TestCase):
                     git_executable=self.git_executable(),
                 )
 
+            truncated = "x" * 39 + "…"
             self.assertEqual(
                 reason,
-                "AIQ: runnable work remains: 2 ready tasks, 1 active claim "
-                "— run aiq status",
+                "AIQ: runnable work remains: 2 ready tasks, 1 active claim: "
+                'TASK-7 "Ship the release notes" (ready 2h); '
+                f'TASK-9 "{truncated}" '
+                "— settle finished work: aiq task done TASK-7 "
+                "--summary TEXT — or: aiq status",
             )
+
+    def test_stop_gate_escapes_and_truncates_hostile_titles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = support.init_repository(root / "repository")
+            status = {
+                "messages": {"received": 0, "needs_input": 0},
+                "tasks": {"ready": 1},
+                "claims": {"active": 0},
+                "ready": [
+                    {
+                        "task_id": "TASK-3",
+                        "priority": 0,
+                        "title": (
+                            "line one\nline two\t"
+                            "tabbed tail that keeps going past forty"
+                        ),
+                    }
+                ],
+            }
+            errors = io.StringIO()
+
+            with patch("aiq.queue.read_status", return_value=status):
+                blocked = receive_hook_main(
+                    input_stream=io.BytesIO(
+                        json.dumps(
+                            {
+                                "hook_event_name": "Stop",
+                                "session_id": "session",
+                                "cwd": str(repository),
+                            }
+                        ).encode()
+                    ),
+                    error_stream=errors,
+                    git_executable=self.git_executable(),
+                )
+
+            self.assertEqual(blocked, 2)
+            lines = errors.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            # The title is truncated to 40 characters first, then the
+            # stderr boundary escapes the embedded newline and tab.
+            self.assertIn(
+                'TASK-3 "line one\\u000aline two\\u0009'
+                'tabbed tail that keep…"',
+                lines[0],
+            )
+            self.assertNotIn("\t", lines[0])
+            self.assertIn("aiq task done TASK-3 --summary TEXT", lines[0])
 
     def test_stop_gate_ignores_parked_needs_input_messages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

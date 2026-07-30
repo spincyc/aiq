@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -1706,6 +1707,34 @@ def _count_noun(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
+def _truncated_title(title: str, limit: int = 40) -> str:
+    if len(title) <= limit:
+        return title
+    return title[: limit - 1] + "…"
+
+
+def _coarse_age(created_at_iso: Any, now: datetime) -> str | None:
+    """Coarse age such as ``5m``, ``2h``, or ``3d``, or ``None``.
+
+    ``created_at_iso`` is an ISO-8601 UTC timestamp; anything unparseable
+    returns ``None`` so the caller omits the age fragment instead of
+    raising — the gate fails open, never loudly.
+    """
+
+    try:
+        created = datetime.fromisoformat(created_at_iso)
+    except (TypeError, ValueError):
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((now - created).total_seconds()))
+    if seconds < 3_600:
+        return f"{seconds // 60}m"
+    if seconds < 86_400:
+        return f"{seconds // 3_600}h"
+    return f"{seconds // 86_400}d"
+
+
 def gate_stop_hook(
     spec: HookIntegrationSpec,
     payload: str | bytes,
@@ -1720,7 +1749,11 @@ def gate_stop_hook(
     the scope resolved from the payload working directory, or ``None``
     when stopping is allowed: the host's ``stop_hook_active`` loop guard
     is set, or no ready task, unexpired active claim, or unapplied
-    ``received`` message remains. A parked ``needs_input`` message is
+    ``received`` message remains. When ready tasks exist, the reason
+    appends up to the first three — task ID, double-quoted title
+    truncated to 40 characters, and a coarse ready-age — and ends with
+    the exact settle command, so a model blocked once per stop chain can
+    act without another lookup. A parked ``needs_input`` message is
     not runnable work — it awaits the user, not the agent — so it never
     blocks stopping. The check is one read-only snapshot; a missing
     journal counts as nothing runnable and never creates storage. Errors
@@ -1798,6 +1831,35 @@ def gate_stop_hook(
         parts.append(_count_noun(active_claims, "active claim"))
     if unapplied_messages:
         parts.append(_count_noun(unapplied_messages, "unapplied message"))
+    summary = ", ".join(parts)
+    # Make the single block line actionable: name up to the first three
+    # ready tasks and the exact settle command, so a model blocked once
+    # per stop chain can act without another lookup. Tolerate patched or
+    # older status shapes without a ready list (fail-open posture).
+    ready_entries = status.get("ready") or []
+    if not isinstance(ready_entries, list):
+        ready_entries = []
+    now = datetime.now(timezone.utc)
+    fragments = []
+    first_ready_id = ""
+    for entry in ready_entries[:3]:
+        if not isinstance(entry, dict):
+            continue
+        task_id = str(entry.get("task_id") or "")
+        if not task_id:
+            continue
+        first_ready_id = first_ready_id or task_id
+        title = _truncated_title(str(entry.get("title") or ""))
+        fragment = f'{task_id} "{title}"'
+        age = _coarse_age(entry.get("created_at"), now)
+        if age is not None:
+            fragment += f" (ready {age})"
+        fragments.append(fragment)
+    if not fragments:
+        return f"AIQ: runnable work remains: {summary} — run aiq status"
     return (
-        f"AIQ: runnable work remains: {', '.join(parts)} — run aiq status"
+        f"AIQ: runnable work remains: {summary}: "
+        + "; ".join(fragments)
+        + f" — settle finished work: aiq task done {first_ready_id} "
+        "--summary TEXT — or: aiq status"
     )

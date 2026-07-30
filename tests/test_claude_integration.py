@@ -24,6 +24,7 @@ from aiq.integrations.claude import (
     uninstall_integration,
 )
 from aiq.journal import JournalError, check_journal, resolve_scope
+from aiq.queue import enqueue_task
 
 
 class ClaudeIntegrationTest(unittest.TestCase):
@@ -622,6 +623,11 @@ class ClaudeIntegrationTest(unittest.TestCase):
                 ),
                 git_executable=self.git_executable(),
             )
+            task = enqueue_task(
+                resolve_scope("repo", cwd=repository),
+                title="Settle me",
+                owner_id="gate-test",
+            )
             stop_payload = {
                 "hook_event_name": "Stop",
                 "session_id": "session",
@@ -650,8 +656,14 @@ class ClaudeIntegrationTest(unittest.TestCase):
             lines = blocked_errors.getvalue().splitlines()
             self.assertEqual(len(lines), 1)
             self.assertIn("AIQ: runnable work remains:", lines[0])
+            self.assertIn("1 ready task", lines[0])
             self.assertIn("1 unapplied message", lines[0])
-            self.assertIn("run aiq status", lines[0])
+            task_id = task["task_id"]
+            self.assertIn(f'{task_id} "Settle me"', lines[0])
+            self.assertIn(
+                f"aiq task done {task_id} --summary TEXT", lines[0]
+            )
+            self.assertIn("aiq status", lines[0])
             self.assertEqual(guarded, 0)
             self.assertEqual(guarded_errors.getvalue(), "")
 
