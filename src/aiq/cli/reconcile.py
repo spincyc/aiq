@@ -135,14 +135,20 @@ def _reconcile_journal(arguments: argparse.Namespace) -> dict[str, Any]:
             }
         result = check_journal(scope)
     except JournalError as error:
-        message = str(error)
+        # The code decides, and only the code. A missing journal is
+        # nothing to reconcile, so it is skipped rather than failed --
+        # and every raise site that reports one already pins
+        # `not_found`. Reading the wording as a second opinion would
+        # reintroduce, on a status this command reports, exactly the
+        # classifier that `docs/contracts/errors.md` says does not
+        # exist: a rewording could silently move a finding between
+        # `skipped` and `failed`.
         status = (
             "skipped"
             if getattr(error, "code", None) == "not_found"
-            or "does not exist" in message
             else "failed"
         )
-        return {"status": status, "reason": message}
+        return {"status": status, "reason": str(error)}
     except (OSError, sqlite3.Error) as error:
         return {"status": "failed", "reason": str(error)}
     return {"status": result["status"], "reason": None, "scope": result["scope"]}

@@ -174,6 +174,16 @@ is never your session's problem to settle.
 > session; see [Session identity](configuration.md#session-identity). Without
 > it, `aiq reader release` reports `not_held` rather than a success, the gate
 > blocks, and the agent is handed the remaining tasks.
+>
+> **Do not set `AIQ_READER` for a bounded run.** An explicitly configured
+> reader identity may name a whole group of workers, so the lease records no
+> session at all and the release cannot be proved to be this session's. That
+> release *succeeds* — the role really does come back — but it records no
+> completion signal, so the gate goes on blocking. It is the one failure here
+> that does not announce itself as a failure, so `aiq reader release` prints a
+> line saying no signal was written and reports `declared false`. See [Reader
+> identity and session
+> identity](configuration.md#reader-identity-and-session-identity).
 
 ### 2. A fixed batch
 

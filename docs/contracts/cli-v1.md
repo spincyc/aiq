@@ -211,7 +211,11 @@ what the lease recorded:
   presenting that configured identity, the only evidence that exists for it.
   Treat such an identity as shared authority over the role: anyone configured
   with it holds it. Consistently, such a release records no declaration either
-  — `released_by_self` is false for it, as it always has been.
+  — `released_by_self` is false for it, as it always has been. Because that
+  release still *succeeds*, `declared` below is what tells the two apart, and
+  the command prints one stderr line saying the role came back but no
+  completion signal was written. **A configured `reader` therefore cannot end
+  a bounded run**; see [`configuration.md`](../configuration.md#reader-identity-and-session-identity).
 
 `reader release` never fails on state, and says which of four things it did:
 
@@ -222,13 +226,26 @@ what the lease recorded:
 | `forced` | `--force` broke a live lease the caller could not prove holding. The role is free and the holder locator is cleared, so the row records no declaration for anybody — not for the breaker, who never held it, and not for the former holder, who never gave it up |
 | `not_held` | Nothing of the caller's was there to release — no lease, one belonging to a session the caller cannot prove itself to be, an abandoned lease whose holder is provably gone, or the caller's own lease already lapsed. Nothing was recorded |
 
-`released` (boolean) is true only in the first case: it means this caller's own
-declaration was recorded, which a forced break explicitly is not. `replayed`
-answers the narrower question of whether the call changed anything, so it is
-false for `forced` too. All four exit 0, because release is a total, replayable
-declaration; `not_held` additionally prints one stderr line naming the identity
-that was tried, since a caller waiting for a recorded signal has to know none
-was written, and `forced` prints one naming the lease it broke.
+`released` (boolean) is true only in the first case: it means the lease moved
+to released here, which a forced break explicitly is not. `replayed` answers
+the narrower question of whether the call changed anything, so it is false for
+`forced` too.
+
+`declared` (boolean) answers the question a bounded run actually has: will a
+completion gate read this call as *this session* saying it is done? It is true
+exactly when `status` is `released` or `already_released` **and** the lease was
+proved by its holder locator — which is the same condition
+[`reader.released_by_self`](#status) reports, so the two never disagree. It is
+false for `forced`, for `not_held`, and for a successful release under an
+explicitly configured `reader` identity, which stores no locator. Read
+`declared`, not `released`, to decide whether a stop signal was recorded.
+
+All four statuses exit 0, because release is a total, replayable declaration.
+Three of them print one stderr line: `not_held` names the identity that was
+tried, since a caller waiting for a recorded signal has to know none was
+written; `forced` names the lease it broke; and a `released` or
+`already_released` with `declared` false says that the role came back but no
+completion signal was recorded, and names the configured identity responsible.
 
 A live lease the caller can neither prove holding nor show to be abandoned is
 refused with `reader_held` and exit 4 unless `--force` is passed.
@@ -293,7 +310,7 @@ The tables list fields in addition to top-level `v`.
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `reader status --json` | `reader` containing the [Reader lease](#reader-lease) object, `scope` |
 | `reader acquire --json` | `status: "acquired"`, `acquired`, `reader` |
-| `reader release --json` | `status`: `"released"`, `"already_released"`, `"forced"`, or `"not_held"`; `released`, `replayed`, `claims_held`, `reader` |
+| `reader release --json` | `status`: `"released"`, `"already_released"`, `"forced"`, or `"not_held"`; `released`, `declared`, `replayed`, `claims_held`, `reader` |
 | `status --json` | `messages`, `tasks`, `project`, `claims`, `reader`, `ready`, `blocked`, `scope` |
 | `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 from datetime import datetime
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +21,7 @@ from aiq.cli import (
     _classify_journal_error,
     _versioned,
     build_parser,
+    main,
 )
 from aiq.cli._errors import _JOURNAL_ERROR_CODE_EXITS
 from aiq.integrations import _hooks
@@ -378,10 +381,21 @@ class CliProtocolTests(unittest.TestCase):
         released = self.ok("reader", "release", *self.scope)
         self.assertEqual(
             set(released),
-            {"claims_held", "reader", "released", "replayed", "status", "v"},
+            {
+                "claims_held",
+                "declared",
+                "reader",
+                "released",
+                "replayed",
+                "status",
+                "v",
+            },
         )
         self.assertEqual(released["status"], "released")
         self.assertTrue(released["released"])
+        # A derived reader identity records a holder locator, so this
+        # release is provably this session's and is a completion signal.
+        self.assertTrue(released["declared"])
         self.assertFalse(released["replayed"])
         # Nothing of this session's is still claimed, so release is silent
         # on stderr; `self.ok` already asserted that.
@@ -778,8 +792,41 @@ class JournalErrorCodeIdentityTests(unittest.TestCase):
         code: str,
         exit_code: int,
     ) -> None:
+        """Pin one real error's code *and* what the CLI does with it.
+
+        The second half deliberately does not call
+        ``_classify_journal_error``. That function reads nothing but
+        ``.code``, which the first assertion has already pinned, so
+        asserting on it restates the module-level table and the two
+        literals the caller typed and says nothing about ``error`` at
+        all. Instead this raises the very error out of :func:`main`, so
+        the assertion covers the whole path an operator meets: that
+        ``main`` catches this class, that ``_classify_error`` reaches the
+        code arm before any class-based rule, and that the emitted
+        envelope and the process exit status agree with the documented
+        pair.
+        """
+
         self.assertEqual(error.code, code, str(error))
-        self.assertEqual(_classify_journal_error(error), (code, exit_code))
+        self.assertEqual(
+            self.classify_through_cli(error), (code, exit_code), str(error)
+        )
+
+    def classify_through_cli(self, error: Exception) -> tuple[str, int]:
+        """Return the ``(code, exit)`` the CLI reports for ``error``.
+
+        ``_prepare_config`` runs inside ``main``'s own ``try``, so making
+        it raise drives the real top-level handler without depending on
+        any particular subcommand.
+        """
+
+        errors = io.StringIO()
+        with patch("aiq.cli._prepare_config", side_effect=error):
+            with contextlib.redirect_stderr(errors):
+                status = main(["status", "--json"])
+        envelope = json.loads(errors.getvalue())
+        self.assertEqual(envelope["status"], "error")
+        return envelope["code"], status
 
     def claimed_message(self, content: str, **kwargs: object) -> tuple[str, str]:
         message = ingest_message(self.scope, content, cwd=str(self.root))

@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 from aiq import queue as queue_module
+from aiq.cli._errors import _JOURNAL_ERROR_CODE_EXITS
 from aiq.journal import (
     JournalError,
     check_journal,
@@ -421,6 +422,39 @@ class QueueTest(unittest.TestCase):
             parse_effect_document(
                 '{"v":1,"expect":{},"effects":[[["not-a-string"]]]}'
             )
+
+    def test_every_parse_failure_is_a_permanent_document_error(self) -> None:
+        """No way of malforming an effects document invites a retry.
+
+        A truncated file is the case that matters: it once raised
+        `state_conflict`, which exits 4 and reads as a recoverable
+        conflict, so a caller following the documented retry advice
+        would retry a file that can never parse. Every failure reachable
+        from the parser is `invalid_document` at exit 2 -- permanent,
+        and the caller's to fix.
+        """
+
+        documents = {
+            "truncated mid-object": '{"v":1,"expect":{},"effects":[',
+            "truncated mid-string": '{"v":1,"expect":{},"effects":[["cre',
+            "empty": "",
+            "not an object": "[1, 2, 3]",
+            "not UTF-8": b"\xff\xfe".decode("latin-1"),
+            "duplicate key": '{"v":1,"v":1,"expect":{},"effects":[]}',
+            "bad expect key": '{"v":1,"expect":{"nope":1},"effects":[]}',
+        }
+        for label, raw in documents.items():
+            with self.subTest(document=label):
+                with self.assertRaises(JournalError) as raised:
+                    parse_effect_document(raw)
+                self.assertEqual(
+                    raised.exception.code,
+                    "invalid_document",
+                    str(raised.exception),
+                )
+                self.assertEqual(
+                    _JOURNAL_ERROR_CODE_EXITS[raised.exception.code][1], 2
+                )
 
     def test_unknown_alias_reference_is_a_journal_error(self) -> None:
         message = self.ingest("Create referenced work")

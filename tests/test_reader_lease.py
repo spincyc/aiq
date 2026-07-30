@@ -825,6 +825,82 @@ class ReaderLeaseTest(unittest.TestCase):
             ]
         )
 
+    def test_a_configured_readers_release_succeeds_but_declares_nothing(
+        self,
+    ) -> None:
+        """The one success that is not a completion signal.
+
+        A configured `--reader` or `AIQ_READER` may name a whole group
+        of workers, so its lease records no session locator and no later
+        caller can be proved to be the session that took it. Releasing
+        on the identity alone therefore hands the role back -- `status`
+        is `released` and `released` is true -- while recording nothing
+        a completion gate will read. `declared` is what tells the two
+        apart, so a bounded run cannot mistake the first for the second
+        and wait forever on a signal that was never written.
+        """
+        configured = "shared-fanout"
+        self.assertNotEqual(configured, _default_reader())
+        acquire_reader_lease(
+            self.scope,
+            owner_id="fanout-owner",
+            reader_id=configured,
+        )
+
+        released = release_reader_lease(self.scope, reader_id=configured)
+
+        self.assertEqual(released["status"], "released")
+        self.assertTrue(released["released"])
+        self.assertFalse(released["declared"])
+        # And the gate agrees: nothing here says this session is done.
+        self.assertFalse(
+            read_status(self.scope, reader_id=configured)["reader"][
+                "released_by_self"
+            ]
+        )
+
+    def test_a_derived_readers_release_declares_and_says_so(self) -> None:
+        """The mirror: proof of holding makes `declared` true.
+
+        Pinned beside the case above so `declared` cannot be made
+        constant in either direction without a failure here.
+        """
+        reader_id = support.hold_reader_lease_with_locator(
+            self.scope,
+            host=socket.gethostname(),
+            session=os.getsid(0),
+        )
+
+        released = release_reader_lease(self.scope, reader_id=reader_id)
+        replayed = release_reader_lease(self.scope, reader_id=reader_id)
+
+        self.assertTrue(released["declared"])
+        # A replay restates a declaration that still stands.
+        self.assertEqual(replayed["status"], "already_released")
+        self.assertTrue(replayed["declared"])
+        self.assertTrue(
+            read_status(self.scope, reader_id=reader_id)["reader"][
+                "released_by_self"
+            ]
+        )
+
+    def test_a_forced_break_declares_nothing_for_anybody(self) -> None:
+        reader_id = support.hold_reader_lease_with_locator(
+            self.scope,
+            host="other-host",
+            session=os.getsid(0),
+        )
+
+        forced = release_reader_lease(
+            self.scope,
+            reader_id=reader_id,
+            force=True,
+        )
+
+        self.assertEqual(forced["status"], "forced")
+        self.assertFalse(forced["released"])
+        self.assertFalse(forced["declared"])
+
     # 13. Whose claims are these? Releasing the role settles nothing, so
     # the gate needs a claim count it can hold *this* session to.
 

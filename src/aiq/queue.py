@@ -271,9 +271,14 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
         )
     for task_id, revision in document["expect"].items():
         if not TASK_ID_PATTERN.fullmatch(task_id):
+            # A field of the submitted document, not a CLI scalar, so
+            # this is `invalid_document` like every other shape failure
+            # around it. Both codes exit 2, so nothing an operator sees
+            # changes; what changes is that the code now names what
+            # actually failed.
             raise JournalError(
                 f"document.expect has invalid task ID: {task_id}",
-                code="invalid_argument",
+                code="invalid_document",
             )
         _integer(
             revision,
@@ -604,10 +609,24 @@ def _locator_is_this_session(
       consulted. A token is what the host itself calls the session, so it
       is authoritative and it is comparable across however many processes
       the host spawns.
-    * Otherwise the POSIX pair decides -- this host, this process's own
-      session id -- which is a faithful session identity in a terminal,
+    * When the holder recorded a token and this caller has none, the
+      answer is false and the POSIX pair is *not* consulted. A recorded
+      token means the holder belongs to a host that keeps its own
+      sessions, so the process whose session id was stored alongside it
+      has very likely exited already -- exactly why
+      :func:`_reader_holder_is_dead` refuses to probe such a holder. A
+      session id is only a number, and the kernel reissues it; matching
+      one is therefore no evidence at all about a session the host
+      names some other way. Without this arm a caller that could produce
+      no token would inherit a token-identified session's lease on a
+      bare number, and could release it -- putting a declaration of "I
+      am done" into a stranger's mouth, which is the whole thing the
+      proof rule exists to stop.
+    * Otherwise -- neither side carrying a token, or only this caller
+      carrying one -- the POSIX pair decides: this host, this process's
+      own session id. That is a faithful session identity in a terminal,
       where one session spans every command and every hook run as its
-      child.
+      child, and it is what leases recorded before schema 6 carry.
 
     Missing evidence on either side of the fallback answers false. No
     liveness probe is needed for a match: this process is the running
@@ -615,8 +634,8 @@ def _locator_is_this_session(
     """
 
     host, posix_session, recorded_token = _recorded_locator(row)
-    if token is not None and recorded_token is not None:
-        return recorded_token == token
+    if recorded_token is not None:
+        return recorded_token == token if token is not None else False
     if host is None or posix_session is None:
         return False
     locator = _reader_locator()
@@ -683,6 +702,13 @@ def _reader_holder_is_foreign_live(
       liveness evidence available for a token, which names no OS object
       to signal, and it is bounded -- an abandoned lease stops being
       renewed and stands nothing down once it lapses.
+    * A holder that recorded a token while this caller has none is not
+      provably foreign, and the POSIX pair is *not* consulted for it,
+      for the reason :func:`_locator_is_this_session` gives: the stored
+      session id belongs to a process the host has very likely already
+      reaped, and a reissued number is no evidence about a session the
+      host names some other way. Probing it would let a recycled session
+      id stand a gate down on behalf of nobody.
     * Otherwise the POSIX pair must name this host, a session id that is
       not this process's own, and one the kernel says still exists.
 
@@ -694,8 +720,8 @@ def _reader_holder_is_foreign_live(
     """
 
     host, posix_session, recorded_token = _recorded_locator(row)
-    if token is not None and recorded_token is not None:
-        return recorded_token != token
+    if recorded_token is not None:
+        return recorded_token != token if token is not None else False
     if host is None or posix_session is None:
         return False
     locator = _reader_locator()
@@ -804,6 +830,13 @@ def _count_active_claims_this_session(
     claim unenforced, the gate still names it in the block or notice
     line, and it self-heals as soon as that claim expires or is re-taken.
 
+    A claim that recorded a token while this caller has none is one such
+    unattributable claim, and the POSIX pair is deliberately not consulted
+    for it: as in :func:`_locator_is_this_session`, the session id stored
+    beside a token names a process the host has very likely reaped, so
+    matching a reissued number would attribute a stranger's claim to this
+    session.
+
     The SQL mirrors :func:`_locator_is_this_session` exactly; the two
     must be changed together.
     """
@@ -818,8 +851,8 @@ def _count_active_claims_this_session(
         WHERE release.claim_id IS NULL
           AND claim.expires_at_us > ?
           AND CASE
-            WHEN ? IS NOT NULL AND claim.holder_session IS NOT NULL
-              THEN claim.holder_session = ?
+            WHEN claim.holder_session IS NOT NULL
+              THEN ? IS NOT NULL AND claim.holder_session = ?
             ELSE claim.holder_host IS NOT NULL
               AND claim.holder_host = ?
               AND claim.holder_sid = ?
@@ -1235,10 +1268,21 @@ def release_reader_lease(
         nothing will read as a declaration, so a caller relying on
         release as a completion signal has to know.
 
-    ``released`` (boolean) is true only in the first case: it means this
-    caller's own declaration was recorded, which a forced break is
-    explicitly not. ``replayed`` stays for callers that only ask "did
-    this call change anything", so it is false for a force too.
+    ``released`` (boolean) is true only in the first case: it means the
+    lease moved to released here, which a forced break is explicitly not.
+    ``replayed`` stays for callers that only ask "did this call change
+    anything", so it is false for a force too.
+
+    ``declared`` answers the question a bounded run actually has -- will
+    a completion gate read this as *this session* saying it is done? --
+    which ``released`` does not. Only proof of session holding records
+    such a declaration, so a release under an explicitly configured
+    ``--reader`` or ``AIQ_READER`` identity, which stores no locator and
+    is released on the identity string alone, succeeds with ``released``
+    true and ``declared`` false. It is the in-band form of the stderr
+    line the CLI prints for that case, and it tracks ``released_by_self``
+    exactly: true for a ``released`` or ``already_released`` outcome
+    proved by the holder locator, false for everything else.
 
     ``claims_held`` counts the caller's own live claims at the instant of
     release, so the caller learns immediately that giving the role back
@@ -1259,11 +1303,16 @@ def release_reader_lease(
         connection.execute("BEGIN IMMEDIATE")
         row = _read_reader_lease_row(connection)
         status = _reader_lease_status(row, effective_now)
-        mine = row is not None and _reader_release_authority(
-            row,
-            reader_id=reader,
-            token=token,
-        ) in ("self", "identity")
+        authority = (
+            None
+            if row is None
+            else _reader_release_authority(
+                row,
+                reader_id=reader,
+                token=token,
+            )
+        )
+        mine = authority in ("self", "identity")
         outcome = "not_held"
         if row is not None and status == "held":
             if mine:
@@ -1321,6 +1370,13 @@ def release_reader_lease(
             "status": outcome,
             "released": outcome == "released",
             "replayed": outcome in ("already_released", "not_held"),
+            # Whether a completion gate will read this call as this
+            # session declaring itself done. Only proof of *session*
+            # holding records that, so an identity-authority release --
+            # a lease taken under a configured `--reader` or `AIQ_READER`
+            # that stored no locator -- succeeds with `declared` false.
+            "declared": authority == "self"
+            and outcome in ("released", "already_released"),
             "claims_held": claims_held,
             "reader": lease_public,
         }

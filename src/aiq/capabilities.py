@@ -326,10 +326,19 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     ),
     "reader.release": _capability(
         "Give up the scope's reader role, leaving every held claim "
-        "untouched to recover on its own schedule.",
-        "aiq reader release [--reader ID] [--json]",
+        "untouched to recover on its own schedule, and record that this "
+        "session stopped draining the queue. That record is how a "
+        "bounded run -- one task, or a fixed batch -- ends with ready "
+        "work deliberately left behind instead of being blocked by the "
+        "completion gate. It is recorded only when the caller proves it "
+        "holds the lease, so status released with declared false means "
+        "the role came back but no completion signal was written.",
+        "aiq reader release [--reader ID] [--force] [--json]",
         mutates=True,
-        idempotency="safe retry; already released or expired replays",
+        idempotency="safe retry; a still-live lease this caller proved "
+        "holding replays as already_released, while an expired one "
+        "reports not_held because the declaration lapsed with it",
+        version=2,
     ),
     "reader.status": _capability(
         "Read who currently holds the scope's reader role and until when.",

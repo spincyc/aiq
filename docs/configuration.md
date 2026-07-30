@@ -47,7 +47,10 @@ the scope's queue; its default is derived, and [Session
 identity](#session-identity) below says how. Set `reader_lease_seconds` at or
 above `lease_seconds` so the reader role never expires before the items it
 holds. Exporting one shared `AIQ_READER` is the documented way to let several
-cooperating workers drain a single journal on purpose.
+cooperating workers drain a single journal on purpose — at the cost of the
+per-session answers described under [Reader identity and session
+identity](#reader-identity-and-session-identity), including the ability to end
+a bounded run with `reader release`.
 
 Example user configuration:
 
@@ -89,15 +92,43 @@ setting a configuration key.
 
 Several answers depend on AIQ recognizing that two commands, or a command and
 a host hook, belong to the same session: who may drain the queue, whose claims
-are outstanding, and whether a completion gate should stand down. AIQ decides
-that from the first of these it can find:
+are outstanding, and whether a completion gate should stand down.
+
+### Reader identity and session identity
+
+These are two different values, and only one of them is configurable.
+
+The **reader identity** is the name the reader role is held under. It is what
+`reader status` prints and what `--reader` accepts, and AIQ takes it from the
+first of:
 
 | Precedence | Source | Notes |
 |---:|---|---|
 | 1 | `--reader`, `AIQ_READER`, or `reader` in a user config file | An explicit identity, used verbatim. It may deliberately name a group rather than a session |
-| 2 | `AIQ_SESSION_ID` | The generic override. Any host, wrapper, or launcher can export it without AIQ knowing which host it is |
+| 2 | The session identity below | The default, and the only form that names one session |
+
+The **session identity** is how AIQ tells one session from another when it
+compares a recorded lease or claim against the caller. It is *never* taken
+from `reader`, and comes from the first of:
+
+| Precedence | Source | Notes |
+|---:|---|---|
+| 1 | `AIQ_SESSION_ID` | The generic override. Any host, wrapper, or launcher can export it without AIQ knowing which host it is |
+| 2 | The `session_id` in a hook payload | Authoritative for the session being gated, and inherited by nothing |
 | 3 | The host's own variable — today `CLAUDE_CODE_SESSION_ID` | Claude Code exports it into every command it runs, and puts the same value in the `session_id` of that session's hook payloads |
 | 4 | The host name plus the POSIX session id | Last resort |
+
+**Setting `reader` explicitly gives up the per-session answers.** A configured
+identity may name any session on any host — that is the point of a shared
+fan-out name — so a lease taken under one records no session locator at all,
+and nothing can later prove such a lease belongs to the caller in front of it.
+Dispatch still works: the role is held, other readers are still excluded, and
+`reader release` still hands it back. What does not work is every answer that
+needs to identify *a session*: `reader.live` and `reader.released_by_self` both
+read false, and so **a bounded run cannot end on its own release** — the
+completion gate keeps blocking. `reader release` says so on stderr and reports
+`declared` false. Configure `reader` for cooperating fan-out workers that drain
+until empty; leave it unset for a session that stops on a bound.
 
 The last resort is only a session identity where one POSIX session spans many
 commands. That is true of a terminal, where every command and every hook runs

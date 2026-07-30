@@ -72,6 +72,27 @@ def _reader_release(arguments: argparse.Namespace) -> int:
             "it: aiq reader status",
             file=sys.stderr,
         )
+    # A release that succeeded but recorded no declaration is the one
+    # outcome a bounded run can misread as success and then stall on. It
+    # happens under an explicitly configured `--reader` or `AIQ_READER`:
+    # such an identity may name any session on any host, so the lease
+    # stores no holder locator, and without one nothing can prove the
+    # release was *this session's*. The role really is handed back, so
+    # this is not an error -- but `reader.released_by_self` stays false,
+    # so a completion gate goes on blocking, and a caller told only
+    # "released" would wait for a signal that was never written.
+    if result["status"] in ("released", "already_released") and not result[
+        "declared"
+    ]:
+        print(
+            f'aiq: released the reader role as configured reader "{reader_id}"'
+            ", but recorded no completion signal: a configured reader "
+            "identity stores no session locator, so this release cannot be "
+            "proved to be this session's and a completion gate keeps "
+            "blocking; to end a bounded run, let AIQ derive the reader "
+            "identity and export a session identity instead: AIQ_SESSION_ID",
+            file=sys.stderr,
+        )
     # Breaking somebody else's live lease is an operator act with a
     # consequence the caller must see: the former holder was not asked
     # and may still be draining. Say so, and say that nothing was
@@ -107,6 +128,7 @@ def _reader_release(arguments: argparse.Namespace) -> int:
         {
             "status": result["status"],
             "released": result["released"],
+            "declared": result["declared"],
             "replayed": result["replayed"],
             "claims_held": held,
         },

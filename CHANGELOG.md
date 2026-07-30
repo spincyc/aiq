@@ -193,6 +193,52 @@ effects documents, capability contracts, and integration manifests.
 
 ### Fixed
 
+- **A configured `reader` no longer fails a bounded run silently.** A lease
+  taken under `--reader`, `AIQ_READER`, or `reader` in a configuration file
+  records no session locator by design, so `aiq reader release` succeeded
+  under such an identity while recording nothing the completion gate could
+  read: the command printed `released True` and the gate went on blocking,
+  with no way to tell that outcome from the one that works. `reader release`
+  now reports a new `declared` field — true only when the release was proved
+  by the holder locator, which is exactly when
+  `reader.released_by_self` becomes true — and prints one stderr line naming
+  the configured identity when a successful release recorded no completion
+  signal. [`configuration.md`](docs/configuration.md#reader-identity-and-session-identity)
+  now separates the reader identity from the session identity, which were
+  presented as one precedence list even though `AIQ_READER` feeds only the
+  first, and states that configuring `reader` gives up the per-session
+  answers — including the ability to end a bounded run on its own release.
+
+- **A caller with no session identity can no longer inherit a lease or a claim
+  recorded by a session that had one.** Where a lease or claim carried a
+  host-supplied session token and the caller had none, the comparison fell
+  back to the POSIX pair — but a recorded token means the holder belongs to a
+  host that keeps its own sessions, so the process behind the stored session
+  id has very likely exited, and the kernel reissues those numbers. A caller
+  that happened to land on a reissued id read a stranger's release as its own
+  (standing its gate down), read a dead holder as a live foreign session
+  (standing it down for nobody), counted a stranger's claim as its own, and
+  could release the stranger's live lease. Non-comparable evidence now answers
+  "not mine" and "not provably foreign" instead of falling through, matching
+  the rule the dead-holder probe already followed. The POSIX pair still
+  decides where no token was recorded, so terminals and pre-schema-6 rows are
+  unaffected.
+
+- The `reader.release` capability descriptor described the command as merely
+  giving up the role, at version 1, omitting both that it is the recorded
+  signal a bounded run stops on and the `--force` flag, and claiming an
+  expired lease replays when it in fact reports `not_held`. The descriptor is
+  corrected and is now version 2, so the workflow is discoverable through
+  `aiq capability show reader.release`.
+
+- An effects document with an invalid task ID in `document.expect` reported
+  `invalid_argument` rather than `invalid_document`, though the failure
+  depends only on the submitted document. Both exit 2, so no operator-visible
+  behavior changes. `aiq reconcile` also decided `skipped` versus `failed`
+  partly by searching the diagnostic for `does not exist`, which contradicted
+  the rule that no wording participates in classification; every raise site it
+  can reach already pins `not_found`, so the substring test is removed.
+
 - **Releasing the reader role now requires proof of holding it, and a release
   ages out with the lease it was about.** A `reader_id` is public — `aiq
   reader status` prints it and `--reader` accepts it — but release authorized

@@ -608,6 +608,117 @@ class RecordedLocatorCompatibilityTest(unittest.TestCase):
                 # death is unproven and the lease is left alone.
                 self.assertFalse(_reader_holder_is_dead(row))
 
+    def test_a_tokenless_caller_never_inherits_a_token_holders_lease(
+        self,
+    ) -> None:
+        """A bare session id proves nothing about a token-named session.
+
+        The holder here recorded *both* halves of a locator: a
+        host-supplied token, and the POSIX pair of the process that took
+        the lease -- this very process, so the pair matches exactly. A
+        caller carrying no token of its own must still not read that
+        lease as its own or as a live stranger's, because the recorded
+        token says the holder belongs to a host that keeps its own
+        sessions, and on such a host the process behind that session id
+        is very likely already reaped. Session ids are reissued, so
+        matching one is no evidence; `_reader_holder_is_dead` has always
+        refused to probe such a holder, and these two must agree with
+        it.
+
+        Without this rule a tokenless caller that happened to land on a
+        recycled session id would read a stranger's release as its own
+        and could release the stranger's live lease -- putting "I am
+        done" into another session's mouth, on a number.
+        """
+        from aiq.queue import (
+            _reader_holder_is_dead,
+            _reader_holder_is_foreign_live,
+            _reader_holder_is_this_session,
+        )
+
+        os.environ[GENERIC_SESSION_ID_KEY] = SESSION_ONE
+        try:
+            support.hold_reader_lease_with_locator(
+                self.scope,
+                host=socket.gethostname(),
+                session=os.getsid(0),
+            )
+        finally:
+            os.environ.pop(GENERIC_SESSION_ID_KEY, None)
+        row = self.lease_row()
+        # Both halves really are recorded, and the POSIX pair is this
+        # process's own -- so only the token rule can produce a false.
+        self.assertEqual(row["holder_session"], SESSION_ONE)
+        self.assertEqual(row["holder_host"], socket.gethostname())
+        self.assertEqual(row["holder_sid"], os.getsid(0))
+
+        self.assertFalse(_reader_holder_is_this_session(row, token=None))
+        self.assertFalse(_reader_holder_is_foreign_live(row, token=None))
+        self.assertFalse(_reader_holder_is_dead(row))
+
+        # The holder's own token still recognizes it, and a different
+        # token still reads it as the live stranger it is.
+        self.assertTrue(
+            _reader_holder_is_this_session(row, token=SESSION_ONE)
+        )
+        self.assertTrue(
+            _reader_holder_is_foreign_live(row, token=SESSION_TWO)
+        )
+
+    def test_a_tokenless_caller_never_counts_a_token_holders_claim(
+        self,
+    ) -> None:
+        """The claim count is decided on the identical evidence.
+
+        `_count_active_claims_this_session` documents that its SQL
+        mirrors the locator rule exactly and that the two must change
+        together, so the token asymmetry above is pinned on this side
+        too.
+        """
+        from aiq.queue import (
+            _count_active_claims_this_session,
+            _now_us,
+            enqueue_task,
+        )
+
+        enqueue_task(self.scope, title="Claimed work", owner_id="claimer")
+        os.environ[GENERIC_SESSION_ID_KEY] = SESSION_ONE
+        try:
+            claimed = support.claim_next_task_with_locator(
+                self.scope,
+                locator=(socket.gethostname(), os.getsid(0)),
+            )
+        finally:
+            os.environ.pop(GENERIC_SESSION_ID_KEY, None)
+        self.assertEqual(len(claimed), 1)
+
+        connection = sqlite3.connect(self.scope.journal_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            now = _now_us()
+            self.assertEqual(
+                _count_active_claims_this_session(
+                    connection, now_us=now, token=SESSION_ONE
+                ),
+                1,
+            )
+            # Same claim, same matching POSIX pair, no token to compare:
+            # not this session's, so it blocks nobody.
+            self.assertEqual(
+                _count_active_claims_this_session(
+                    connection, now_us=now, token=None
+                ),
+                0,
+            )
+            self.assertEqual(
+                _count_active_claims_this_session(
+                    connection, now_us=now, token=SESSION_TWO
+                ),
+                0,
+            )
+        finally:
+            connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()

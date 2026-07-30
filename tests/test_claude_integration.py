@@ -1137,7 +1137,19 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertIn("but this session released the reader role", errors)
 
-    def test_stop_gate_release_notice_is_one_sanitized_line(self) -> None:
+    def test_stop_gate_release_notice_is_exactly_one_fixed_line(self) -> None:
+        """Pin the release notice itself, not the boundary beneath it.
+
+        This branch renders counts and fixed words only -- no task title
+        reaches it -- so it can prove nothing about the stderr
+        sanitizer, and asserting sanitization here passed against an
+        identity sanitizer. What it can prove is what the notice
+        actually says, which is the contract a bounded run reads, so
+        that is what it pins. Sanitization is covered where hostile text
+        really does reach the boundary, in
+        :meth:`test_stop_gate_escapes_and_truncates_hostile_titles`.
+        """
+
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = self._initialized_repository(
                 Path(temporary_directory)
@@ -1154,12 +1166,72 @@ class ClaudeIntegrationTest(unittest.TestCase):
             status, errors = self._run_gate(repository)
 
             self.assertEqual(status, 0)
-            # The notice names no task titles, so nothing hostile can
-            # reach it; the boundary sanitizes it to one line regardless.
-            self.assertEqual(len(errors.splitlines()), 1)
-            self.assertTrue(errors.endswith("\n"))
-            for character in ("\t", "\r"):
-                self.assertNotIn(character, errors)
+            self.assertEqual(
+                errors,
+                "AIQ: not blocking: runnable work remains (1 ready task) "
+                "but this session released the reader role"
+                " — aiq reader status\n",
+            )
+
+    def test_stop_gate_escapes_and_truncates_hostile_titles(self) -> None:
+        """Hostile task text never reaches stderr unescaped.
+
+        The Claude adapter delegates its stderr boundary to the shared
+        hook engine, and this is the assertion that holds that boundary
+        in place for it: replacing the sanitizer with the identity
+        function must fail here.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._initialized_repository(
+                Path(temporary_directory)
+            )
+            status = {
+                "project": "aiq",
+                "messages": {"received": 0, "needs_input": 0},
+                "tasks": {"ready": 1},
+                "claims": {"active": 0},
+                "ready": [
+                    {
+                        "task_id": "TASK-3",
+                        "priority": 0,
+                        "title": (
+                            "line one\nline two\t"
+                            "tabbed tail that keeps going past forty"
+                        ),
+                    }
+                ],
+            }
+            errors = io.StringIO()
+
+            with patch("aiq.queue.read_status", return_value=status):
+                blocked = receive_hook_main(
+                    input_stream=io.BytesIO(
+                        json.dumps(
+                            {
+                                "hook_event_name": "Stop",
+                                "session_id": "session",
+                                "cwd": str(repository),
+                            }
+                        ).encode()
+                    ),
+                    error_stream=errors,
+                    git_executable=self.git_executable(),
+                )
+
+            self.assertEqual(blocked, 2)
+            lines = errors.getvalue().splitlines()
+            # One block line, and the embedded newline did not become a
+            # second one: the title is truncated to 40 characters, then
+            # the boundary escapes the newline and the tab.
+            self.assertEqual(len(lines), 1)
+            self.assertIn(
+                '[aiq: TASK-3] "line one\\u000aline two\\u0009'
+                'tabbed tail that keep…"',
+                lines[0],
+            )
+            self.assertNotIn("\t", lines[0])
+            self.assertIn("aiq task done TASK-3 --summary TEXT", lines[0])
 
     def test_stop_gate_blocks_whenever_no_live_reader_holds_the_lease(
         self,
