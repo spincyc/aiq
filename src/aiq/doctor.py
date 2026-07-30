@@ -152,6 +152,31 @@ def inspect_journal(scope: JournalScope) -> dict[str, str]:
     return _check("journal", "ok", f"schema v{version}; quick check ok")
 
 
+def _capture_check(scope: JournalScope | None) -> dict[str, str]:
+    """Whether installed hooks would capture prompts for the scope.
+
+    Installed hooks never create journal storage, so in a repository
+    whose journal is not initialized prompt capture is inactive until
+    ``aiq journal init --scope repo`` opts the repository in. Other
+    scopes auto-initialize on capture.
+    """
+
+    if scope is None:
+        return _check("capture", "skipped", "scope resolution failed")
+    if scope.kind == "repo" and not scope.journal_path.exists():
+        return _check(
+            "capture",
+            "warn",
+            "prompt capture is inactive: repo journal not initialized; "
+            "run aiq journal init --scope repo to opt in",
+        )
+    return _check(
+        "capture",
+        "ok",
+        f"hooks capture prompts to {scope.journal_path}",
+    )
+
+
 _INTEGRATION_MODULES = tuple(
     (f"integration.{integration_id}", record.module)
     for integration_id, record in sorted(HOOK_INTEGRATIONS.items())
@@ -242,8 +267,8 @@ def run_doctor(
     """Run every cheap read-only diagnostic and never mutate local state.
 
     Stable check order: python, sqlite, config, git, scope, journal,
-    journal.deep, one ``integration.<id>`` row per known integration
-    (sorted by id), then report.
+    capture, journal.deep, one ``integration.<id>`` row per known
+    integration (sorted by id), then report.
     """
 
     checks: list[dict[str, str]] = [_python_check(), _sqlite_check()]
@@ -293,6 +318,7 @@ def run_doctor(
         checks.append(_check("journal", "skipped", "scope resolution failed"))
     else:
         checks.append(inspect_journal(scope))
+    checks.append(_capture_check(scope))
     checks.append(
         _check(
             "journal.deep",

@@ -19,6 +19,7 @@ import tempfile
 from typing import NamedTuple
 
 from aiq.cli import main as _cli_main
+from aiq.journal import initialize_journal, resolve_scope
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +80,15 @@ def init_repository(path: Path, *, branch: str = "main") -> Path:
     path.mkdir(parents=True, exist_ok=True)
     run_git(path, "init", "--quiet", f"--initial-branch={branch}")
     return path
+
+
+def initialize_repo_journal(repository: Path) -> Path:
+    """Opt a repository in to hook capture: initialize its repo journal.
+
+    Installed hooks never create journal storage, so receive tests that
+    expect capture must perform the per-repository opt-in first.
+    """
+    return initialize_journal(resolve_scope("repo", cwd=repository))
 
 
 def git_executable() -> Path:

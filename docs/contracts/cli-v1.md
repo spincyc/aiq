@@ -184,7 +184,7 @@ aiq doctor [--scope SCOPE] [--cwd PATH] [--no-repo-config] [--json]
 
 Each check reports `check`, `status`, and `detail`. `status` is `ok`, `warn`,
 `fail`, or `skipped`. The stable check order is `python`, `sqlite`, `config`,
-`git`, `scope`, `journal`, `journal.deep`, `integration.claude`,
+`git`, `scope`, `journal`, `capture`, `journal.deep`, `integration.claude`,
 `integration.codex`, and `report`.
 
 - `python` and `sqlite` compare the runtime against the supported minimums.
@@ -194,6 +194,9 @@ Each check reports `check`, `status`, and `detail`. `status` is `ok`, `warn`,
 - `journal` inspects an existing journal file without opening it for
   writing: file type, permissions, a SQLite quick check, and schema-version
   compatibility. An uninitialized journal is `skipped`, not a failure.
+- `capture` warns when the resolved scope is a repository without an
+  initialized journal, where installed hooks capture nothing until
+  `aiq journal init --scope repo` opts the repository in.
 - `integration.claude` and `integration.codex` run the read-only integration
   check only when the adapter's target or recorded state exists; an absent
   integration is `skipped`.
@@ -547,6 +550,16 @@ them — for `claude`, after stripping surrounding whitespace it starts with
 block — is not a user request: capture skips it with exit 0, ingests
 nothing, creates no journal, and reports a distinct
 `{"skipped": "injected-notification"}` receipt instead of a capture result.
+
+Repo-scope capture is opt-in by journal presence. A `UserPromptSubmit`
+event whose `cwd` resolves to a Git repository without an initialized repo
+journal exits 0 silently, captures nothing, and creates no storage; the
+receipt is a distinct `{"skipped": "repo-journal-not-initialized"}`. The
+unified invariant is that installed hooks never create journal storage;
+`aiq journal init --scope repo` is the per-repository opt-in and
+`aiq journal destroy` the opt-out. A `cwd` outside any Git repository
+resolves to user scope, which keeps auto-initialization, as do explicit
+`aiq ingest` and the generic integration.
 
 The `Stop` completion gate enforces the AGENTS.md practice that no required
 runnable work may remain at completion. It performs one read-only journal

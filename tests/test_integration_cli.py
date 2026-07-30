@@ -423,6 +423,7 @@ class IntegrationCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         hostile_git.chmod(0o700)
+        support.initialize_repo_journal(self.repository)
         for index, search_path in enumerate(("", str(hostile_bin))):
             payload = json.dumps(
                 {
@@ -471,6 +472,7 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertTrue(checked["ok"])
 
     def test_receive_is_silent_on_success_and_visible_on_error(self) -> None:
+        support.initialize_repo_journal(self.repository)
         payload = json.dumps(
             {
                 "hook_event_name": "UserPromptSubmit",
@@ -550,6 +552,7 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertEqual(empty.stdout, "")
         self.assertEqual(empty.stderr, "")
 
+        support.initialize_repo_journal(self.repository)
         captured = self.run_aiq(
             "integration",
             "receive",

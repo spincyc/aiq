@@ -77,6 +77,15 @@ starts with `<task-notification` or is one whole
 distinct `skipped` receipt, ingests nothing, and creates no journal; a prompt
 that merely mentions a marker mid-string is captured normally.
 
+## Opt-in scope
+
+Installed hooks never create journal storage. Repo-scope capture is opt-in
+by journal presence: in a Git repository whose repo journal is not
+initialized, the hook exits 0 silently, captures nothing, and creates no
+storage. Run `aiq journal init --scope repo` in the repository to opt in
+and `aiq journal destroy` to opt out. Outside any Git repository the event
+routes to the user journal, which still auto-initializes on capture.
+
 ## Completion gate
 
 The installed command is also registered under the `Stop` event. When Claude
@@ -185,7 +194,9 @@ the agent to ingest each mid-turn message manually with
 
 ## Verify capture
 
-After sending one prompt:
+Capture in a repository requires an initialized repo journal: run
+`aiq journal init --scope repo` there first (see [Opt-in scope](#opt-in-scope));
+`aiq doctor` warns while capture is inactive. After sending one prompt:
 
 ```sh
 "$aiq_launcher" inbox list
@@ -195,7 +206,7 @@ After sending one prompt:
 The hook is silent on success, uses source `claude`, routes by the event's
 absolute `cwd`, and deduplicates a repeated identical event.
 
-If capture is missing, run `integration check`, inspect `journal path` from the
-target repository, and verify hooks are enabled in Claude Code. Claude Code
-snapshots hook configuration at session start; restart the session or review
-`/hooks` after installing.
+If capture is missing, run `integration check` and `aiq doctor`, inspect
+`journal path` from the target repository, and verify hooks are enabled in
+Claude Code. Claude Code snapshots hook configuration at session start;
+restart the session or review `/hooks` after installing.

@@ -11,6 +11,14 @@ events run a read-only completion gate that blocks stopping (exit 2) while
 runnable work remains. The gate fails open: any gate-path error exits 0
 with a single stderr diagnostic, because an AIQ defect must never block
 the host from stopping.
+
+Installed hooks never create journal storage. Repo-scope capture is
+opt-in by journal presence: ``aiq journal init --scope repo`` is the
+per-repository opt-in act and ``aiq journal destroy`` the opt-out, so a
+repository without an initialized journal is skipped silently. User
+scope (a working directory outside any Git repository) keeps
+auto-initialization, as do explicit ``aiq ingest`` and the generic
+integration.
 """
 
 from __future__ import annotations
@@ -1565,7 +1573,17 @@ def receive_hook(
     git_executable: str | Path | None = None,
     agent_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Validate and durably ingest one received hook payload."""
+    """Validate and durably ingest one received hook payload.
+
+    Installed hooks never create journal storage. When the payload's
+    working directory resolves to repo scope and that journal does not
+    exist, the hook ingests nothing and returns a distinct
+    ``{"skipped": "repo-journal-not-initialized"}`` receipt: ``aiq
+    journal init --scope repo`` is the per-repository opt-in act and
+    ``aiq journal destroy`` the opt-out. User scope keeps
+    auto-initialization. Harness-injected prompts are skipped earlier
+    with their own ``{"skipped": "injected-notification"}`` receipt.
+    """
 
     receive = spec.receive
     if receive is None:
@@ -1662,6 +1680,16 @@ def receive_hook(
         agent_root=agent_root,
         git_executable=resolved_git_executable,
     )
+    if scope.kind == "repo" and not scope.journal_path.exists():
+        # Repo-scope capture is opt-in by journal presence: installed
+        # hooks never create journal storage, so a repository that has
+        # not run aiq journal init --scope repo is skipped silently
+        # with a receipt distinct from the injected-notification skip.
+        return {
+            "skipped": "repo-journal-not-initialized",
+            "source": receive.source,
+            "scope": scope.to_dict(),
+        }
     result = ingest_message(
         scope,
         prompt,

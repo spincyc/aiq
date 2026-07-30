@@ -628,6 +628,7 @@ class CodexIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -661,6 +662,46 @@ class CodexIntegrationTest(unittest.TestCase):
                 connection.close()
             self.assertEqual(source, "codex")
 
+    def test_receive_hook_skips_uninitialized_repo_without_storage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = support.init_repository(root / "repository")
+            payload = json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "turn_id": "turn",
+                    "cwd": str(repository),
+                    "prompt": "not opted in yet",
+                }
+            )
+
+            receipt = receive_hook(
+                payload,
+                git_executable=self.git_executable(),
+            )
+            errors = io.StringIO()
+            status = receive_hook_main(
+                input_stream=io.BytesIO(payload.encode()),
+                error_stream=errors,
+                git_executable=self.git_executable(),
+            )
+            scope = resolve_scope("repo", cwd=repository)
+
+            self.assertEqual(
+                receipt["skipped"],
+                "repo-journal-not-initialized",
+            )
+            self.assertEqual(receipt["source"], "codex")
+            self.assertEqual(receipt["scope"], scope.to_dict())
+            self.assertNotIn("created", receipt)
+            self.assertEqual(status, 0)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertFalse(scope.journal_path.exists())
+            self.assertFalse((repository / ".git" / "aiq").exists())
+
     def test_receive_hook_requires_turn_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             payload = json.dumps(
@@ -682,7 +723,9 @@ class CodexIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
             other = support.init_repository(root / "other")
+            support.initialize_repo_journal(other)
             base = {
                 "hook_event_name": "UserPromptSubmit",
                 "session_id": "session",
@@ -722,6 +765,7 @@ class CodexIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -752,6 +796,7 @@ class CodexIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
             receive_hook(
                 json.dumps(
                     {
@@ -886,6 +931,7 @@ class CodexIntegrationTest(unittest.TestCase):
                 check=True,
                 env={**os.environ, **support.GIT_ISOLATION},
             )
+            support.initialize_repo_journal(repository)
             hostile_directory = root / "hostile"
             hostile_directory.mkdir()
             hostile_git = hostile_directory / "git"

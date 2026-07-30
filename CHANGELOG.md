@@ -62,6 +62,15 @@ effects documents, capability contracts, and integration manifests.
 
 ### Changed
 
+- Repo-scope hook capture is now opt-in by journal presence: a
+  `UserPromptSubmit` event in a Git repository without an initialized repo
+  journal exits 0 silently with a distinct
+  `{"skipped": "repo-journal-not-initialized"}` receipt and creates no
+  storage. `aiq journal init --scope repo` opts a repository in;
+  already-sprouted repo journals stay opted in until `aiq journal destroy`.
+  User scope, explicit `aiq ingest`, and the generic integration keep
+  auto-initialization, and `aiq doctor` gains a `capture` finding that warns
+  where prompt capture is inactive.
 - Bootstrap `AGENTS.md` word budget raised from 150 to 200; the guidance now
   notes the `aiq report` prerequisite (`dev_report_repo`) and that installed
   hooks enforce completion recording at session stop.

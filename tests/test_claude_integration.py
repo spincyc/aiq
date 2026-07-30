@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -226,6 +227,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -265,6 +267,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -349,6 +352,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
             base = {
                 "hook_event_name": "UserPromptSubmit",
                 "session_id": "session",
@@ -435,6 +439,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertEqual(errors.getvalue(), "")
             self.assertFalse(scope.journal_path.exists())
 
+            support.initialize_repo_journal(repository)
             plain = receive_hook(
                 json.dumps({**base, "prompt": "capture this request"}),
                 git_executable=self.git_executable(),
@@ -466,12 +471,111 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertTrue(unclosed["created"])
             self.assertEqual(check_journal(scope)["messages"], 3)
 
+    def test_receive_hook_skips_uninitialized_repo_without_storage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = support.init_repository(root / "repository")
+            payload = json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "cwd": str(repository),
+                    "prompt": "not opted in yet",
+                }
+            )
+
+            receipt = receive_hook(
+                payload,
+                git_executable=self.git_executable(),
+            )
+            errors = io.StringIO()
+            status = receive_hook_main(
+                input_stream=io.BytesIO(payload.encode()),
+                error_stream=errors,
+                git_executable=self.git_executable(),
+            )
+            scope = resolve_scope("repo", cwd=repository)
+
+            self.assertEqual(
+                receipt["skipped"],
+                "repo-journal-not-initialized",
+            )
+            self.assertEqual(receipt["source"], "claude")
+            self.assertEqual(receipt["scope"], scope.to_dict())
+            self.assertNotIn("created", receipt)
+            self.assertEqual(status, 0)
+            self.assertEqual(errors.getvalue(), "")
+            self.assertFalse(scope.journal_path.exists())
+            self.assertFalse((repository / ".git" / "aiq").exists())
+
+    def test_journal_init_opts_repository_in_to_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = support.init_repository(root / "repository")
+            payload = json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "cwd": str(repository),
+                    "prompt": "captured after opt-in",
+                }
+            )
+
+            skipped = receive_hook(
+                payload,
+                git_executable=self.git_executable(),
+            )
+            support.initialize_repo_journal(repository)
+            captured = receive_hook(
+                payload,
+                git_executable=self.git_executable(),
+            )
+            scope = resolve_scope("repo", cwd=repository)
+
+            self.assertEqual(
+                skipped["skipped"],
+                "repo-journal-not-initialized",
+            )
+            self.assertTrue(captured["created"])
+            self.assertEqual(check_journal(scope)["messages"], 1)
+
+    def test_receive_hook_outside_git_auto_creates_user_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            payload = json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "cwd": str(workspace),
+                    "prompt": "user scope capture",
+                }
+            )
+
+            with patch.dict(
+                os.environ,
+                {"XDG_STATE_HOME": str(root / "state")},
+            ):
+                result = receive_hook(
+                    payload,
+                    git_executable=self.git_executable(),
+                )
+                scope = resolve_scope("user")
+
+            self.assertEqual(result["scope"]["kind"], "user")
+            self.assertTrue(result["created"])
+            self.assertTrue(scope.journal_path.is_file())
+
     def test_receive_hook_main_is_silent_on_success_and_exit_one_on_failure(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             repository = support.init_repository(root / "repository")
+            support.initialize_repo_journal(repository)
             payload = json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -506,6 +610,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
             repository = self._initialized_repository(
                 Path(temporary_directory)
             )
+            support.initialize_repo_journal(repository)
             receive_hook(
                 json.dumps(
                     {
@@ -583,6 +688,7 @@ class ClaudeIntegrationTest(unittest.TestCase):
             repository = self._initialized_repository(
                 Path(temporary_directory)
             )
+            support.initialize_repo_journal(repository)
             receive_hook(
                 json.dumps(
                     {

@@ -14,6 +14,7 @@ EXPECTED_CHECKS = (
     "git",
     "scope",
     "journal",
+    "capture",
     "journal.deep",
     "integration.claude",
     "integration.codex",
@@ -93,7 +94,15 @@ class DoctorCliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload, checks = self.doctor_payload(completed)
         self.assertEqual(payload["status"], "ok")
-        for name in ("python", "sqlite", "config", "git", "scope", "journal"):
+        for name in (
+            "python",
+            "sqlite",
+            "config",
+            "git",
+            "scope",
+            "journal",
+            "capture",
+        ):
             self.assertEqual(checks[name]["status"], "ok", checks[name])
         self.assertEqual(checks["journal.deep"]["status"], "skipped")
         self.assertIn("journal check", checks["journal.deep"]["detail"])
@@ -167,6 +176,25 @@ class DoctorCliTests(unittest.TestCase):
         self.assertEqual(checks["journal"]["status"], "skipped")
         self.assertIn("not initialized", checks["journal"]["detail"])
         self.assertFalse(journal_path.exists())
+
+    def test_doctor_warns_when_repo_capture_is_inactive(self) -> None:
+        completed = self.run_aiq("doctor", "--scope", "repo", "--json")
+
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        payload, checks = self.doctor_payload(completed)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(checks["capture"]["status"], "warn")
+        self.assertIn(
+            "prompt capture is inactive",
+            checks["capture"]["detail"],
+        )
+        self.assertIn(
+            "aiq journal init --scope repo",
+            checks["capture"]["detail"],
+        )
+        self.assertFalse(
+            (self.repository / ".git" / "aiq" / "journal.sqlite3").exists()
+        )
 
     def test_doctor_fails_on_broken_configuration(self) -> None:
         config_path = self.config_home / "aiq" / "config.toml"

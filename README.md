@@ -193,7 +193,8 @@ preview, minimal mutation, ownership records, drift checks, and targeted
 uninstall. The Claude Code and Codex integrations record their launcher
 identity and absolute Python and Git executables. Their hooks run Python with
 `-I`, so dotfiles, `PATH`, `PYTHONPATH`, and `PYTHONHOME` cannot redirect the
-runtime.
+runtime. Installed hooks never create journal storage: repo-scope prompt
+capture is opt-in per repository via `aiq journal init --scope repo`.
 
 ## Documentation
 
