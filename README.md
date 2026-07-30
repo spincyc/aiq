@@ -213,6 +213,7 @@ capture is opt-in per repository via `aiq journal init --scope repo`.
 
 | Topic | Use it for |
 |---|---|
+| [Using AIQ with an agent](docs/using-with-an-agent.md) | What to say to a coding agent, and how to read its transcript |
 | [Concepts](docs/concepts.md) | Messages, effects, tasks, dependencies, and leases |
 | [Configuration](docs/configuration.md) | Strict TOML, environment, and CLI precedence |
 | [Privacy](docs/privacy.md) | Captured data, retention, permissions, and network boundary |

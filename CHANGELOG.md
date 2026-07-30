@@ -10,6 +10,11 @@ effects documents, capability contracts, and integration manifests.
 
 ### Added
 
+- [Using AIQ with an agent](docs/using-with-an-agent.md) documents the system
+  for the person who never types an `aiq` command: the setup check, the
+  phrases that file work versus run it, the three bounded run modes and their
+  stop conditions, and how to read the gate lines, parked-message notices, and
+  `reader_held` refusals that appear in an agent transcript.
 - `aiq reader release` is now the explicit signal that a session finished a
   bounded run on purpose. When the scope's reader lease is `released` and its
   recorded holder locator proves this very session released it, the `Stop`
