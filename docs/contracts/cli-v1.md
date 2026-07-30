@@ -115,8 +115,8 @@ one terminal inherits and two terminals never share. Export a single
 
 | Field | Type | Meaning |
 |---|---|---|
-| `status` | `absent`, `held`, `expired`, or `released` | Lease state at the read instant |
-| `held` | boolean | Whether the lease is live |
+| `status` | `absent`, `held`, `stale`, `expired`, or `released` | Lease state at the read instant. `stale` is an unexpired lease whose recorded holder is provably gone, which the next consumer may take |
+| `held` | boolean | Whether the lease is live; false for `stale` |
 | `self` | boolean or null | Whether the caller's reader identity is the recorded holder; null when the caller supplied none |
 | `owner_id` | string or null | Holder's owner at acquisition |
 | `reader_id` | string or null | Holder's reader identity |
@@ -408,11 +408,12 @@ prompt content never appears. A missing journal reports zero counts, empty
 label without creating storage. `reader.self` compares the recorded holder
 against the caller's configured `reader` identity, so one status read answers
 both what work remains and whether this session may consume it. `reader.live`
-is true only for a `held` lease whose recorded holder is not provably gone: a
-lease carries the holder's host and POSIX session id when the holder used a
-self-derived identity, and a matching host with a vanished session proves the
-holder dead. It is false for every other reading, including `absent`,
-`expired`, `released`, and any holder whose liveness cannot be established.
+is true exactly for a `held` lease: a lease carries the holder's host and
+POSIX session id when the holder used a self-derived identity, and a matching
+host with a vanished session proves the holder dead, which reads as `stale`
+rather than `held`. It is false for every other reading, including `absent`,
+`stale`, `expired`, and `released`. A holder whose liveness cannot be
+established counts as live, so an unprovable death never stands the gate down.
 Human-readable `ready` and `blocked` lines render the task reference
 as `[label: TASK-19]`; the `blocked by` causes stay bare IDs.
 

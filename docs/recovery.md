@@ -57,8 +57,9 @@ the holder first:
 aiq reader status
 ```
 
-A `held` lease with an `expires_at` in the past is already recoverable and the
-next consume takes it over. A live lease from a session that has genuinely
+A `stale` lease is unexpired but its recorded holder is provably gone, so the
+next consume takes it over with nothing to do. An `expired` lease is likewise
+already recoverable. A `held` lease from a session that has genuinely
 gone away is reclaimed one of three ways, in order of preference: have the
 holder run `aiq reader release`; wait for `expires_at`, bounded by
 `reader_lease_seconds`; or, when the holder derived its identity on this host

@@ -649,9 +649,17 @@ def _reader_lease_public(
     ``self`` is null exactly when the caller supplied no reader identity
     to compare against, and names the recorded holder otherwise, whether
     or not that holder's lease is still live.
+
+    An unexpired lease whose recorded holder is provably gone reads as
+    ``stale`` rather than ``held``: the next consumer may take it, so
+    reporting it as held would show a queue as owned while it is free.
+    The distinction is presentational — claim, release, and takeover
+    decide liveness for themselves against the stored row.
     """
 
     status = _reader_lease_status(row, now_us)
+    if status == "held" and row is not None and _reader_holder_is_dead(row):
+        status = "stale"
     if row is None:
         return {
             "status": status,
@@ -686,11 +694,10 @@ def _reader_status_summary(
 ) -> dict[str, Any]:
     """Project the gate-relevant subset carried by :func:`read_status`.
 
-    ``live`` answers what ``status`` alone cannot: whether a held lease's
-    recorded holder is still running. A completion gate must treat a
-    lease abandoned by a crashed session as no reader at all, so the
-    liveness probe travels with this one snapshot rather than forcing a
-    second journal open.
+    ``live`` states directly what a completion gate needs: a lease
+    abandoned by a crashed session is no reader at all. The rendered
+    status already separates such a lease as ``stale``, so this reads
+    the one snapshot both surfaces share rather than probing again.
     """
 
     summary = {
@@ -704,11 +711,7 @@ def _reader_status_summary(
             "expires_at",
         )
     }
-    summary["live"] = (
-        lease["status"] == "held"
-        and row is not None
-        and not _reader_holder_is_dead(row)
-    )
+    summary["live"] = lease["status"] == "held"
     return summary
 
 

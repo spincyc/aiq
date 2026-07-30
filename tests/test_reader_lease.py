@@ -544,11 +544,11 @@ class ReaderLeaseTest(unittest.TestCase):
 
         status = read_status(self.scope, reader_id=READER_A)
 
-        # The lease is unexpired, so it still reads as held by someone
-        # else -- but the session that took it is gone, so nothing is
-        # actually draining this queue.
-        self.assertEqual(status["reader"]["status"], "held")
-        self.assertTrue(status["reader"]["held"])
+        # The lease is unexpired, but the session that took it is gone,
+        # so nothing is draining this queue and the next consumer may
+        # take over: stale, not held.
+        self.assertEqual(status["reader"]["status"], "stale")
+        self.assertFalse(status["reader"]["held"])
         self.assertFalse(status["reader"]["self"])
         self.assertEqual(status["reader"]["reader_id"], reader_id)
         self.assertFalse(status["reader"]["live"])

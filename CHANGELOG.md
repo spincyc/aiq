@@ -86,6 +86,11 @@ effects documents, capability contracts, and integration manifests.
 
 ### Fixed
 
+- `aiq reader status` and the `reader` block of `aiq status` report an
+  unexpired lease whose holder is provably gone as `stale` rather than
+  `held`, so an abandoned lease no longer shows a free queue as owned.
+  Claim, release, and takeover already decided liveness for themselves
+  and are unchanged.
 - Hook capture no longer loses a message when the journal is busy: lock
   acquisition on the capture path is bounded well below the host's hook
   timeout and reports a retryable `contention` failure with one stderr
