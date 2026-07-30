@@ -111,7 +111,8 @@ def run_receive_hook_main(
         payload = source.read(HOOK_INPUT_MAX_BYTES + 1)
         if len(payload) > HOOK_INPUT_MAX_BYTES:
             raise error_class(
-                f"{input_label} exceeds {HOOK_INPUT_MAX_BYTES} bytes"
+                f"{input_label} exceeds {HOOK_INPUT_MAX_BYTES} bytes",
+                code="integration_drift",
             )
     except Exception as error:
         errors.write(f"AIQ prompt capture failed: {single_line(str(error))}\n")
@@ -227,7 +228,10 @@ def home_directory(
         return Path.home()
     path = Path(configured)
     if not path.is_absolute():
-        raise error_class("HOME must be an absolute path")
+        raise error_class(
+            "HOME must be an absolute path",
+            code="integration_drift",
+        )
     return path
 
 
@@ -240,7 +244,10 @@ def _state_home(
     if configured:
         path = Path(configured)
         if not path.is_absolute():
-            raise error_class("XDG_STATE_HOME must be an absolute path")
+            raise error_class(
+                "XDG_STATE_HOME must be an absolute path",
+                code="integration_drift",
+            )
         return path
     return home_directory(environment, error_class=error_class) / ".local" / "state"
 
@@ -301,7 +308,8 @@ def _ensure_private_directory(spec: HookIntegrationSpec, path: Path) -> None:
     status = path.lstat()
     if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
         raise spec.error_class(
-            f"integration state directory is unsafe: {path}"
+            f"integration state directory is unsafe: {path}",
+            code="integration_drift",
         )
     path.chmod(0o700)
 
@@ -324,7 +332,8 @@ def read_bounded_with_status(
         raise
     except OSError as error:
         raise error_class(
-            f"{label} is not a safe regular file: {path}"
+            f"{label} is not a safe regular file: {path}",
+            code="integration_drift",
         ) from error
     try:
         status = os.fstat(descriptor)
@@ -334,10 +343,14 @@ def read_bounded_with_status(
             or status.st_nlink != 1
         ):
             raise error_class(
-                f"{label} is not a safe regular file: {path}"
+                f"{label} is not a safe regular file: {path}",
+                code="integration_drift",
             )
         if status.st_size > maximum_bytes:
-            raise error_class(f"{label} exceeds {maximum_bytes} bytes")
+            raise error_class(
+                f"{label} exceeds {maximum_bytes} bytes",
+                code="integration_drift",
+            )
         chunks: list[bytes] = []
         remaining = maximum_bytes + 1
         while remaining:
@@ -348,7 +361,10 @@ def read_bounded_with_status(
             remaining -= len(chunk)
         data = b"".join(chunks)
         if len(data) > maximum_bytes:
-            raise error_class(f"{label} exceeds {maximum_bytes} bytes")
+            raise error_class(
+                f"{label} exceeds {maximum_bytes} bytes",
+                code="integration_drift",
+            )
         return data, status
     finally:
         os.close(descriptor)
@@ -414,7 +430,8 @@ def _integration_lock(spec: HookIntegrationSpec, state_directory: Path):
             or status.st_nlink != 1
         ):
             raise spec.error_class(
-                f"integration lock is unsafe: {lock_path}"
+                f"integration lock is unsafe: {lock_path}",
+                code="integration_drift",
             )
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -431,7 +448,17 @@ def executable_path(
     flag: str,
     command: str | None = None,
     environment: Mapping[str, str] | None = None,
+    control_characters_code: str = "invalid_argument",
+    not_executable_code: str = "unsupported_environment",
 ) -> Path:
+    """Resolve one absolute executable, or raise with a pinned code.
+
+    Two of the codes are parameters because the launcher and the Git and
+    Python runtimes were classified differently before codes were pinned;
+    the defaults are what Git and Python produced and ``launcher_path``
+    overrides them. See ``docs/contracts/errors.md``.
+    """
+
     if candidate is None and command is not None:
         search_path = (
             os.environ.get("PATH", "")
@@ -446,24 +473,38 @@ def executable_path(
         if discovered is None:
             raise error_class(
                 f"cannot determine the {noun}; provide an absolute "
-                f"{flag} path"
+                f"{flag} path",
+                code="unsupported_environment",
             )
         candidate = Path(discovered).absolute()
     if candidate is None:
         raise error_class(
-            f"cannot determine the {noun}; provide an absolute {flag} path"
+            f"cannot determine the {noun}; provide an absolute {flag} path",
+            code="unsupported_environment",
         )
     path = Path(candidate)
     if not path.is_absolute():
-        raise error_class(f"{noun} must be an absolute path")
+        raise error_class(
+            f"{noun} must be an absolute path",
+            code="invalid_argument",
+        )
     if any(character in os.fspath(path) for character in ("\0", "\r", "\n")):
-        raise error_class(f"{noun} path contains control characters")
+        raise error_class(
+            f"{noun} path contains control characters",
+            code=control_characters_code,
+        )
     try:
         status = path.stat()
     except OSError as error:
-        raise error_class(f"{noun} is unavailable: {path}") from error
+        raise error_class(
+            f"{noun} is unavailable: {path}",
+            code="unsupported_environment",
+        ) from error
     if not stat.S_ISREG(status.st_mode) or not os.access(path, os.X_OK):
-        raise error_class(f"{noun} is not executable: {path}")
+        raise error_class(
+            f"{noun} is not executable: {path}",
+            code=not_executable_code,
+        )
     return path
 
 
@@ -482,6 +523,12 @@ def launcher_path(
         flag="--launcher",
         command="aiq" if candidate is None else None,
         environment=environment,
+        # Preserved accidents of the substring era: the launcher wording
+        # matched neither the argument rules nor the executable rules, so
+        # both failures fell through to integration drift. Listed in
+        # docs/contracts/errors.md as pending reclassification.
+        control_characters_code="integration_drift",
+        not_executable_code="integration_drift",
     )
 
 
@@ -591,7 +638,10 @@ def object_without_duplicates_hook(
         result: dict[str, Any] = {}
         for key, value in pairs:
             if key in result:
-                raise error_class(f"duplicate JSON object key: {key}")
+                raise error_class(
+                    f"duplicate JSON object key: {key}",
+                    code="integration_drift",
+                )
             result[key] = value
         return result
 
@@ -608,7 +658,8 @@ def _decode_hooks(
         decoded = data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise spec.error_class(
-            f"{spec.target_label} are not UTF-8: {target}"
+            f"{spec.target_label} are not UTF-8: {target}",
+            code="integration_drift",
         ) from error
     try:
         document = json.loads(
@@ -617,21 +668,27 @@ def _decode_hooks(
         )
     except json.JSONDecodeError as error:
         raise spec.error_class(
-            f"{spec.target_label} are invalid JSON: {target}"
+            f"{spec.target_label} are invalid JSON: {target}",
+            code="integration_drift",
         ) from error
     if not isinstance(document, dict):
-        raise spec.error_class(f"{spec.target_label} root must be a JSON object")
+        raise spec.error_class(
+            f"{spec.target_label} root must be a JSON object",
+            code="integration_drift",
+        )
     hooks = document.get("hooks")
     if hooks is not None and not isinstance(hooks, dict):
         raise spec.error_class(
-            f"{spec.display_name} hooks field must be a JSON object"
+            f"{spec.display_name} hooks field must be a JSON object",
+            code="integration_drift",
         )
     if isinstance(hooks, dict):
         for event in spec.events:
             groups = hooks.get(event)
             if groups is not None and not isinstance(groups, list):
                 raise spec.error_class(
-                    f"{spec.display_name} {event} hooks must be a JSON array"
+                    f"{spec.display_name} {event} hooks must be a JSON array",
+                    code="integration_drift",
                 )
     return document
 
@@ -684,7 +741,10 @@ def _validate_manifest(
         "v",
     }
     if not isinstance(manifest, dict) or not required.issubset(manifest):
-        raise spec.error_class("integration manifest has an invalid schema")
+        raise spec.error_class(
+            "integration manifest has an invalid schema",
+            code="integration_drift",
+        )
     if (
         type(manifest["v"]) is not int
         or manifest["v"] != 1
@@ -695,7 +755,10 @@ def _validate_manifest(
         or manifest["target"] != os.fspath(target)
         or not isinstance(manifest["created_file"], bool)
     ):
-        raise spec.error_class("integration manifest has invalid ownership")
+        raise spec.error_class(
+            "integration manifest has invalid ownership",
+            code="integration_drift",
+        )
     for field_name, description in (
         ("launcher", "launcher"),
         ("git_executable", "Git executable"),
@@ -707,8 +770,19 @@ def _validate_manifest(
             or not Path(value).is_absolute()
             or any(character in value for character in ("\0", "\r", "\n"))
         ):
+            # One corrupt manifest field, two codes: naming Git or Python in
+            # the diagnostic matched the executable rules before codes were
+            # pinned, so the failure reported an unsupported environment
+            # rather than drift. Preserved deliberately and listed in
+            # docs/contracts/errors.md as pending reclassification.
+            if field_name == "launcher":
+                raise spec.error_class(
+                    f"integration manifest {description} is invalid",
+                    code="integration_drift",
+                )
             raise spec.error_class(
-                f"integration manifest {description} is invalid"
+                f"integration manifest {description} is invalid",
+                code="unsupported_environment",
             )
     containers = manifest["created_containers"]
     if (
@@ -718,11 +792,15 @@ def _validate_manifest(
         or not set(containers).issubset({"hooks", *spec.events})
     ):
         raise spec.error_class(
-            "integration manifest created containers are invalid"
+            "integration manifest created containers are invalid",
+            code="integration_drift",
         )
     group = manifest["managed_group"]
     if _manifest_group_mapping(spec, group) is None:
-        raise spec.error_class("integration manifest owned hook is invalid")
+        raise spec.error_class(
+            "integration manifest owned hook is invalid",
+            code="integration_drift",
+        )
     group_digest = sha256_or_none(
         json.dumps(group, sort_keys=True, separators=(",", ":")).encode()
     )
@@ -735,10 +813,16 @@ def _validate_manifest(
             and manifest["config_sha256"] is None
         )
     ):
-        raise spec.error_class("integration manifest digest is invalid")
+        raise spec.error_class(
+            "integration manifest digest is invalid",
+            code="integration_drift",
+        )
     backups = manifest["backups"]
     if not isinstance(backups, list):
-        raise spec.error_class("integration manifest backups are invalid")
+        raise spec.error_class(
+            "integration manifest backups are invalid",
+            code="integration_drift",
+        )
     backup_directory = state_directory / "backups"
     for backup in backups:
         if (
@@ -748,7 +832,10 @@ def _validate_manifest(
             or Path(backup["path"]).parent != backup_directory
             or not _valid_digest(backup["sha256"])
         ):
-            raise spec.error_class("integration manifest backup is invalid")
+            raise spec.error_class(
+                "integration manifest backup is invalid",
+                code="integration_drift",
+            )
     return manifest
 
 
@@ -764,7 +851,8 @@ def _read_manifest(
         status = None
     except OSError as error:
         raise spec.error_class(
-            f"integration state directory is unsafe: {state_directory}"
+            f"integration state directory is unsafe: {state_directory}",
+            code="integration_drift",
         ) from error
     if status is not None and (
         not stat.S_ISDIR(status.st_mode)
@@ -772,7 +860,8 @@ def _read_manifest(
         or stat.S_IMODE(status.st_mode) & 0o077
     ):
         raise spec.error_class(
-            f"integration state directory is unsafe: {state_directory}"
+            f"integration state directory is unsafe: {state_directory}",
+            code="integration_drift",
         )
     path = _manifest_path(state_directory)
     try:
@@ -790,7 +879,10 @@ def _read_manifest(
             object_pairs_hook=object_without_duplicates_hook(spec.error_class),
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise spec.error_class("integration manifest is invalid") from error
+        raise spec.error_class(
+            "integration manifest is invalid",
+            code="integration_drift",
+        ) from error
     return _validate_manifest(
         spec,
         manifest,
@@ -843,15 +935,24 @@ def _assert_target_unchanged(
     except FileNotFoundError:
         if expected is None and expected_status is None:
             return
-        raise spec.error_class(f"{spec.target_label} changed before mutation")
+        raise spec.error_class(
+            f"{spec.target_label} changed before mutation",
+            code="integration_drift",
+        )
     if expected is None or expected_status is None:
-        raise spec.error_class(f"{spec.target_label} changed before mutation")
+        raise spec.error_class(
+            f"{spec.target_label} changed before mutation",
+            code="integration_drift",
+        )
     if (
         current != expected
         or status.st_dev != expected_status.st_dev
         or status.st_ino != expected_status.st_ino
     ):
-        raise spec.error_class(f"{spec.target_label} changed before mutation")
+        raise spec.error_class(
+            f"{spec.target_label} changed before mutation",
+            code="integration_drift",
+        )
 
 
 def _groups(document: dict[str, Any], event: str) -> list[Any]:
@@ -927,7 +1028,8 @@ def _replace_managed_group(
     ]
     if len(indexes) != 1:
         raise spec.error_class(
-            f"expected exactly one AIQ {spec.display_name} hook"
+            f"expected exactly one AIQ {spec.display_name} hook",
+            code="integration_drift",
         )
     groups[indexes[0]] = replacement
     return result
@@ -1026,6 +1128,11 @@ def _build_plan(
     except JournalError as error:
         result["status"] = "unsafe"
         result["blocked_reason"] = str(error)
+        # `install_integration` re-raises a blocked plan's reason, so the
+        # originating code must travel with it; without this the re-raise
+        # would flatten an unresolvable launcher or Git runtime into
+        # integration drift. Private key, stripped by `_public_plan`.
+        result["_blocked_code"] = error.code
         return result
 
     desired_groups = spec.hook_groups(
@@ -1314,9 +1421,17 @@ def install_integration(
             repair=repair,
         )
         if plan_token is not None and plan.get("plan_token") != plan_token:
-            raise spec.error_class("reviewed integration plan is stale")
+            raise spec.error_class(
+                "reviewed integration plan is stale",
+                code="integration_drift",
+            )
         if plan["action"] == "block":
-            raise spec.error_class(plan["blocked_reason"])
+            raise spec.error_class(
+                plan["blocked_reason"],
+                # Every other blocked status — conflict, drift, unmanaged,
+                # a preflight refusal — is integration drift.
+                code=plan.get("_blocked_code") or "integration_drift",
+            )
         if plan["action"] == "none":
             return _public_plan(plan)
 
@@ -1411,7 +1526,10 @@ def _remove_managed_groups(
 ) -> tuple[dict[str, Any], bool, list[str]]:
     mapping = _manifest_group_mapping(spec, manifest.get("managed_group"))
     if mapping is None:
-        raise spec.error_class("integration manifest owned hook is invalid")
+        raise spec.error_class(
+            "integration manifest owned hook is invalid",
+            code="integration_drift",
+        )
     result = json.loads(json.dumps(document))
     hooks = result.get("hooks")
     removed_events: list[str] = []
@@ -1419,7 +1537,8 @@ def _remove_managed_groups(
         groups = hooks.get(event) if isinstance(hooks, dict) else None
         if not isinstance(groups, list):
             raise spec.error_class(
-                f"the manifest-owned {spec.display_name} hook is missing"
+                f"the manifest-owned {spec.display_name} hook is missing",
+                code="integration_drift",
             )
         indexes = [
             index
@@ -1428,13 +1547,15 @@ def _remove_managed_groups(
         ]
         if len(indexes) != 1:
             raise spec.error_class(
-                f"expected exactly one AIQ {spec.display_name} hook"
+                f"expected exactly one AIQ {spec.display_name} hook",
+                code="integration_drift",
             )
         index = indexes[0]
         if groups[index] != owned_group:
             raise spec.error_class(
                 f"the manifest-owned {spec.display_name} hook has drifted; "
-                "refusing uninstall"
+                "refusing uninstall",
+                code="integration_drift",
             )
         del groups[index]
         removed_events.append(event)
@@ -1474,7 +1595,8 @@ def uninstall_integration(
         manifest = _read_manifest(spec, state_directory, target=target)
         if manifest is None:
             raise spec.error_class(
-                f"no AIQ {spec.display_name} integration manifest exists"
+                f"no AIQ {spec.display_name} integration manifest exists",
+                code="integration_drift",
             )
         if manifest.get("status") == "uninstalled":
             return {
@@ -1491,13 +1613,15 @@ def uninstall_integration(
             or manifest.get("integration_id") != spec.integration_id
         ):
             raise spec.error_class(
-                f"AIQ {spec.display_name} integration manifest is invalid"
+                f"AIQ {spec.display_name} integration manifest is invalid",
+                code="integration_drift",
             )
 
         before, document, before_status = _load_target(spec, target)
         if before is None:
             raise spec.error_class(
-                f"the manifest-owned {spec.target_label} file is missing"
+                f"the manifest-owned {spec.target_label} file is missing",
+                code="integration_drift",
             )
         after_document, delete_file, removed_events = _remove_managed_groups(
             spec,
@@ -1524,7 +1648,8 @@ def uninstall_integration(
         else:
             if before_status is None:
                 raise spec.error_class(
-                    f"{spec.target_label} changed before mutation"
+                    f"{spec.target_label} changed before mutation",
+                    code="integration_drift",
                 )
             mode = stat.S_IMODE(before_status.st_mode)
             _atomic_write(target, after, mode=mode)
@@ -1606,15 +1731,18 @@ def receive_hook(
     receive = spec.receive
     if receive is None:
         raise spec.error_class(
-            f"the {spec.display_name} integration does not receive payloads"
+            f"the {spec.display_name} integration does not receive payloads",
+            code="integration_drift",
         )
     if integration_id != spec.integration_id:
         raise spec.error_class(
-            f"unsupported {spec.display_name} integration id"
+            f"unsupported {spec.display_name} integration id",
+            code="integration_drift",
         )
     if git_executable is None:
         raise spec.error_class(
-            f"{spec.display_name} hook requires an absolute Git executable"
+            f"{spec.display_name} hook requires an absolute Git executable",
+            code="unsupported_environment",
         )
     resolved_git_executable = git_executable_path(
         git_executable,
@@ -1623,7 +1751,8 @@ def receive_hook(
     raw = payload.encode() if isinstance(payload, str) else payload
     if len(raw) > HOOK_INPUT_MAX_BYTES:
         raise spec.error_class(
-            f"{receive.input_label} exceeds {HOOK_INPUT_MAX_BYTES} bytes"
+            f"{receive.input_label} exceeds {HOOK_INPUT_MAX_BYTES} bytes",
+            code="integration_drift",
         )
     try:
         document = json.loads(
@@ -1632,20 +1761,24 @@ def receive_hook(
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise spec.error_class(
-            f"{receive.input_label} is invalid JSON"
+            f"{receive.input_label} is invalid JSON",
+            code="integration_drift",
         ) from error
     if not isinstance(document, dict):
         raise spec.error_class(
-            f"{receive.input_label} must be a JSON object"
+            f"{receive.input_label} must be a JSON object",
+            code="integration_drift",
         )
     if document.get("hook_event_name") != receive.event:
         raise spec.error_class(
-            f"{spec.display_name} hook is not a {receive.event} event"
+            f"{spec.display_name} hook is not a {receive.event} event",
+            code="integration_drift",
         )
     prompt = document.get("prompt")
     if not isinstance(prompt, str) or not prompt:
         raise spec.error_class(
-            f"{spec.display_name} hook has no non-empty string prompt"
+            f"{spec.display_name} hook has no non-empty string prompt",
+            code="integration_drift",
         )
     if _is_injected_prompt(prompt, receive):
         # Harness-injected content is not a user request: acknowledge it
@@ -1658,7 +1791,8 @@ def receive_hook(
         if not isinstance(value, str) or not value:
             raise spec.error_class(
                 f"{spec.display_name} hook {field_name} must be a "
-                "non-empty string"
+                "non-empty string",
+                code="integration_drift",
             )
         values[field_name] = value
     if receive.turn_required:
@@ -1670,12 +1804,14 @@ def receive_hook(
         ):
             raise spec.error_class(
                 f"{spec.display_name} hook {receive.turn_field} must be a "
-                "non-empty string"
+                "non-empty string",
+                code="integration_drift",
             )
     cwd = Path(values["cwd"])
     if not cwd.is_absolute() or not cwd.is_dir():
         raise spec.error_class(
-            f"{spec.display_name} hook working directory is invalid"
+            f"{spec.display_name} hook working directory is invalid",
+            code="integration_drift",
         )
 
     resolved_cwd = os.fspath(cwd.resolve())
@@ -1805,11 +1941,13 @@ def gate_stop_hook(
 
     if integration_id != spec.integration_id:
         raise spec.error_class(
-            f"unsupported {spec.display_name} integration id"
+            f"unsupported {spec.display_name} integration id",
+            code="integration_drift",
         )
     if git_executable is None:
         raise spec.error_class(
-            f"{spec.display_name} hook requires an absolute Git executable"
+            f"{spec.display_name} hook requires an absolute Git executable",
+            code="unsupported_environment",
         )
     resolved_git_executable = git_executable_path(
         git_executable,
@@ -1819,7 +1957,8 @@ def gate_stop_hook(
     if len(raw) > HOOK_INPUT_MAX_BYTES:
         raise spec.error_class(
             f"{spec.display_name} hook input exceeds "
-            f"{HOOK_INPUT_MAX_BYTES} bytes"
+            f"{HOOK_INPUT_MAX_BYTES} bytes",
+            code="integration_drift",
         )
     try:
         document = json.loads(
@@ -1828,27 +1967,32 @@ def gate_stop_hook(
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise spec.error_class(
-            f"{spec.display_name} hook input is invalid JSON"
+            f"{spec.display_name} hook input is invalid JSON",
+            code="integration_drift",
         ) from error
     if not isinstance(document, dict):
         raise spec.error_class(
-            f"{spec.display_name} hook input must be a JSON object"
+            f"{spec.display_name} hook input must be a JSON object",
+            code="integration_drift",
         )
     if document.get("hook_event_name") != STOP_EVENT:
         raise spec.error_class(
-            f"{spec.display_name} hook is not a {STOP_EVENT} event"
+            f"{spec.display_name} hook is not a {STOP_EVENT} event",
+            code="integration_drift",
         )
     if document.get("stop_hook_active"):
         return None
     cwd_value = document.get("cwd")
     if not isinstance(cwd_value, str) or not cwd_value:
         raise spec.error_class(
-            f"{spec.display_name} hook cwd must be a non-empty string"
+            f"{spec.display_name} hook cwd must be a non-empty string",
+            code="integration_drift",
         )
     cwd = Path(cwd_value)
     if not cwd.is_absolute() or not cwd.is_dir():
         raise spec.error_class(
-            f"{spec.display_name} hook working directory is invalid"
+            f"{spec.display_name} hook working directory is invalid",
+            code="integration_drift",
         )
     scope = resolve_scope(
         "auto",

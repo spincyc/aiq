@@ -162,6 +162,25 @@ effects documents, capability contracts, and integration manifests.
 
 ### Fixed
 
+- **`code=` was inert on every integration error, so install, uninstall, and
+  hook-capture failures were still classified by diagnostic wording.** `HookIntegrationError`
+  and `GuidanceIntegrationError` are `JournalError` subclasses, but the
+  classifier tested those two classes — and their substring rules — before it
+  ever consulted `code`, so a code set at an integration raise site was
+  discarded and two rewordings of one failure could report different codes and
+  exit statuses. An explicit code is now consulted first for every
+  `JournalError` subclass, ahead of any class-based or wording-based rule; the
+  101 integration raise sites that set no code now set one; and `invalid_config`
+  and `integration_drift`, both documented but absent from the exit table, are
+  registered, so pinning them no longer falls through to `internal_error`. Every
+  site was pinned to the code the previous classifier produced for it, so no
+  failure changes code or exit; three inherited misclassifications are preserved
+  deliberately and recorded in [CLI errors](docs/contracts/errors.md) as pending
+  correction. The AST guard that keeps raise sites pinned now derives the error
+  classes from the tree instead of recognizing two names, covers the indirect
+  `error_class` raise forms the shared integration engine uses, and keys its
+  exemptions on repository-relative paths rather than bare filenames that two
+  `journal.py` files shared.
 - The `Stop` completion gate no longer stands down for the session that holds
   the reader lease. A hook process does not inherit the environment of the
   agent's shell, so a gate run could derive a different reader identity than

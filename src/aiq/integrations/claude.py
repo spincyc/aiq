@@ -47,7 +47,8 @@ def _claude_config_directory(environment: Mapping[str, str]) -> Path:
         path = Path(configured)
         if not path.is_absolute():
             raise ClaudeIntegrationError(
-                "CLAUDE_CONFIG_DIR must be an absolute path"
+                "CLAUDE_CONFIG_DIR must be an absolute path",
+                code="integration_drift",
             )
         return path
     return (

@@ -39,7 +39,10 @@ def _codex_home(environment: Mapping[str, str]) -> Path:
     if configured:
         path = Path(configured)
         if not path.is_absolute():
-            raise CodexIntegrationError("CODEX_HOME must be an absolute path")
+            raise CodexIntegrationError(
+                "CODEX_HOME must be an absolute path",
+                code="integration_drift",
+            )
         return path
     return (
         _hooks.home_directory(environment, error_class=CodexIntegrationError)
@@ -100,7 +103,10 @@ def _inline_configuration_status(codex_home: Path) -> dict[str, bool]:
     try:
         document = tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise CodexIntegrationError(f"Codex config is invalid TOML: {path}") from error
+        raise CodexIntegrationError(
+            f"Codex config is invalid TOML: {path}",
+            code="integration_drift",
+        ) from error
     hooks = document.get("hooks")
     features = document.get("features")
     disabled = isinstance(features, dict) and features.get("hooks") is False

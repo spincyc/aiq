@@ -55,13 +55,15 @@ def _integration_list(arguments: argparse.Namespace) -> int:
 def _guidance_target(arguments: argparse.Namespace) -> Path:
     if arguments.user:
         raise guidance.GuidanceIntegrationError(
-            "the guidance integration uses --target, not --user"
+            "the guidance integration uses --target, not --user",
+            code="invalid_argument",
         )
     for option in ("launcher", "git_executable"):
         if getattr(arguments, option, None) is not None:
             raise guidance.GuidanceIntegrationError(
                 "the guidance integration does not accept "
-                f"--{option.replace('_', '-')}"
+                f"--{option.replace('_', '-')}",
+                code="invalid_argument",
             )
     return arguments.target
 
@@ -76,11 +78,13 @@ def _require_user_selector(
     if getattr(arguments, "target", None) is not None:
         raise error_class(
             f"the {integration_id} integration uses --user, not --target: "
-            f"{corrected}"
+            f"{corrected}",
+            code="invalid_argument",
         )
     if not arguments.user:
         raise error_class(
-            f"the {integration_id} integration requires --user: {corrected}"
+            f"the {integration_id} integration requires --user: {corrected}",
+            code="invalid_argument",
         )
 
 

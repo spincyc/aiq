@@ -6,17 +6,42 @@ AIQ separates human diagnostics from stable machine classification. Error
 messages may improve without changing the error code: a code is chosen at the
 raise site that detects the failure and travels with the error, so it is
 independent of the wording, punctuation, and interpolated values of the
-diagnostic. Every journal-error raise site in AIQ sets its own code, for
-every code in the table below — `not_found`, `invalid_argument`,
-`invalid_document`, `not_claimable`, and `state_conflict` included, not only
-the fence and integrity codes.
+diagnostic.
 
-Nothing is classified by wording any more. The substring rules that once
-decided uncoded errors are gone, including for the ingest path that re-raised
-the event layer's diagnostic: that wrap now pins `invalid_document`, matching
-an uncaught event-validation failure. An error that somehow reaches the CLI
-without a known code is an AIQ defect and reports `internal_error`, never a
-guess. No consumer should infer a code from message wording.
+Coverage is the whole error hierarchy, not the journal alone. Every raise
+site of `JournalError` and of every subclass of it sets its own code — the
+integration errors included, whether raised by name, through the shared
+engine's `error_class` parameter, or through a spec's `error_class`
+attribute. Every code in the table below is pinnable, `not_found`,
+`invalid_argument`, `invalid_document`, `not_claimable`, `state_conflict`,
+`invalid_config`, and `integration_drift` included, not only the fence and
+integrity codes. `JournalErrorRaiseSiteCoverageTests` in
+`tests/test_cli_protocol.py` enforces this: it derives the subclass names
+from the tree, so a new error class is covered without editing the test, and
+it fails on a raise site that sets no code or an unregistered one.
+
+## Classification precedence
+
+Classification applies exactly one rule, in this order:
+
+1. **An explicit code decides.** If the error carries a `code` registered in
+   the exit table, that code and its exit are the answer. This is checked
+   first for every `JournalError` subclass. Nothing below can override it.
+2. **Class-based rules.** Configuration and event errors, which are not
+   journal errors, map to `invalid_config` and `invalid_document`.
+3. **Legacy substring rules.** Retained only for an integration error that
+   reaches the CLI without a code. No raise site in AIQ can reach them, so
+   nothing AIQ raises is classified by wording; they exist so an error built
+   outside the tree degrades predictably rather than as a defect.
+4. **Residue.** A `JournalError` with no code, or with a code missing from
+   the exit table, is an AIQ defect and reports `internal_error`, never a
+   guess.
+
+Ordering is load-bearing. `HookIntegrationError` and
+`GuidanceIntegrationError` are `JournalError` subclasses, so testing the
+class-based and substring rules before the explicit code would make `code=`
+inert on exactly the raise sites that set it most. No consumer should infer a
+code from message wording.
 
 ## JSON form
 
@@ -114,6 +139,25 @@ failures. The correction applied four rules:
 `state_conflict` therefore now means what its description says: a requested
 transition or mutation that the current state rejects. It is no longer the
 residue category it became by default.
+
+The integration raise sites were pinned the same way, to whatever the
+substring rules already produced, and the same kind of accident survives in
+three of them. They are recorded here rather than corrected silently, because
+changing them moves a failure between exit categories and so is a breaking
+distribution change under the rule above. Each is reachable only through the
+integration command family:
+
+| Site | Today | Deserves |
+|---|---|---|
+| `--launcher` path contains control characters | `integration_drift`, exit 6 | `invalid_argument`, exit 2 — it is a malformed caller-supplied scalar, and `--git-executable` already reports that |
+| Resolved launcher is not an executable file | `integration_drift`, exit 6 | `unsupported_environment`, exit 6 — a missing host facility, as it already is for Git and Python; exit is unchanged |
+| Manifest `git_executable` or `python_executable` field is corrupt | `unsupported_environment`, exit 6 | `integration_drift`, exit 6 — the environment is fine, the stored manifest is not; the sibling `launcher` field already reports drift; exit is unchanged |
+
+The launcher wording matched neither the argument rules nor the executable
+rules, so both of its failures fell through to drift; the manifest wording
+named Git and Python, so it matched the executable rules it had nothing to do
+with. Two of the three keep their exit category and could be corrected as
+a code-only change.
 
 Retry behavior depends on the code. `revision_conflict` requires rereading task
 state. `claim_expired` requires acquiring a new claim. `not_claimable` may be a

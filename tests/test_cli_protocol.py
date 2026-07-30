@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -1096,23 +1097,79 @@ class JournalErrorCodeIdentityTests(unittest.TestCase):
 class JournalErrorRaiseSiteCoverageTests(unittest.TestCase):
     """Every ``JournalError`` raise site carries its own stable code.
 
-    The substring fallback in ``aiq.cli._errors`` is gone: an unpinned site
-    now classifies as ``internal_error``. This test is what keeps that
-    honest, failing on a new raise site without ``code=`` rather than
-    letting it reach users as an implementation defect.
+    ``_classify_error`` consults an explicit ``code`` before any
+    class-based or wording-based rule, and an unpinned plain
+    ``JournalError`` classifies as ``internal_error``. This test is what
+    keeps that honest, failing on a new raise site without ``code=``
+    rather than letting it reach users as an implementation defect.
+
+    The raised names are derived from the tree rather than hardcoded, so
+    the integration subclasses -- ``HookIntegrationError`` and its
+    adapters, ``GuidanceIntegrationError`` -- are covered, and so is any
+    subclass added later. ``error_class`` covers the two indirect forms
+    the shared integration engine uses: ``raise error_class(...)`` through
+    a parameter and ``raise spec.error_class(...)`` through an attribute.
     """
 
+    # Keyed on the repo-relative POSIX path, never a bare filename: the
+    # tree holds both src/aiq/journal.py and src/aiq/cli/journal.py.
     EXEMPT: set[tuple[str, str]] = set()
-    RAISED = {"JournalError", "_NotGitRepository"}
 
-    def test_every_raise_site_sets_a_code(self) -> None:
-        unpinned: list[str] = []
-        total = 0
-        for path in sorted((REPOSITORY_ROOT / "src" / "aiq").rglob("*.py")):
+    # Raise sites whose code is a runtime value rather than a literal.
+    # Registration must be deliberate; the codes those expressions can
+    # take are checked by the two tests below.
+    DYNAMIC_CODE_SITES = {
+        ("src/aiq/integrations/_hooks.py", "executable_path"),
+        ("src/aiq/integrations/_hooks.py", "install_integration"),
+        ("src/aiq/integrations/guidance.py", "install_integration"),
+    }
+
+    @staticmethod
+    def _source_files() -> list[Path]:
+        return sorted((REPOSITORY_ROOT / "src" / "aiq").rglob("*.py"))
+
+    @staticmethod
+    def _relative(path: Path) -> str:
+        return path.relative_to(REPOSITORY_ROOT).as_posix()
+
+    def _raised_names(self) -> set[str]:
+        """Names of ``JournalError`` and every subclass declared in-tree."""
+
+        bases: dict[str, list[str]] = {}
+        for path in self._source_files():
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                bases[node.name] = [
+                    base.id
+                    if isinstance(base, ast.Name)
+                    else getattr(base, "attr", "")
+                    for base in node.bases
+                ]
+        names = {"JournalError"}
+        while True:
+            grown = {
+                name
+                for name, parents in bases.items()
+                if any(parent in names for parent in parents)
+            }
+            if grown <= names:
+                break
+            names |= grown
+        # Indirect raises through the shared engine's spec-supplied class.
+        return names | {"error_class"}
+
+    def _raise_sites(self):
+        """Yield ``(relative_path, lineno, function, call)`` per raise."""
+
+        raised = self._raised_names()
+        for path in self._source_files():
             tree = ast.parse(path.read_text())
             owner: dict[int, str] = {}
             for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
+                if isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
                     end = node.end_lineno or node.lineno
                     for line in range(node.lineno, end + 1):
                         owner[line] = node.name
@@ -1128,44 +1185,145 @@ class JournalErrorRaiseSiteCoverageTests(unittest.TestCase):
                     if isinstance(function, ast.Name)
                     else getattr(function, "attr", None)
                 )
-                if name not in self.RAISED:
+                if name not in raised:
                     continue
-                total += 1
-                if any(keyword.arg == "code" for keyword in call.keywords):
-                    continue
-                site = (path.name, owner.get(node.lineno, "<module>"))
-                if site in self.EXEMPT:
-                    continue
-                unpinned.append(f"{path.name}:{node.lineno} in {site[1]}")
+                yield (
+                    self._relative(path),
+                    node.lineno,
+                    owner.get(node.lineno, "<module>"),
+                    call,
+                )
+
+    def test_raised_names_cover_the_integration_subclasses(self) -> None:
+        raised = self._raised_names()
+        for name in (
+            "JournalError",
+            "_NotGitRepository",
+            "HookIntegrationError",
+            "ClaudeIntegrationError",
+            "CodexIntegrationError",
+            "GuidanceIntegrationError",
+            "error_class",
+        ):
+            self.assertIn(name, raised)
+
+    def test_every_raise_site_sets_a_code(self) -> None:
+        unpinned: list[str] = []
+        total = 0
+        for relative, lineno, function, call in self._raise_sites():
+            total += 1
+            if any(keyword.arg == "code" for keyword in call.keywords):
+                continue
+            if (relative, function) in self.EXEMPT:
+                continue
+            unpinned.append(f"{relative}:{lineno} in {function}")
         self.assertEqual(unpinned, [], "raise sites without code=")
-        self.assertGreater(total, 200)
+        self.assertGreater(total, 340)
 
     def test_every_pinned_code_is_a_known_stable_code(self) -> None:
-        for path in sorted((REPOSITORY_ROOT / "src" / "aiq").rglob("*.py")):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Raise):
+        for relative, lineno, function, call in self._raise_sites():
+            for keyword in call.keywords:
+                if keyword.arg != "code":
                     continue
-                call = node.exc
-                if not isinstance(call, ast.Call):
-                    continue
-                function = call.func
-                name = (
-                    function.id
-                    if isinstance(function, ast.Name)
-                    else getattr(function, "attr", None)
-                )
-                if name not in self.RAISED:
-                    continue
-                for keyword in call.keywords:
-                    if keyword.arg != "code":
-                        continue
-                    self.assertIsInstance(keyword.value, ast.Constant)
+                site = f"{relative}:{lineno} in {function}"
+                if isinstance(keyword.value, ast.Constant):
                     self.assertIn(
-                        keyword.value.value,
-                        _JOURNAL_ERROR_CODE_EXITS,
-                        f"{path.name}:{node.lineno}",
+                        keyword.value.value, _JOURNAL_ERROR_CODE_EXITS, site
                     )
+                    continue
+                self.assertIn(
+                    (relative, function), self.DYNAMIC_CODE_SITES, site
+                )
+                # A literal fallback in a runtime expression -- the
+                # ``or "integration_drift"`` in
+                # ``plan.get("_blocked_code") or "integration_drift"`` --
+                # is still a code and must be a known one. Only ``or``
+                # operands are codes; a string elsewhere in the
+                # expression is a lookup key, not a classification.
+                for node in ast.walk(keyword.value):
+                    if not isinstance(node, ast.BoolOp):
+                        continue
+                    for operand in node.values:
+                        if isinstance(operand, ast.Constant) and isinstance(
+                            operand.value, str
+                        ):
+                            self.assertIn(
+                                operand.value, _JOURNAL_ERROR_CODE_EXITS, site
+                            )
+
+    def test_every_code_valued_argument_is_a_known_stable_code(self) -> None:
+        """Values feeding a runtime ``code=`` are themselves known codes.
+
+        ``executable_path`` takes its control-character and
+        not-executable codes as arguments, so the literals live at the
+        signature defaults and at the wrapper call sites rather than at
+        the raise. Both positions are checked here. A ``_code`` name
+        bound to a non-string, such as ``failure_exit_code``, is a
+        different kind of code and is left alone.
+        """
+
+        def is_code(node: ast.AST) -> bool:
+            return isinstance(node, ast.Constant) and isinstance(
+                node.value, str
+            )
+
+        found = 0
+        for path in self._source_files():
+            relative = self._relative(path)
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Call):
+                    for keyword in node.keywords:
+                        if not (keyword.arg or "").endswith("_code"):
+                            continue
+                        if not is_code(keyword.value):
+                            continue
+                        found += 1
+                        self.assertIn(
+                            keyword.value.value,
+                            _JOURNAL_ERROR_CODE_EXITS,
+                            f"{relative}:{node.lineno} {keyword.arg}",
+                        )
+                if not isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    continue
+                arguments = node.args
+                pairs = list(
+                    zip(
+                        arguments.kwonlyargs,
+                        arguments.kw_defaults,
+                    )
+                ) + list(
+                    zip(
+                        arguments.args[
+                            len(arguments.args) - len(arguments.defaults) :
+                        ],
+                        arguments.defaults,
+                    )
+                )
+                for argument, default in pairs:
+                    if not argument.arg.endswith("_code"):
+                        continue
+                    if not is_code(default):
+                        continue
+                    found += 1
+                    self.assertIn(
+                        default.value,
+                        _JOURNAL_ERROR_CODE_EXITS,
+                        f"{relative}:{node.lineno} {argument.arg}",
+                    )
+        self.assertGreater(found, 0)
+
+    def test_every_documented_code_is_registered(self) -> None:
+        """errors.md's stable-code table and the exit table agree."""
+
+        contract = (
+            REPOSITORY_ROOT / "docs" / "contracts" / "errors.md"
+        ).read_text()
+        section = contract.split("## Stable codes", 1)[1].split("\n## ", 1)[0]
+        documented = set(re.findall(r"^\| `([a-z_]+)` \|", section, re.M))
+        self.assertGreater(len(documented), 15)
+        self.assertEqual(documented, set(_JOURNAL_ERROR_CODE_EXITS))
 
 
 if __name__ == "__main__":

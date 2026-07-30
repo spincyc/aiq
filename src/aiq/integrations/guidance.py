@@ -57,16 +57,19 @@ _valid_digest = _hooks._valid_digest
 def _target_path(target: str | Path | None) -> Path:
     if target is None:
         raise GuidanceIntegrationError(
-            "guidance integration requires an explicit absolute --target path"
+            "guidance integration requires an explicit absolute --target path",
+            code="invalid_argument",
         )
     path = Path(target)
     if not path.is_absolute():
         raise GuidanceIntegrationError(
-            "guidance --target must be an absolute path"
+            "guidance --target must be an absolute path",
+            code="invalid_argument",
         )
     if any(character in os.fspath(path) for character in ("\0", "\r", "\n")):
         raise GuidanceIntegrationError(
-            "guidance --target path contains control characters"
+            "guidance --target path contains control characters",
+            code="invalid_argument",
         )
     return path
 
@@ -83,15 +86,18 @@ def _require_target_directory(target: Path) -> None:
         status = parent.stat()
     except FileNotFoundError as error:
         raise GuidanceIntegrationError(
-            f"guidance target directory does not exist: {parent}"
+            f"guidance target directory does not exist: {parent}",
+            code="integration_drift",
         ) from error
     except OSError as error:
         raise GuidanceIntegrationError(
-            f"guidance target directory is unsafe: {parent}"
+            f"guidance target directory is unsafe: {parent}",
+            code="integration_drift",
         ) from error
     if not stat.S_ISDIR(status.st_mode):
         raise GuidanceIntegrationError(
-            f"guidance target directory is not a directory: {parent}"
+            f"guidance target directory is not a directory: {parent}",
+            code="integration_drift",
         )
 
 
@@ -144,7 +150,8 @@ def _load_target(
         data.decode("utf-8")
     except UnicodeDecodeError as error:
         raise GuidanceIntegrationError(
-            f"guidance target is not UTF-8: {target}"
+            f"guidance target is not UTF-8: {target}",
+            code="integration_drift",
         ) from error
     return data, status
 
@@ -158,7 +165,8 @@ def _locate_block(data: bytes, *, target: Path) -> tuple[int, int] | None:
         return None
     if begin_count != 1 or end_count != 1:
         raise GuidanceIntegrationError(
-            f"guidance markers are ambiguous: {target}"
+            f"guidance markers are ambiguous: {target}",
+            code="integration_drift",
         )
     start = data.find(begin)
     stop = data.find(end)
@@ -169,13 +177,15 @@ def _locate_block(data: bytes, *, target: Path) -> tuple[int, int] | None:
         or not data[:stop].endswith(b"\n")
     ):
         raise GuidanceIntegrationError(
-            f"guidance markers are malformed: {target}"
+            f"guidance markers are malformed: {target}",
+            code="integration_drift",
         )
     stop += len(end)
     if stop < len(data):
         if data[stop : stop + 1] != b"\n":
             raise GuidanceIntegrationError(
-                f"guidance markers are malformed: {target}"
+                f"guidance markers are malformed: {target}",
+                code="integration_drift",
             )
         stop += 1
     return start, stop
@@ -202,7 +212,8 @@ def _validate_manifest(
     }
     if not isinstance(manifest, dict) or not required.issubset(manifest):
         raise GuidanceIntegrationError(
-            "integration manifest has an invalid schema"
+            "integration manifest has an invalid schema",
+            code="integration_drift",
         )
     if (
         type(manifest["v"]) is not int
@@ -215,7 +226,8 @@ def _validate_manifest(
         or manifest["separator"] not in ("", "\n")
     ):
         raise GuidanceIntegrationError(
-            "integration manifest has invalid ownership"
+            "integration manifest has invalid ownership",
+            code="integration_drift",
         )
     block = manifest["managed_block"]
     if (
@@ -227,7 +239,8 @@ def _validate_manifest(
         or block.count(END_MARKER) != 1
     ):
         raise GuidanceIntegrationError(
-            "integration manifest owned block is invalid"
+            "integration manifest owned block is invalid",
+            code="integration_drift",
         )
     if (
         not _valid_digest(manifest["managed_block_sha256"])
@@ -239,12 +252,14 @@ def _validate_manifest(
         )
     ):
         raise GuidanceIntegrationError(
-            "integration manifest digest is invalid"
+            "integration manifest digest is invalid",
+            code="integration_drift",
         )
     backups = manifest["backups"]
     if not isinstance(backups, list):
         raise GuidanceIntegrationError(
-            "integration manifest backups are invalid"
+            "integration manifest backups are invalid",
+            code="integration_drift",
         )
     backup_directory = state_directory / "backups"
     for backup in backups:
@@ -256,7 +271,8 @@ def _validate_manifest(
             or not _valid_digest(backup["sha256"])
         ):
             raise GuidanceIntegrationError(
-                "integration manifest backup is invalid"
+                "integration manifest backup is invalid",
+                code="integration_drift",
             )
     return manifest
 
@@ -272,7 +288,8 @@ def _read_manifest(
         status = None
     except OSError as error:
         raise GuidanceIntegrationError(
-            f"integration state directory is unsafe: {state_directory}"
+            f"integration state directory is unsafe: {state_directory}",
+            code="integration_drift",
         ) from error
     if status is not None and (
         not stat.S_ISDIR(status.st_mode)
@@ -281,7 +298,8 @@ def _read_manifest(
         or stat.S_IMODE(status.st_mode) & 0o077
     ):
         raise GuidanceIntegrationError(
-            f"integration state directory is unsafe: {state_directory}"
+            f"integration state directory is unsafe: {state_directory}",
+            code="integration_drift",
         )
     path = _manifest_path(state_directory)
     try:
@@ -302,7 +320,8 @@ def _read_manifest(
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise GuidanceIntegrationError(
-            "integration manifest is invalid"
+            "integration manifest is invalid",
+            code="integration_drift",
         ) from error
     return _validate_manifest(
         manifest,
@@ -342,11 +361,13 @@ def _assert_target_unchanged(
         if expected is None and expected_status is None:
             return
         raise GuidanceIntegrationError(
-            "guidance target changed before mutation"
+            "guidance target changed before mutation",
+            code="integration_drift",
         )
     if expected is None or expected_status is None:
         raise GuidanceIntegrationError(
-            "guidance target changed before mutation"
+            "guidance target changed before mutation",
+            code="integration_drift",
         )
     if (
         current != expected
@@ -354,7 +375,8 @@ def _assert_target_unchanged(
         or status.st_ino != expected_status.st_ino
     ):
         raise GuidanceIntegrationError(
-            "guidance target changed before mutation"
+            "guidance target changed before mutation",
+            code="integration_drift",
         )
 
 
@@ -394,6 +416,10 @@ def _build_plan(
     except GuidanceIntegrationError as error:
         result["status"] = "unsafe"
         result["blocked_reason"] = str(error)
+        # `install_integration` re-raises a blocked plan's reason, so the
+        # originating code travels with it. Private key, stripped by
+        # `_public_plan`.
+        result["_blocked_code"] = error.code
         return result
 
     result["before_sha256"] = sha256_or_none(before)
@@ -406,6 +432,7 @@ def _build_plan(
     except GuidanceIntegrationError as error:
         result["status"] = "conflict"
         result["blocked_reason"] = str(error)
+        result["_blocked_code"] = error.code
         return result
     current = None if region is None else before[region[0] : region[1]]
 
@@ -568,17 +595,24 @@ def install_integration(
         )
         if plan_token is not None and plan.get("plan_token") != plan_token:
             raise GuidanceIntegrationError(
-                "reviewed integration plan is stale"
+                "reviewed integration plan is stale",
+                code="integration_drift",
             )
         if plan["action"] == "block":
-            raise GuidanceIntegrationError(plan["blocked_reason"])
+            raise GuidanceIntegrationError(
+                plan["blocked_reason"],
+                # Every other blocked status — unmanaged markers, a drifted
+                # block, a manifest mismatch — is integration drift.
+                code=plan.get("_blocked_code") or "integration_drift",
+            )
         if plan["action"] == "none":
             return _public_plan(plan)
 
         before, before_status = _load_target(resolved_target)
         if sha256_or_none(before) != plan["before_sha256"]:
             raise GuidanceIntegrationError(
-                "guidance target changed while installing"
+                "guidance target changed while installing",
+                code="integration_drift",
             )
         previous_manifest = _read_manifest(
             state_directory,
@@ -655,7 +689,8 @@ def uninstall_integration(
         manifest = _read_manifest(state_directory, target=resolved_target)
         if manifest is None:
             raise GuidanceIntegrationError(
-                "no AIQ guidance integration manifest exists"
+                "no AIQ guidance integration manifest exists",
+                code="integration_drift",
             )
         if manifest["status"] == "uninstalled":
             return {
@@ -670,18 +705,21 @@ def uninstall_integration(
         before, before_status = _load_target(resolved_target)
         if before is None:
             raise GuidanceIntegrationError(
-                "the manifest-owned guidance file is missing"
+                "the manifest-owned guidance file is missing",
+                code="integration_drift",
             )
         region = _locate_block(before, target=resolved_target)
         if region is None:
             raise GuidanceIntegrationError(
-                "the manifest-owned guidance block is missing"
+                "the manifest-owned guidance block is missing",
+                code="integration_drift",
             )
         start, stop = region
         block = manifest["managed_block"].encode()
         if before[start:stop] != block:
             raise GuidanceIntegrationError(
-                "the AIQ-owned guidance block has drifted; refusing uninstall"
+                "the AIQ-owned guidance block has drifted; refusing uninstall",
+                code="integration_drift",
             )
         separator = manifest["separator"].encode()
         if (

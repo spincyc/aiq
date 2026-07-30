@@ -10,16 +10,21 @@ from aiq.integrations._hooks import HookIntegrationError
 from aiq.journal import JournalError
 
 
-# Stable machine-readable codes set at JournalError raise sites, mapped to
-# their (code, exit) classification. Every raise site in the tree sets one, so
-# a diagnostic can be reworded without changing the documented code.
+# Every stable code in docs/contracts/errors.md, mapped to its (code, exit)
+# classification. Codes are set at the raise site that detects the failure —
+# on `JournalError` and on every subclass of it, the integration errors
+# included — so a diagnostic can be reworded without changing the code. The
+# table must stay complete: a code absent from it is not pinnable, because
+# `_classify_error` falls through to the legacy rules below instead.
 _JOURNAL_ERROR_CODE_EXITS: dict[str, tuple[str, int]] = {
     "claim_expired": ("claim_expired", 4),
     "claim_mismatch": ("claim_mismatch", 4),
     "contention": ("contention", 4),
+    "integration_drift": ("integration_drift", 6),
     "integrity_failed": ("integrity_failed", 5),
     "internal_error": ("internal_error", 70),
     "invalid_argument": ("invalid_argument", 2),
+    "invalid_config": ("invalid_config", 2),
     "invalid_document": ("invalid_document", 2),
     "io_error": ("io_error", 6),
     "not_claimable": ("not_claimable", 4),
@@ -33,10 +38,17 @@ _JOURNAL_ERROR_CODE_EXITS: dict[str, tuple[str, int]] = {
 
 
 def _classify_journal_error(error: JournalError) -> tuple[str, int]:
+    """Classify one journal error by its pinned code alone.
+
+    This is the whole classification for a plain ``JournalError``. The
+    integration subclasses go through ``_classify_error``, which applies
+    the same code-first rule and then the legacy wording rules.
+    """
+
     explicit = _JOURNAL_ERROR_CODE_EXITS.get(getattr(error, "code", None))
     if explicit is not None:
         return explicit
-    # Every `JournalError` raise site sets a known `code=`, which
+    # Every raise site in the tree sets a known `code=`, which
     # `JournalErrorRaiseSiteCoverageTests` enforces, so reaching here means
     # a site was added without one or with a code missing from the table
     # above. That is an AIQ defect, not a classifiable journal outcome, and
@@ -45,10 +57,23 @@ def _classify_journal_error(error: JournalError) -> tuple[str, int]:
 
 
 def _classify_error(error: Exception) -> tuple[str, int]:
+    # Precedence: an explicit code decides, before any class-based or
+    # wording-based rule. This must stay first. `HookIntegrationError` and
+    # `GuidanceIntegrationError` are `JournalError` subclasses matched by
+    # earlier `isinstance` arms below, so testing those arms first would
+    # make `code=` inert on exactly the raise sites that set it most.
+    if isinstance(error, JournalError):
+        explicit = _JOURNAL_ERROR_CODE_EXITS.get(getattr(error, "code", None))
+        if explicit is not None:
+            return explicit
     if isinstance(error, ConfigError):
         return "invalid_config", 2
     if isinstance(error, EventError):
         return "invalid_document", 2
+    # Legacy substring rules, retained only for an error that reaches the CLI
+    # without a code. `JournalErrorRaiseSiteCoverageTests` keeps every raise
+    # site in the tree pinned, so nothing in AIQ is classified by wording;
+    # these decide only for an uncoded error built outside the tree.
     if isinstance(error, guidance.GuidanceIntegrationError):
         message = str(error).lower()
         if (
