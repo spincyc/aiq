@@ -6,6 +6,8 @@ This project uses [Semantic Versioning](https://semver.org/). Public
 compatibility covers documented CLI behavior, exit codes, versioned JSON and
 effects documents, capability contracts, and integration manifests.
 
+## [Unreleased]
+
 ## [0.3.0a1] - 2026-07-30
 
 ### Breaking changes at a glance
@@ -771,5 +773,6 @@ Changed below.
   effects-alias errors as exit 2; the JSON envelope version invariant is
   pinned; capability and integration commands honor `AIQ_OUTPUT=json`.
 
+[Unreleased]: https://github.com/spincyc/aiq/compare/v0.3.0a1...HEAD
 [0.3.0a1]: https://github.com/spincyc/aiq/releases/tag/v0.3.0a1
 [0.2.0a1]: https://github.com/spincyc/aiq/releases/tag/v0.2.0a1
