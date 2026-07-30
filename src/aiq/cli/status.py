@@ -32,6 +32,14 @@ def _status(arguments: argparse.Namespace) -> int:
             f"{'ready':<8}  {task['task_id']}\tp{task['priority']}\t"
             f"{_single_line(task['title'])}"
         )
+    for task in result["blocked"]:
+        line = (
+            f"{'blocked':<8}  {task['task_id']}\tp{task['priority']}\t"
+            f"{_single_line(task['title'])}"
+        )
+        if task["blocked_by"]:
+            line += f"\tblocked by {', '.join(task['blocked_by'])}"
+        print(line)
     return 0
 
 

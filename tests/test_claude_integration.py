@@ -24,7 +24,7 @@ from aiq.integrations.claude import (
     uninstall_integration,
 )
 from aiq.journal import JournalError, check_journal, resolve_scope
-from aiq.queue import enqueue_task
+from aiq.queue import claim_message, dispose_message, enqueue_task
 
 
 class ClaudeIntegrationTest(unittest.TestCase):
@@ -694,6 +694,119 @@ class ClaudeIntegrationTest(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(errors.getvalue(), "")
             self.assertFalse(scope.journal_path.exists())
+
+    def _park_captured_message(self, repository: Path) -> None:
+        """Capture one prompt, then park it ``needs_input``."""
+
+        receipt = receive_hook(
+            json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session",
+                    "cwd": str(repository),
+                    "prompt": "which color?",
+                }
+            ),
+            git_executable=self.git_executable(),
+        )
+        scope = resolve_scope("repo", cwd=repository)
+        claim = claim_message(
+            scope,
+            owner_id="gate-test",
+            message_id=receipt["message_id"],
+        )
+        assert claim is not None
+        dispose_message(
+            scope,
+            receipt["message_id"],
+            claim_id=claim["claim_id"],
+            disposition="needs_input",
+            reason="awaiting a user answer",
+        )
+
+    def test_stop_gate_block_line_names_parked_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._initialized_repository(
+                Path(temporary_directory)
+            )
+            support.initialize_repo_journal(repository)
+            self._park_captured_message(repository)
+            task = enqueue_task(
+                resolve_scope("repo", cwd=repository),
+                title="Settle me",
+                owner_id="gate-test",
+            )
+            errors = io.StringIO()
+
+            blocked = receive_hook_main(
+                input_stream=io.BytesIO(
+                    json.dumps(
+                        {
+                            "hook_event_name": "Stop",
+                            "session_id": "session",
+                            "cwd": str(repository),
+                        }
+                    ).encode()
+                ),
+                error_stream=errors,
+                git_executable=self.git_executable(),
+            )
+
+            self.assertEqual(blocked, 2)
+            lines = errors.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("AIQ: runnable work remains: 1 ready task", lines[0])
+            # The parked fragment is appended after the ready-task
+            # fragments and before the settle tail.
+            self.assertIn(
+                "; 1 parked message awaits user input — settle finished "
+                f"work: aiq task done {task['task_id']} --summary TEXT",
+                lines[0],
+            )
+
+    def test_stop_gate_notice_surfaces_parked_messages_without_blocking(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = self._initialized_repository(
+                Path(temporary_directory)
+            )
+            support.initialize_repo_journal(repository)
+            self._park_captured_message(repository)
+            stop_payload = {
+                "hook_event_name": "Stop",
+                "session_id": "session",
+                "cwd": str(repository),
+            }
+            notice_errors = io.StringIO()
+            guarded_errors = io.StringIO()
+
+            # Nothing is runnable, so the stop is allowed (exit 0), but
+            # the parked question is surfaced as one stderr notice.
+            noticed = receive_hook_main(
+                input_stream=io.BytesIO(json.dumps(stop_payload).encode()),
+                error_stream=notice_errors,
+                git_executable=self.git_executable(),
+            )
+            # The loop guard stays fully silent even with parked messages.
+            guarded = receive_hook_main(
+                input_stream=io.BytesIO(
+                    json.dumps(
+                        {**stop_payload, "stop_hook_active": True}
+                    ).encode()
+                ),
+                error_stream=guarded_errors,
+                git_executable=self.git_executable(),
+            )
+
+            self.assertEqual(noticed, 0)
+            self.assertEqual(
+                notice_errors.getvalue(),
+                "AIQ: no runnable work; 1 parked message awaits user "
+                "input — aiq inbox list\n",
+            )
+            self.assertEqual(guarded, 0)
+            self.assertEqual(guarded_errors.getvalue(), "")
 
     def test_stop_gate_fails_open_on_gate_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

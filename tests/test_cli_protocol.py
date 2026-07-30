@@ -215,7 +215,7 @@ class CliProtocolTests(unittest.TestCase):
         status = self.ok("status", *self.scope)
         self.assertEqual(
             set(status),
-            {"claims", "messages", "ready", "scope", "tasks", "v"},
+            {"blocked", "claims", "messages", "ready", "scope", "tasks", "v"},
         )
         self.assertEqual(status["messages"]["applied"], 1)
         self.assertEqual(status["tasks"]["ready"], 1)

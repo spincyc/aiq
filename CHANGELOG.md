@@ -62,6 +62,17 @@ effects documents, capability contracts, and integration manifests.
 
 ### Changed
 
+- The `Stop` completion gate now surfaces parked `needs_input` messages:
+  a block line appends a fragment such as
+  `; 2 parked messages await user input` before the settle tail, and with
+  nothing runnable the gate exits 0 with the one-line stderr notice
+  `AIQ: no runnable work; 2 parked messages await user input —
+  aiq inbox list` instead of full silence (whether a host displays exit-0
+  stderr is host-dependent).
+- `aiq status` now also lists up to five blocked tasks with the failed
+  prerequisites causing each block: a `blocked` array of `task_id`,
+  `priority`, `title`, and `blocked_by` in `--json`, and
+  `blocked TASK … blocked by TASK` lines in the text output.
 - The `Stop` completion gate's block line is now actionable: after the
   counts it names up to the first three ready tasks — task ID,
   double-quoted title truncated to 40 characters, and a coarse ready-age

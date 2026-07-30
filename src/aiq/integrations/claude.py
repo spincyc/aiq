@@ -280,11 +280,14 @@ def gate_hook(
     integration_id: str = INTEGRATION_ID,
     git_executable: str | Path | None = None,
     agent_root: Path | None = None,
-) -> str | None:
+) -> tuple[bool, str] | None:
     """Evaluate one Claude Code ``Stop`` completion-gate payload.
 
-    Returns the single-line block reason, or ``None`` when stopping is
-    allowed (loop guard set, or nothing runnable in scope).
+    Returns ``(True, reason)`` with the single-line block reason,
+    ``(False, notice)`` with a non-blocking parked-message notice when
+    nothing is runnable but ``needs_input`` messages await the user, or
+    ``None`` when stopping is allowed silently (loop guard set, or
+    nothing runnable and nothing parked in scope).
     """
 
     return _hooks.gate_stop_hook(
@@ -311,8 +314,10 @@ def receive_hook_main(
     blocking error that erases the prompt. A ``Stop`` payload runs the
     completion gate instead: exit 2 with one stderr line blocks stopping
     while runnable work remains and ``stop_hook_active`` is falsy, exit
-    0 is silent otherwise, and any gate failure exits 0 with a single
-    diagnostic so an AIQ defect never blocks stopping.
+    0 with one stderr notice surfaces parked ``needs_input`` messages
+    when nothing is runnable, exit 0 is silent otherwise, and any gate
+    failure exits 0 with a single diagnostic so an AIQ defect never
+    blocks stopping.
     """
 
     return _hooks.run_receive_hook_main(

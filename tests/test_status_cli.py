@@ -93,8 +93,9 @@ class StatusCliTest(unittest.TestCase):
         self.assertEqual(payload["v"], 1)
         self.assertEqual(
             set(payload),
-            {"claims", "messages", "ready", "scope", "tasks", "v"},
+            {"blocked", "claims", "messages", "ready", "scope", "tasks", "v"},
         )
+        self.assertEqual(payload["blocked"], [])
         self.assertEqual(
             payload["messages"],
             {
@@ -138,6 +139,103 @@ class StatusCliTest(unittest.TestCase):
         self.assertEqual(lines[2], "claims    active=0")
         self.assertEqual(lines[3], f"ready     {task_id}\tp3\tStatus task")
 
+    def create_blocked_task(self) -> tuple[str, str]:
+        """Create a dependent task and cancel its prerequisite.
+
+        Returns ``(prerequisite_id, dependent_id)``; the dependent is
+        effectively blocked by the canceled prerequisite.
+        """
+
+        ingested = self.ok(
+            "ingest", "--message", "Create a doomed pair",
+            "--source", "status-test", *self.scope,
+        )
+        message_id = str(ingested["message_id"])
+        claimed = self.ok(
+            "inbox", "claim", message_id,
+            "--owner", "status-test", *self.scope,
+        )
+        effects = json.dumps(
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [
+                    ["create", "$prereq", {"title": "Doomed prerequisite"}],
+                    [
+                        "create",
+                        "$dep",
+                        {
+                            "title": "Blocked task",
+                            "priority": 6,
+                            "requires": ["$prereq"],
+                        },
+                    ],
+                ],
+            },
+            separators=(",", ":"),
+        )
+        applied = self.ok(
+            "inbox", "apply", message_id,
+            "--claim", str(claimed["claim"]["claim_id"]),
+            "--effects", "-", *self.scope, input_text=effects,
+        )
+        prereq_id = str(applied["aliases"]["$prereq"])
+        dep_id = str(applied["aliases"]["$dep"])
+        cancel = self.ok(
+            "ingest", "--message", "Cancel the prerequisite",
+            "--source", "status-test", *self.scope,
+        )
+        cancel_id = str(cancel["message_id"])
+        cancel_claim = self.ok(
+            "inbox", "claim", cancel_id,
+            "--owner", "status-test", *self.scope,
+        )
+        cancel_effects = json.dumps(
+            {
+                "v": 1,
+                "expect": {prereq_id: 1},
+                "effects": [
+                    ["transition", prereq_id, "canceled", {"reason": "obsolete"}]
+                ],
+            },
+            separators=(",", ":"),
+        )
+        self.ok(
+            "inbox", "apply", cancel_id,
+            "--claim", str(cancel_claim["claim"]["claim_id"]),
+            "--effects", "-", *self.scope, input_text=cancel_effects,
+        )
+        return prereq_id, dep_id
+
+    def test_status_lists_blocked_tasks_with_causes(self) -> None:
+        task_id = self.create_ready_task()
+        prereq_id, dep_id = self.create_blocked_task()
+
+        payload = self.ok("status", *self.scope)
+        self.assertEqual(payload["tasks"]["blocked"], 1)
+        self.assertEqual(
+            payload["blocked"],
+            [
+                {
+                    "task_id": dep_id,
+                    "priority": 6,
+                    "title": "Blocked task",
+                    "blocked_by": [prereq_id],
+                }
+            ],
+        )
+
+        completed = self.run_aiq("status", *self.scope)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        lines = completed.stdout.splitlines()
+        self.assertEqual(
+            lines[-2], f"ready     {task_id}\tp3\tStatus task"
+        )
+        self.assertEqual(
+            lines[-1],
+            f"blocked   {dep_id}\tp6\tBlocked task\tblocked by {prereq_id}",
+        )
+
     def test_missing_journal_reports_zeros_without_creating_storage(self) -> None:
         payload = self.ok("status", *self.scope)
 
@@ -146,6 +244,7 @@ class StatusCliTest(unittest.TestCase):
         self.assertEqual(sum(payload["tasks"].values()), 0)
         self.assertEqual(payload["claims"], {"active": 0})
         self.assertEqual(payload["ready"], [])
+        self.assertEqual(payload["blocked"], [])
         self.assertFalse(
             (self.repository / ".git" / "aiq" / "journal.sqlite3").exists()
         )

@@ -1133,8 +1133,10 @@ def read_status(
     """Summarize message, task, and claim counts plus the top ready tasks.
 
     Reports bounded counts only -- never message or task content -- from
-    one read snapshot. A missing journal yields empty counts without
-    creating the journal.
+    one read snapshot, plus two bounded listings: the top ready tasks and
+    up to five blocked tasks, each blocked entry naming the failed
+    prerequisites (``blocked_by``) causing the block. A missing journal
+    yields empty counts without creating the journal.
     """
 
     if ready_limit < 1 or ready_limit > 64:
@@ -1146,6 +1148,7 @@ def read_status(
         "tasks": task_counts,
         "claims": {"active": 0},
         "ready": [],
+        "blocked": [],
     }
     if not scope.journal_path.exists():
         return result
@@ -1209,6 +1212,28 @@ def read_status(
                 "created_at": task["created_at"],
             }
             for task in ready[:ready_limit]
+        ]
+        blocked = [
+            task
+            for task in tasks.values()
+            if states[task["task_id"]] == "blocked"
+        ]
+        blocked.sort(key=_queue_order_key)
+        result["blocked"] = [
+            {
+                "task_id": task["task_id"],
+                "priority": task["priority"],
+                "title": task["title"],
+                # The failed prerequisites causing the block, matching
+                # the _task_output derivation; intrinsically blocked
+                # tasks (recorded state "blocked") report an empty list.
+                "blocked_by": sorted(
+                    dependency
+                    for dependency in task["dependencies"]
+                    if states[dependency] in FAILURE_STATES
+                ),
+            }
+            for task in blocked[:5]
         ]
         result["claims"]["active"] = connection.execute(
             """

@@ -77,15 +77,25 @@ After the counts, the line names up to the first three ready tasks — task ID,
 double-quoted title truncated to 40 characters, and a coarse ready-age — and
 ends with the settle command; with claims or messages only, it keeps the
 `— run aiq status` tail. A parked `needs_input` message awaits the user, not
-the agent, and never blocks stopping. Codex feeds that line back to the model
+the agent, and never blocks stopping, but it is surfaced: a block line
+appends a fragment such as `; 2 parked messages await user input` before
+the settle tail. Codex feeds that line back to the model
 and continues the turn, so the model can run the remaining work before
 declaring completion.
+
+When nothing is runnable but parked `needs_input` messages remain, the gate
+exits 0 with exactly one stderr notice —
+`AIQ: no runnable work; 2 parked messages await user input —
+aiq inbox list` — instead of full silence, so a session cannot end with a waiting
+question unmentioned. Whether stderr from an exit-0 hook is displayed is
+host-dependent; Codex does not feed it back to the model.
 
 The gate honors the host loop guard: when the `Stop` payload carries a truthy
 `stop_hook_active` — Codex sets it while a turn was already continued by a
 stop hook — the gate exits 0 silently instead of blocking again, so it can
-never loop the session. It also exits 0 silently when nothing is runnable or
-no journal exists for the scope; it never creates storage.
+never loop the session. It also exits 0 silently when nothing is runnable
+and nothing is parked, or when no journal exists for the scope; it never
+creates storage.
 
 The gate fails open, the inverse of capture's fail-visible rule: any error on
 the gate path (invalid payload, unresolvable scope, locked or unreadable

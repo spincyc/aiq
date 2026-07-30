@@ -80,20 +80,23 @@ def run_receive_hook_main(
     error_class: type[JournalError],
     input_label: str,
     failure_exit_code: int,
-    gate: Callable[[bytes], str | None] | None = None,
+    gate: Callable[[bytes], tuple[bool, str] | None] | None = None,
     input_stream: Any = None,
     error_stream: Any = None,
 ) -> int:
     """Run one stdout-silent hook boundary, dispatched on the event name.
 
-    A ``Stop`` payload runs ``gate`` when one is supplied: a returned block
-    reason exits 2 with that single stderr line (the host feeds it back to
-    the model and continues), ``None`` exits 0 silently, and any gate error
-    exits 0 with a single stderr diagnostic so an AIQ defect never blocks
-    stopping. Every other payload runs ``receive``; a capture failure exits
-    ``failure_exit_code`` with a single stderr diagnostic. A payload that
-    cannot be read or parsed enough to identify its event follows the
-    capture failure path, which also never blocks stopping.
+    A ``Stop`` payload runs ``gate`` when one is supplied: a returned
+    ``(True, line)`` block exits 2 with that single stderr line (the host
+    feeds it back to the model and continues), ``(False, line)`` exits 0
+    with that single stderr line as a non-blocking notice (whether the
+    host displays it is host-dependent), ``None`` exits 0 silently, and
+    any gate error exits 0 with a single stderr diagnostic so an AIQ
+    defect never blocks stopping. Every other payload runs ``receive``; a
+    capture failure exits ``failure_exit_code`` with a single stderr
+    diagnostic. A payload that cannot be read or parsed enough to
+    identify its event follows the capture failure path, which also never
+    blocks stopping.
     """
 
     source = sys.stdin.buffer if input_stream is None else input_stream
@@ -110,18 +113,19 @@ def run_receive_hook_main(
         return failure_exit_code
     if gate is not None and _payload_event(payload) == STOP_EVENT:
         try:
-            reason = gate(payload)
+            outcome = gate(payload)
         except Exception as error:
             errors.write(
                 f"AIQ completion gate skipped: {single_line(str(error))}\n"
             )
             errors.flush()
             return 0
-        if reason is None:
+        if outcome is None:
             return 0
-        errors.write(f"{single_line(reason)}\n")
+        blocking, line = outcome
+        errors.write(f"{single_line(line)}\n")
         errors.flush()
-        return 2
+        return 2 if blocking else 0
     try:
         receive(payload)
         return 0
@@ -1713,6 +1717,11 @@ def _truncated_title(title: str, limit: int = 40) -> str:
     return title[: limit - 1] + "…"
 
 
+def _parked_fragment(count: int) -> str:
+    verb = "awaits" if count == 1 else "await"
+    return f"{_count_noun(count, 'parked message')} {verb} user input"
+
+
 def _coarse_age(created_at_iso: Any, now: datetime) -> str | None:
     """Coarse age such as ``5m``, ``2h``, or ``3d``, or ``None``.
 
@@ -1742,23 +1751,27 @@ def gate_stop_hook(
     integration_id: str,
     git_executable: str | Path | None = None,
     agent_root: Path | None = None,
-) -> str | None:
+) -> tuple[bool, str] | None:
     """Evaluate one ``Stop`` completion gate payload.
 
-    Returns the single-line block reason while runnable work remains in
-    the scope resolved from the payload working directory, or ``None``
-    when stopping is allowed: the host's ``stop_hook_active`` loop guard
-    is set, or no ready task, unexpired active claim, or unapplied
-    ``received`` message remains. When ready tasks exist, the reason
-    appends up to the first three — task ID, double-quoted title
-    truncated to 40 characters, and a coarse ready-age — and ends with
-    the exact settle command, so a model blocked once per stop chain can
-    act without another lookup. A parked ``needs_input`` message is
-    not runnable work — it awaits the user, not the agent — so it never
-    blocks stopping. The check is one read-only snapshot; a missing
-    journal counts as nothing runnable and never creates storage. Errors
-    raise; the boundary in :func:`run_receive_hook_main` fails open on
-    them (exit 0) so an AIQ defect never blocks stopping.
+    Returns ``(True, reason)`` with the single-line block reason while
+    runnable work remains in the scope resolved from the payload working
+    directory; the host's ``stop_hook_active`` loop guard being set
+    returns ``None`` (silent allow) unconditionally. When ready tasks
+    exist, the reason appends up to the first three — task ID,
+    double-quoted title truncated to 40 characters, and a coarse
+    ready-age — and ends with the exact settle command, so a model
+    blocked once per stop chain can act without another lookup. A parked
+    ``needs_input`` message is not runnable work — it awaits the user,
+    not the agent — so it never blocks stopping, but it is surfaced: a
+    block line appends a parked-message fragment, and with nothing
+    runnable the gate returns ``(False, notice)`` — one non-blocking
+    stderr line naming the parked count — instead of full silence.
+    ``None`` (silent allow) means nothing runnable and nothing parked.
+    The check is one read-only snapshot; a missing journal counts as
+    nothing runnable and never creates storage. Errors raise; the
+    boundary in :func:`run_receive_hook_main` fails open on them (exit
+    0) so an AIQ defect never blocks stopping.
     """
 
     if integration_id != spec.integration_id:
@@ -1822,7 +1835,17 @@ def gate_stop_hook(
     # A parked needs_input message awaits the user, not the agent, so it
     # deliberately does not count as runnable work here.
     unapplied_messages = int(status["messages"].get("received", 0))
+    parked_messages = int(status["messages"].get("needs_input", 0))
     if not (ready_tasks or active_claims or unapplied_messages):
+        if parked_messages:
+            # Nothing runnable, but a parked question awaits the user:
+            # surface it once as a non-blocking notice instead of full
+            # silence, so a session never ends with the user unaware.
+            return (
+                False,
+                f"AIQ: no runnable work; {_parked_fragment(parked_messages)}"
+                " — aiq inbox list",
+            )
         return None
     parts = []
     if ready_tasks:
@@ -1855,11 +1878,20 @@ def gate_stop_hook(
         if age is not None:
             fragment += f" (ready {age})"
         fragments.append(fragment)
+    parked_note = (
+        f"; {_parked_fragment(parked_messages)}" if parked_messages else ""
+    )
     if not fragments:
-        return f"AIQ: runnable work remains: {summary} — run aiq status"
+        return (
+            True,
+            f"AIQ: runnable work remains: {summary}{parked_note}"
+            " — run aiq status",
+        )
     return (
+        True,
         f"AIQ: runnable work remains: {summary}: "
         + "; ".join(fragments)
+        + parked_note
         + f" — settle finished work: aiq task done {first_ready_id} "
-        "--summary TEXT — or: aiq status"
+        "--summary TEXT — or: aiq status",
     )

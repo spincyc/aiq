@@ -1650,6 +1650,7 @@ class QueueTest(unittest.TestCase):
                 },
                 "claims": {"active": 0},
                 "ready": [],
+                "blocked": [],
             },
         )
 
@@ -1775,6 +1776,62 @@ class QueueTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(JournalError, "queue limit"):
             read_status(self.scope, ready_limit=0)
+
+    def test_read_status_lists_blocked_tasks_bounded_with_causes(self) -> None:
+        created = self.apply(
+            self.ingest("Create a doomed prerequisite and dependents").message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [
+                    ["create", "$prereq", {"title": "Doomed prerequisite"}],
+                    *[
+                        [
+                            "create",
+                            f"$dep{index}",
+                            {
+                                "title": f"Dependent {index}",
+                                "priority": index,
+                                "requires": ["$prereq"],
+                            },
+                        ]
+                        for index in range(7)
+                    ],
+                ],
+            },
+        )
+        prereq_id = created["aliases"]["$prereq"]
+        self.apply(
+            self.ingest("Cancel the prerequisite").message_id,
+            {
+                "v": 1,
+                "expect": {prereq_id: 1},
+                "effects": [
+                    ["transition", prereq_id, "canceled", {"reason": "obsolete"}]
+                ],
+            },
+        )
+
+        status = read_status(self.scope)
+
+        self.assertEqual(status["tasks"]["blocked"], 7)
+        self.assertEqual(status["ready"], [])
+        self.assertEqual(len(status["blocked"]), 5)
+        self.assertEqual(
+            [entry["priority"] for entry in status["blocked"]],
+            [6, 5, 4, 3, 2],
+        )
+        self.assertEqual(
+            status["blocked"][0],
+            {
+                "task_id": created["aliases"]["$dep6"],
+                "priority": 6,
+                "title": "Dependent 6",
+                "blocked_by": [prereq_id],
+            },
+        )
+        for entry in status["blocked"]:
+            self.assertEqual(entry["blocked_by"], [prereq_id])
 
 
 if __name__ == "__main__":

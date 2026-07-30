@@ -124,7 +124,7 @@ The tables list fields in addition to top-level `v`.
 | `list --json` | `tasks` of `task_id`, `revision`, `state`, `priority`, and `title` |
 | `claim list --json` | `claims` containing unreleased lease summaries with `status` |
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
-| `status --json` | `messages`, `tasks`, `claims`, `ready`, `scope` |
+| `status --json` | `messages`, `tasks`, `claims`, `ready`, `blocked`, `scope` |
 | `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
 | `capability show NAME --json` | capability `id`, `version`, purpose, command, and selected contract |
@@ -319,11 +319,12 @@ aiq status [--scope SCOPE] [--cwd PATH] [--json]
 | `tasks` | Effective task-state counts keyed by every task state |
 | `claims` | `active`: unreleased, unexpired message and task leases |
 | `ready` | At most the five highest-priority ready tasks, each with only `task_id`, `priority`, `title`, and `created_at` |
+| `blocked` | At most five blocked tasks in the same order, each with only `task_id`, `priority`, `title`, and `blocked_by` — the failed prerequisite task IDs causing the block, empty for a directly blocked task |
 | `scope` | The resolved [Scope](#scope) object |
 
 A processing message whose lease has expired counts as `received`. Message and
-prompt content never appears. A missing journal reports zero counts and an
-empty `ready` array without creating storage.
+prompt content never appears. A missing journal reports zero counts and
+empty `ready` and `blocked` arrays without creating storage.
 
 ## Workflow shortcuts
 
@@ -578,9 +579,17 @@ ID, double-quoted title truncated to 40 characters, and a coarse ready-age
 such as `(ready 5m)` — and ends with the settle command; with claims or
 messages only, it keeps the `— run aiq status` tail. A
 parked `needs_input` message awaits the user, not the agent, and never
-counts as runnable work. Both hosts feed that stderr line back to the model
-and continue the turn. When the loop guard is set, or nothing is runnable, the
-gate exits 0 silently. The gate fails open: any error on the gate path
+counts as runnable work, but the block line surfaces it: a fragment such as
+`; 2 parked messages await user input` is appended before the settle tail.
+Both hosts feed that stderr line back to the model
+and continue the turn. When the loop guard is set, the
+gate exits 0 silently. When nothing is runnable but parked `needs_input`
+messages remain, the gate exits 0 with exactly one stderr notice —
+`AIQ: no runnable work; 2 parked messages await user input —
+aiq inbox list` — instead of full silence, so a session cannot end with a waiting
+question unmentioned; whether a host displays stderr from an exit-0 hook
+is host-dependent. With nothing runnable and nothing parked, the gate
+exits 0 silently. The gate fails open: any error on the gate path
 (unresolvable scope, invalid payload, locked or unreadable journal) exits 0
 with a single stderr diagnostic, so an AIQ defect never blocks stopping —
 the inverse of capture, which fails visibly with exit 1.
@@ -635,7 +644,7 @@ their usual exit classes.
 | Result | Order |
 |---|---|
 | Inbox | oldest current lifecycle event first |
-| Task list, queue, and status `ready` | priority descending, then creation order |
+| Task list, queue, and status `ready` and `blocked` | priority descending, then creation order |
 | Top-level `list` | task number ascending |
 | Dependencies, blockers, waiters | task ID ascending |
 | Prerequisites in `task explain` | task ID ascending |

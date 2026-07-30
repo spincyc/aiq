@@ -598,6 +598,39 @@ class IntegrationCliTests(unittest.TestCase):
         self.assertEqual(guarded.stdout, "")
         self.assertEqual(guarded.stderr, "")
 
+        # Settle the task and park the captured message needs_input:
+        # nothing is runnable, so the stop is allowed (exit 0), but the
+        # parked question is surfaced as one non-blocking stderr notice.
+        listed = self.run_aiq("inbox", "list", "--json")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        message_id = json.loads(listed.stdout)["messages"][0]["message_id"]
+        claimed = self.run_aiq(
+            "inbox", "claim", message_id, "--owner", "gate-test", "--json",
+        )
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        claim_id = json.loads(claimed.stdout)["claim"]["claim_id"]
+        parked = self.run_aiq(
+            "inbox", "needs-input", message_id,
+            "--claim", claim_id,
+            "--reason", "awaiting a user answer", "--json",
+        )
+        self.assertEqual(parked.returncode, 0, parked.stderr)
+        settled = self.run_aiq(
+            "task", "done", task_id,
+            "--summary", "settled by the gate test",
+            "--owner", "gate-test", "--json",
+        )
+        self.assertEqual(settled.returncode, 0, settled.stderr)
+
+        noticed = self.receive_stop(stop_payload)
+        self.assertEqual(noticed.returncode, 0)
+        self.assertEqual(noticed.stdout, "")
+        self.assertEqual(
+            noticed.stderr,
+            "AIQ: no runnable work; 1 parked message awaits user input "
+            "— aiq inbox list\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
