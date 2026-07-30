@@ -18,6 +18,7 @@ from aiq.config import (
     READER_LEASE_SECONDS_MINIMUM,
     _default_reader,
     _reader_locator,
+    session_token,
 )
 from aiq.journal import (
     MESSAGE_LIFECYCLE_EVENT_SQL,
@@ -508,40 +509,129 @@ def _reader_lease_status(row: sqlite3.Row | None, now_us: int) -> str:
     return "held"
 
 
-def _reader_holder_locator(reader_id: str) -> tuple[str | None, int | None]:
-    """Return the host and session to record for one reader identity.
+def _this_session(
+    session_id: str | None = None,
+) -> tuple[str | None, int | None, str | None]:
+    """Describe the session this process belongs to, as stored.
 
-    Only an identity this process derived for itself describes a process
-    that can later be probed for liveness. An explicitly configured
-    reader may name any session on any host -- including a deliberately
-    shared fan-out identity -- so it records no locator, which disables
-    the dead-holder fast path instead of guessing about a stranger.
+    Returns ``(host, posix_session_id, session_token)`` in exactly the
+    shape the ``holder_host`` / ``holder_sid`` / ``holder_session``
+    columns hold. ``session_id`` lets a caller that was *handed* an
+    identity -- a completion gate reading it out of a hook payload --
+    supply it instead of deriving one; see
+    :func:`aiq.config.session_token` for the precedence.
+
+    Both halves are recorded when both are available. They answer
+    different questions and neither subsumes the other: the token names
+    the logical session across however many processes the host spawns for
+    it, while the POSIX pair names an object the kernel can be asked
+    about, which is the only way to prove a holder is *gone*.
     """
 
-    if reader_id != _default_reader():
-        return (None, None)
+    host, posix_session = _reader_locator() or (None, None)
+    return host, posix_session, session_token(supplied=session_id)
+
+
+def _reader_holder_locator(
+    reader_id: str,
+    *,
+    session_id: str | None = None,
+) -> tuple[str | None, int | None, str | None]:
+    """Return the holder locator to record for one reader identity.
+
+    Only an identity this process derived for itself describes a session
+    this process may speak for. An explicitly configured reader may name
+    any session on any host -- including a deliberately shared fan-out
+    identity -- so it records no locator at all, which disables the
+    dead-holder fast path and the self-recognition predicates instead of
+    guessing about a stranger.
+    """
+
+    if reader_id != _default_reader(session_id=session_id):
+        return (None, None, None)
+    return _this_session(session_id)
+
+
+def _recorded_locator(
+    row: sqlite3.Row,
+) -> tuple[str | None, int | None, str | None]:
+    """Read a locator out of a ``reader_leases`` or ``claims`` row.
+
+    Both tables carry the same three columns under the same names, so one
+    reader serves both. A row written before schema 6, or on a host that
+    supplies no session identity, reads ``None`` for the token.
+    """
+
+    keys = row.keys()
+    return (
+        row["holder_host"],
+        row["holder_sid"],
+        row["holder_session"] if "holder_session" in keys else None,
+    )
+
+
+def _locator_is_this_session(
+    row: sqlite3.Row,
+    *,
+    token: str | None,
+) -> bool:
+    """True only when a recorded locator names this very session.
+
+    Comparison runs on the strongest evidence *both* sides carry:
+
+    * When the holder recorded a host-supplied session token and this
+      caller has one too, the tokens decide, and nothing else is
+      consulted. A token is what the host itself calls the session, so it
+      is authoritative and it is comparable across however many processes
+      the host spawns.
+    * Otherwise the POSIX pair decides -- this host, this process's own
+      session id -- which is a faithful session identity in a terminal,
+      where one session spans every command and every hook run as its
+      child.
+
+    Missing evidence on either side of the fallback answers false. No
+    liveness probe is needed for a match: this process is the running
+    proof.
+    """
+
+    host, posix_session, recorded_token = _recorded_locator(row)
+    if token is not None and recorded_token is not None:
+        return recorded_token == token
+    if host is None or posix_session is None:
+        return False
     locator = _reader_locator()
-    return (None, None) if locator is None else locator
+    return locator is not None and locator == (host, posix_session)
 
 
 def _reader_holder_is_dead(row: sqlite3.Row) -> bool:
     """True only when the recorded holder's session is provably gone.
 
-    A locator is recorded only for a derived identity, so a matching host
-    proves the session id is comparable here. ``ProcessLookupError`` is
-    the only proof of death: a permission error means some live process
-    owns that id, and every other answer is treated as alive.
+    Death is proved against the POSIX pair, the only half of a locator
+    naming something the kernel can be asked about: a matching host makes
+    the session id comparable here, and ``ProcessLookupError`` is the
+    only proof -- a permission error means some live process owns that
+    id, and every other answer is treated as alive.
+
+    A holder that recorded a host-supplied session token is never
+    reported dead, because nothing here can probe one: a token names a
+    session the *host* keeps, whose processes come and go. Reading the
+    holder's long-exited shell as proof of death would let a second
+    session seize the role from a first that is still working -- which is
+    precisely the failure this token exists to stop. Such a lease is
+    reclaimed the two honest ways instead: its holder releases it, or it
+    expires.
     """
 
-    host = row["holder_host"]
-    session = row["holder_sid"]
-    if host is None or session is None:
+    host, posix_session, recorded_token = _recorded_locator(row)
+    if recorded_token is not None:
+        return False
+    if host is None or posix_session is None:
         return False
     locator = _reader_locator()
     if locator is None or locator[0] != host:
         return False
     try:
-        os.kill(session, 0)
+        os.kill(posix_session, 0)
     except ProcessLookupError:
         return True
     except OSError:
@@ -549,35 +639,50 @@ def _reader_holder_is_dead(row: sqlite3.Row) -> bool:
     return False
 
 
-def _reader_holder_is_foreign_live(row: sqlite3.Row) -> bool:
+def _reader_holder_is_foreign_live(
+    row: sqlite3.Row,
+    *,
+    token: str | None,
+) -> bool:
     """True only when the holder is provably some *other* live session.
 
     This is the inverse burden of :func:`_reader_holder_is_dead`, not its
     negation: that probe answers "may this lease be taken over?" and so
     assumes life whenever death is unproven, while this one answers "is
     another session already accountable for this queue?" and so demands
-    positive proof. Every gap in the evidence -- an explicitly configured
-    identity that recorded no locator, a locator naming another host we
-    cannot probe, a probe that answers neither "alive" nor "gone" -- is
-    resolved against standing a completion gate down.
+    positive proof. Every gap in the evidence is resolved against
+    standing a completion gate down.
 
-    A recorded session equal to this process's own is deliberately not
-    foreign. Host hooks run as children of the session that took the
-    lease and inherit its session id, so the locator, not the reader
-    identity string, is what tells a session apart from itself: the two
-    surfaces may derive different identities from the same session when
-    a configuration file or ``AIQ_READER`` reaches only one of them.
+    What counts as proof depends, as in :func:`_locator_is_this_session`,
+    on the evidence both sides carry.
+
+    * Two comparable session tokens that differ prove another session
+      holds the role. Its liveness is proved by the lease itself: only
+      ``held`` leases reach here, a lease is held only until it expires,
+      and a working session renews it on every consume. That is the
+      liveness evidence available for a token, which names no OS object
+      to signal, and it is bounded -- an abandoned lease stops being
+      renewed and stands nothing down once it lapses.
+    * Otherwise the POSIX pair must name this host, a session id that is
+      not this process's own, and one the kernel says still exists.
+
+    A recorded session equal to this caller's own is deliberately not
+    foreign under either rule. The locator, not the reader identity
+    string, is what tells a session apart from itself: the CLI and a host
+    hook may derive different identity strings for one session when a
+    configuration file or ``AIQ_READER`` reaches only one of them.
     """
 
-    host = row["holder_host"]
-    session = row["holder_sid"]
-    if host is None or session is None:
+    host, posix_session, recorded_token = _recorded_locator(row)
+    if token is not None and recorded_token is not None:
+        return recorded_token != token
+    if host is None or posix_session is None:
         return False
     locator = _reader_locator()
-    if locator is None or locator[0] != host or locator[1] == session:
+    if locator is None or locator[0] != host or locator[1] == posix_session:
         return False
     try:
-        os.kill(session, 0)
+        os.kill(posix_session, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -588,78 +693,55 @@ def _reader_holder_is_foreign_live(row: sqlite3.Row) -> bool:
     return True
 
 
-def _reader_holder_is_this_session(row: sqlite3.Row) -> bool:
+def _reader_holder_is_this_session(
+    row: sqlite3.Row,
+    *,
+    token: str | None,
+) -> bool:
     """True only when the recorded holder locator names this session.
 
     The mirror image of :func:`_reader_holder_is_foreign_live` over the
-    same evidence, and it demands the same proof: a locator was recorded
-    (which happens only for a self-derived identity), it names this host,
-    and it names this process's own POSIX session. No liveness probe is
-    needed — this process is the running proof.
-
-    The locator, not the reader identity string, is what tells a session
-    apart from itself. A host hook runs as a child of the session that
-    took the lease and inherits its session id, but it does not inherit
-    that shell's environment, so the two surfaces can derive different
-    identity strings from one session. Comparing identities would miss
-    the match; comparing locators does not.
+    same evidence and with the same standard of proof; see
+    :func:`_locator_is_this_session` for how the two halves of a locator
+    are weighed.
     """
 
-    host = row["holder_host"]
-    session = row["holder_sid"]
-    if host is None or session is None:
-        return False
-    locator = _reader_locator()
-    return locator is not None and locator[0] == host and locator[1] == session
+    return _locator_is_this_session(row, token=token)
 
 
 def _count_active_claims_this_session(
     connection: sqlite3.Connection,
     *,
     now_us: int,
+    token: str | None,
 ) -> int:
     """Count unreleased, unexpired claims this very session holds.
 
     The claim-side twin of :func:`_reader_holder_is_this_session`, over
-    the same evidence and with the same standard of proof: a locator was
-    recorded on the claim, it names this host, and it names this
-    process's own POSIX session. No liveness probe is needed, because
-    this process is the running proof. ``owner_id`` deliberately plays no
-    part -- it defaults to the OS user, so it is shared by one person's
-    concurrent sessions and can never separate them.
+    the same evidence, with the same standard of proof, and weighing the
+    two halves of a locator the same way: a host-supplied session token
+    decides whenever both sides carry one, and the POSIX pair decides
+    otherwise. ``owner_id`` deliberately plays no part -- it defaults to
+    the OS user, so it is shared by one person's concurrent sessions and
+    can never separate them.
 
-    A claim carrying no locator is *not* counted. That inverts the
-    gate's usual "missing proof means block" bias on purpose, because the
-    question inverts with it: absent evidence, "is somebody else covering
-    for me?" must answer no, but "is this claim mine?" must also answer
-    no. Counting an unattributable claim as this session's would block a
-    session on state it cannot settle or release honestly -- exactly the
-    scope-wide false positive that a per-session count exists to remove
-    -- and no waiting would clear it. Under-counting instead leaves at
-    most one lease period of a pre-schema-5 claim unenforced, the gate
-    still names it in the block or notice line, and it self-heals as soon
-    as that claim expires or is re-taken with a locator.
+    A claim carrying no locator this caller can compare is *not* counted.
+    That inverts the gate's usual "missing proof means block" bias on
+    purpose, because the question inverts with it: absent evidence, "is
+    somebody else covering for me?" must answer no, but "is this claim
+    mine?" must also answer no. Counting an unattributable claim as this
+    session's would block a session on state it cannot settle or release
+    honestly -- exactly the scope-wide false positive that a per-session
+    count exists to remove -- and no waiting would clear it.
+    Under-counting instead leaves at most one lease period of an older
+    claim unenforced, the gate still names it in the block or notice
+    line, and it self-heals as soon as that claim expires or is re-taken.
 
-    KNOWN LIMITATION (TASK-61). A POSIX session id identifies a session
-    only on a host where one session spans many invocations. Claude Code
-    gives every shell invocation its own session, so the process that
-    claimed is already gone when anything later asks, and this count
-    reads zero for claims that really are the same logical session's.
-    That is not a hole this function opens: `released_by_self` reads the
-    identical evidence and the reader identity `reader release` is keyed
-    on is derived from the same session id, so on such a host the release
-    records nothing, the stand-down this count refines is never reached,
-    and the gate blocks on the plain counts instead. The refinement is
-    therefore exactly as reliable as the stand-down it guards -- never
-    less -- and fails toward blocking. Re-grounding session identity on
-    something that survives per-invocation shells has to move the reader
-    identity, the lease locator, and this count together.
+    The SQL mirrors :func:`_locator_is_this_session` exactly; the two
+    must be changed together.
     """
 
-    locator = _reader_locator()
-    if locator is None:
-        return 0
-    host, session = locator
+    host, posix_session = _reader_locator() or (None, None)
     return connection.execute(
         """
         SELECT COUNT(*) AS total
@@ -668,10 +750,15 @@ def _count_active_claims_this_session(
           ON release.claim_id = claim.claim_id
         WHERE release.claim_id IS NULL
           AND claim.expires_at_us > ?
-          AND claim.holder_host = ?
-          AND claim.holder_sid = ?
+          AND CASE
+            WHEN ? IS NOT NULL AND claim.holder_session IS NOT NULL
+              THEN claim.holder_session = ?
+            ELSE claim.holder_host IS NOT NULL
+              AND claim.holder_host = ?
+              AND claim.holder_sid = ?
+          END
         """,
-        (now_us, host, session),
+        (now_us, token, token, host, posix_session),
     ).fetchone()["total"]
 
 
@@ -799,7 +886,7 @@ def _hold_reader_lease(
     holder = _reader_lease_conflict(row, reader_id=reader_id, now_us=now_us)
     if holder is not None:
         _raise_reader_held(holder)
-    host, session = _reader_holder_locator(reader_id)
+    host, posix_session, holder_session = _reader_holder_locator(reader_id)
     connection.execute(
         """
         INSERT INTO reader_leases(
@@ -810,11 +897,12 @@ def _hold_reader_lease(
           reader_id,
           holder_host,
           holder_sid,
+          holder_session,
           acquired_at_us,
           renewed_at_us,
           expires_at_us,
           released_at_us
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
         ON CONFLICT(lease_scope) DO UPDATE SET
           lease_id = excluded.lease_id,
           epoch = excluded.epoch,
@@ -822,6 +910,7 @@ def _hold_reader_lease(
           reader_id = excluded.reader_id,
           holder_host = excluded.holder_host,
           holder_sid = excluded.holder_sid,
+          holder_session = excluded.holder_session,
           acquired_at_us = excluded.acquired_at_us,
           renewed_at_us = excluded.renewed_at_us,
           expires_at_us = excluded.expires_at_us,
@@ -834,7 +923,8 @@ def _hold_reader_lease(
             owner_id,
             reader_id,
             host,
-            session,
+            posix_session,
+            holder_session,
             now_us,
             now_us,
             now_us + lease_seconds * 1_000_000,
@@ -896,6 +986,8 @@ def _reader_lease_public(
 def _reader_status_summary(
     row: sqlite3.Row | None,
     lease: dict[str, Any],
+    *,
+    token: str | None,
 ) -> dict[str, Any]:
     """Project the gate-relevant subset carried by :func:`read_status`.
 
@@ -904,18 +996,25 @@ def _reader_status_summary(
     that is still running, so this caller is not the one accountable for
     the queue. It is true only for a ``held`` lease -- the rendered
     status already separates a lease abandoned by a crashed session as
-    ``stale`` -- whose recorded holder locates a live session other than
-    this process's own. Unprovable foreignness, including the common
-    case of an explicitly configured identity that records no locator at
-    all, reads false so the gate keeps blocking.
+    ``stale`` -- whose recorded holder is a session other than this
+    caller's own. Unprovable foreignness, including the common case of an
+    explicitly configured identity that records no locator at all, reads
+    false so the gate keeps blocking.
 
     ``released_by_self`` states the complementary thing: that *this*
     session gave the role up on purpose. It is true only for a
-    ``released`` lease whose recorded holder locator names this host and
-    this process's own POSIX session -- the recorded, deliberate act of
-    an ``aiq reader release`` from this session. A release by anyone
-    else, and a release under an identity that recorded no locator,
-    reads false, because neither is this session declaring anything.
+    ``released`` lease whose recorded holder locator names this very
+    session -- the recorded, deliberate act of an ``aiq reader release``
+    from this session. A release by anyone else, and a release under an
+    identity that recorded no locator, reads false, because neither is
+    this session declaring anything.
+
+    ``token`` is this caller's host-supplied session identity, or
+    ``None`` where no host supplies one and the POSIX locator is all
+    there is. A caller that was handed an identity -- a completion gate
+    reading it out of a ``Stop`` payload -- passes it here, and both
+    fields are then decided on that authoritative value rather than on
+    whatever the hook process could derive for itself.
 
     The two are mutually exclusive by construction: a lease cannot be
     both ``held`` and ``released``.
@@ -935,12 +1034,12 @@ def _reader_status_summary(
     summary["live"] = (
         lease["status"] == "held"
         and row is not None
-        and _reader_holder_is_foreign_live(row)
+        and _reader_holder_is_foreign_live(row, token=token)
     )
     summary["released_by_self"] = (
         lease["status"] == "released"
         and row is not None
-        and _reader_holder_is_this_session(row)
+        and _reader_holder_is_this_session(row, token=token)
     )
     return summary
 
@@ -1022,9 +1121,33 @@ def release_reader_lease(
 ) -> dict[str, Any]:
     """Give up the reader role, leaving every held claim untouched.
 
-    Holding nothing, an already released lease, and an expired lease all
-    replay successfully; only another live holder is refused. Losing the
-    role never revokes a claim, which recovers on its own schedule.
+    Release never fails on state: holding nothing, an already released
+    lease, and an expired lease all succeed, and only another live holder
+    is refused. Losing the role never revokes a claim, which recovers on
+    its own schedule.
+
+    It does, however, say plainly *what it did*, because "release
+    succeeded" and "a release was recorded" are not the same fact and
+    only the second one is a signal a completion gate can read.
+    ``status`` is one of:
+
+    ``released``
+        This call moved a lease held by ``reader_id`` to released. This,
+        and only this, is the recorded declaration that this session has
+        stopped draining the queue.
+    ``already_released``
+        The recorded lease is ``reader_id``'s and was already released.
+        A true replay: the earlier declaration still stands.
+    ``not_held``
+        There was nothing of this caller's to release -- no lease at all,
+        one recorded under a different reader identity, or this caller's
+        own lease already lapsed. Nothing was recorded and nothing will
+        read as a declaration, so a caller relying on release as a
+        completion signal has to know.
+
+    ``released`` (boolean) is true only in the first case, and
+    ``replayed`` stays for callers that only ask "did this call change
+    anything", which is the negation of it.
 
     ``claims_held`` counts the caller's own live claims at the instant of
     release, so the caller learns immediately that giving the role back
@@ -1039,6 +1162,7 @@ def release_reader_lease(
 
     reader = _text(reader_id, path="reader_id", minimum=1, maximum=200)
     effective_now = _now_us() if now_us is None else now_us
+    token = session_token()
     connection = _connect(scope)
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -1050,11 +1174,9 @@ def release_reader_lease(
         )
         if holder is not None:
             _raise_reader_held(holder)
-        held = (
-            row is not None
-            and row["reader_id"] == reader
-            and _reader_lease_status(row, effective_now) == "held"
-        )
+        mine = row is not None and row["reader_id"] == reader
+        status = _reader_lease_status(row, effective_now)
+        held = mine and status == "held"
         if held:
             connection.execute(
                 """
@@ -1065,6 +1187,11 @@ def release_reader_lease(
                 (effective_now, READER_LEASE_SCOPE),
             )
             row = _read_reader_lease_row(connection)
+            outcome = "released"
+        elif mine and status == "released":
+            outcome = "already_released"
+        else:
+            outcome = "not_held"
         lease_public = _reader_lease_public(
             row,
             reader_id=reader,
@@ -1073,10 +1200,12 @@ def release_reader_lease(
         claims_held = _count_active_claims_this_session(
             connection,
             now_us=effective_now,
+            token=token,
         )
         connection.commit()
         return {
-            "status": "released",
+            "status": outcome,
+            "released": held,
             "replayed": not held,
             "claims_held": claims_held,
             "reader": lease_public,
@@ -1216,12 +1345,13 @@ def _claim_resource(
     # The lease withholds one for an explicitly configured identity
     # because such an identity may name a deliberately shared fan-out
     # holder, so the locator would describe a stranger. A claim has no
-    # such ambiguity: exactly one process inserts this row, and the pair
-    # simply says which session that was. Recording it under a shared
-    # `AIQ_READER` is what lets each fan-out participant recognize its own
-    # claims rather than the group's. The locator is storage-internal and
-    # never enters the `claim.acquired` payload or protocol v1.
-    holder_host, holder_sid = _reader_locator() or (None, None)
+    # such ambiguity: exactly one process inserts this row, and the
+    # locator simply says which session that was. Recording it under a
+    # shared `AIQ_READER` is what lets each fan-out participant recognize
+    # its own claims rather than the group's. The locator is
+    # storage-internal and never enters the `claim.acquired` payload or
+    # protocol v1.
+    holder_host, holder_sid, holder_session = _this_session()
     cursor = connection.execute(
         """
         INSERT INTO events(
@@ -1263,9 +1393,10 @@ def _claim_resource(
           basis_revision,
           holder_host,
           holder_sid,
+          holder_session,
           acquired_at_us,
           expires_at_us
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             claim_id,
@@ -1276,6 +1407,7 @@ def _claim_resource(
             basis_revision,
             holder_host,
             holder_sid,
+            holder_session,
             now_us,
             expires_at_us,
         ),
@@ -1976,6 +2108,7 @@ def read_status(
     *,
     ready_limit: int = 5,
     reader_id: str | None = None,
+    session_id: str | None = None,
     now_us: int | None = None,
 ) -> dict[str, Any]:
     """Summarize message, task, and claim counts plus the top ready tasks.
@@ -2004,6 +2137,15 @@ def read_status(
     is the only count a session may be held answerable for -- ``active``
     alone cannot separate one person's concurrent sessions, because
     ``owner_id`` defaults to the OS user.
+
+    ``session_id`` names the caller's own session where the caller was
+    handed that identity rather than deriving it: a completion gate
+    reads it out of the ``Stop`` payload, which is authoritative for the
+    session being gated and is inherited by nothing. Every "is this
+    mine?" answer here -- ``reader.live``, ``reader.released_by_self``,
+    and ``claims.active_this_session`` -- is then decided against it.
+    Omitting it derives the identity from the environment as every other
+    command does; see :func:`aiq.config.session_token`.
     """
 
     if ready_limit < 1 or ready_limit > 64:
@@ -2011,6 +2153,7 @@ def read_status(
             "queue limit must be between 1 and 64",
             code="invalid_argument",
         )
+    token = session_token(supplied=session_id)
     message_counts = dict.fromkeys(MESSAGE_STATES, 0)
     task_counts = dict.fromkeys(TASK_STATES, 0)
     result: dict[str, Any] = {
@@ -2021,6 +2164,7 @@ def read_status(
         "reader": _reader_status_summary(
             None,
             _reader_lease_public(None, reader_id=reader_id, now_us=0),
+            token=token,
         ),
         "ready": [],
         "blocked": [],
@@ -2128,6 +2272,7 @@ def read_status(
             _count_active_claims_this_session(
                 connection,
                 now_us=effective_now,
+                token=token,
             )
         )
         reader_row = _read_reader_lease_row(connection)
@@ -2138,6 +2283,7 @@ def read_status(
                 reader_id=reader_id,
                 now_us=effective_now,
             ),
+            token=token,
         )
         return result
 

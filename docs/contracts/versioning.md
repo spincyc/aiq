@@ -111,7 +111,7 @@ answers which journals it can still open:
 | 0.1.0a1 | 2 | the first packaged storage |
 | 0.1.0a2 | 2, then 3, then 4 | schema 3 added a claims lookup index; schema 4 added the `reader_leases` table |
 | 0.2.0a1 | 4 | the release that shipped schema 4 |
-| next release | 5 | schema 5 records the claiming session's locator on each claim |
+| next release | 5, then 6 | schema 5 records the claiming session's locator on each claim; schema 6 adds the host-supplied session identity to that locator and to the reader lease |
 
 Only 0.2.0a1 and later answer the question by number. 0.1.0a1 and 0.1.0a2 were
 never released: the version stayed at 0.1.0a2 across both migrations, so an

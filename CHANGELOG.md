@@ -162,6 +162,32 @@ effects documents, capability contracts, and integration manifests.
 
 ### Fixed
 
+- **A session is now identified by an identity that outlives its commands, so
+  `aiq reader release` works on an agent host at all.** Session identity was
+  derived from the POSIX session id, on the assumption that one session spans
+  many commands and that host hooks run as its children. That is true of a
+  terminal and false of Claude Code, which runs every command in a POSIX
+  session of its own: the session that took the reader lease was already dead
+  when the next command ran, so `aiq reader release` matched nothing, recorded
+  nothing, and still reported success — while the gate blocked, having no
+  evidence the release was anyone's. Identity is now resolved as `--reader` or
+  `AIQ_READER`, then `AIQ_SESSION_ID`, then a host's own variable
+  (`CLAUDE_CODE_SESSION_ID`), then the previous host-plus-POSIX-session
+  derivation; the `Stop` gate prefers the `session_id` its payload carries over
+  anything it can derive, so the gate and that session's commands agree. Leases
+  and claims record the host-supplied identity alongside the POSIX pair
+  (schema 6), and every "is this mine?" answer — `reader.live`,
+  `reader.released_by_self`, `claims.active_this_session` — compares whichever
+  evidence both sides carry, so a terminal behaves exactly as before. Rows
+  recorded before the upgrade carry no session identity and read as a
+  stranger's: such a lease is reclaimed by takeover or expiry, and such a claim
+  counts toward `claims.active` only, both self-healing. `aiq reader release`
+  now also reports what it did — `released`, `already_released`, or `not_held`
+  — instead of reporting `released` for a lease it never held, adds a
+  `released` boolean beside `replayed`, and prints one stderr line naming the
+  identity it tried when there was nothing to release. Export `AIQ_SESSION_ID`
+  on any host that supplies no identity of its own; see
+  [`docs/configuration.md`](docs/configuration.md#session-identity).
 - **`code=` was inert on every integration error, so install, uninstall, and
   hook-capture failures were still classified by diagnostic wording.** `HookIntegrationError`
   and `GuidanceIntegrationError` are `JournalError` subclasses, but the

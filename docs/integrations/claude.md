@@ -116,15 +116,23 @@ question unmentioned. Whether stderr from an exit-0 hook is displayed is
 host-dependent; Claude Code does not feed it back to the model.
 
 The gate blocks the reader. Runnable work belongs to whichever session may
-drain the queue, so the hook derives its own reader identity the same way the
-CLI does — configuration or `AIQ_READER`, defaulting to the host and POSIX
-session id — and consults the scope's
-[reader lease](../contracts/cli-v1.md#reader-lease). Standing down needs
-proof that another session is draining the queue: the lease is held, its
-holder recorded a locator naming this host, that session is still running, and
-it is not the one the hook itself belongs to. A session that only files work
-while such a reader holds the role stops freely, with one exit-0 stderr notice
-such as `AIQ: not blocking: runnable work remains (1 ready task) but reader
+drain the queue, so the hook resolves a reader identity the same way the CLI
+does — configuration or `AIQ_READER` first — and consults the scope's
+[reader lease](../contracts/cli-v1.md#reader-lease). What differs is the
+default: the hook uses the `session_id` from its own `Stop` payload, which
+is authoritative for the session being gated, arrives in the payload rather
+than by inheritance, and is the same value Claude Code exports to that
+session's commands as `CLAUDE_CODE_SESSION_ID`. `AIQ_SESSION_ID` still
+overrides it.
+That is what lets the gate and the commands of one session recognize each
+other; see [Session identity](../configuration.md#session-identity).
+
+Standing down needs proof that another session is draining the queue: the
+lease is held and its recorded holder is demonstrably somebody else — a
+different session identity, or a POSIX session on this host that is still
+running and is not the hook's own. A session that only files work while such a
+reader holds the role stops freely, with one exit-0 stderr notice such as
+`AIQ: not blocking: runnable work remains (1 ready task) but reader
 "host-4242" holds the reader lease — aiq reader status`.
 
 A session also stands the gate down by saying it is finished.
@@ -159,25 +167,21 @@ another host, a holder occupying this same session, and any holder that
 recorded no locator — which is every explicitly configured `reader` or
 `AIQ_READER` identity, releases included.
 
-Those last cases matter. An agent harness can give each shell invocation its
-own POSIX session, so a lease routinely outlives the session that took it, and
-treating an abandoned lease as an active reader would silently stop enforcing
-completion. A hook process does not inherit the environment of the agent's
-shell either, so the gate can derive a different identity than the CLI that
-took the lease; without proof that the holder is somebody else, an unproven
-holder may be this very session. One consequence is deliberate: a shared
-`AIQ_READER` fan-out proves nothing about who is draining the queue, so the
-gate keeps blocking every participant.
+Those last cases matter. Without proof that the holder is somebody else, an
+unproven holder may be this very session, and treating an abandoned lease as
+an active reader would silently stop enforcing completion. One consequence is
+deliberate: a shared `AIQ_READER` fan-out proves nothing about who is draining
+the queue, so the gate keeps blocking every participant.
 
-Taken to its limit, that same property is a known limitation. Where a host
-gives *every* invocation its own POSIX session, no later process can prove any
-lease or claim is its own: `aiq reader release` matches no lease and records
-nothing, the release stand-down is never reached, and the gate simply blocks
-on the counts, naming whatever remains. Both stand-downs and the
-released-with-claims block depend on a session identity that survives between
-invocations; where it does not, the gate is strictly more conservative, never
-less. Setting `AIQ_READER` to a stable value makes the reader identity survive,
-but records no locator, so it does not by itself restore the stand-downs.
+Everything above needs a session identity that survives between commands.
+Claude Code supplies one on both sides — `CLAUDE_CODE_SESSION_ID` in every
+command it runs, and the same value as `session_id` in every hook payload —
+so nothing needs configuring here.
+Where no such identity exists, nothing can prove a lease or a claim is its
+own: `aiq reader release` matches no lease and honestly reports `not_held`,
+neither stand-down is reachable, and the gate simply blocks on the counts,
+naming whatever remains. The gate is then strictly more conservative, never
+less.
 
 The gate honors the host loop guard: when the `Stop` payload carries a truthy
 `stop_hook_active` — Claude Code sets it while already continuing because of

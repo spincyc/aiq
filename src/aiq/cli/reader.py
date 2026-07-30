@@ -53,10 +53,21 @@ def _reader_acquire(arguments: argparse.Namespace) -> int:
 
 
 def _reader_release(arguments: argparse.Namespace) -> int:
-    result = release_reader_lease(
-        _scope(arguments),
-        reader_id=arguments.effective_config.reader,
-    )
+    reader_id = arguments.effective_config.reader
+    result = release_reader_lease(_scope(arguments), reader_id=reader_id)
+    # Say plainly when there was nothing of this caller's to give back.
+    # A release that matched no lease records no declaration, so nothing
+    # downstream -- the completion gate above all -- will read it as one,
+    # and a caller told only "released" would stop expecting a signal
+    # that was never written. The usual cause is an identity mismatch, so
+    # the line names the identity that was tried.
+    if result["status"] == "not_held":
+        print(
+            f'aiq: nothing to release: reader "{reader_id}" does not hold '
+            "the reader role, so no release was recorded; check who holds "
+            "it: aiq reader status",
+            file=sys.stderr,
+        )
     # Giving the role back is not settling the work: release leaves every
     # per-item claim in place. Warn rather than refuse, because release is
     # a total, replayable declaration and a handoff mid-item is legitimate;
@@ -76,6 +87,7 @@ def _reader_release(arguments: argparse.Namespace) -> int:
     _emit(
         {
             "status": result["status"],
+            "released": result["released"],
             "replayed": result["replayed"],
             "claims_held": held,
         },

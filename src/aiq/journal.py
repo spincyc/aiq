@@ -17,7 +17,7 @@ from typing import Any, Iterator
 import uuid
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SQLITE_MINIMUM_VERSION = (3, 37, 0)
 
 # Journal-level project label: the human-readable name of the repository
@@ -746,6 +746,34 @@ SCHEMA_V5_COLUMNS = {
     "claims": ("holder_host", "holder_sid"),
 }
 
+# The host-supplied half of the holder locator: the identity the host
+# itself gives the logical session that took the lease or the claim, when
+# the host supplies one at all.
+#
+# Schema 5's `(holder_host, holder_sid)` pair identifies a POSIX session,
+# which is a faithful session identity only where one POSIX session spans
+# many commands. Agent hosts routinely run every command in a session of
+# its own, so the recorded session is already gone when anything later
+# asks -- and the pair can then neither recognize a session as itself nor
+# tell two sessions apart. A host-supplied identity survives that,
+# because the host, not the kernel, decides what a session is.
+#
+# Nullable, and added by ALTER for exactly the reasons schema 5 gives:
+# metadata-only in SQLite, no row rewritten, every trigger, index, and
+# foreign key left alone. Rows written before this column exists read
+# NULL, which is the "this holder supplied no session identity" case
+# every consumer already has to handle -- as does any row written on a
+# host that supplies none.
+SCHEMA_V6_STATEMENTS = (
+    "ALTER TABLE claims ADD COLUMN holder_session TEXT",
+    "ALTER TABLE reader_leases ADD COLUMN holder_session TEXT",
+)
+
+SCHEMA_V6_COLUMNS = {
+    "claims": ("holder_session",),
+    "reader_leases": ("holder_session",),
+}
+
 APPEND_ONLY_V2_TABLES = (
     "schema_migrations",
     "task_numbers",
@@ -1320,6 +1348,11 @@ def _create_v5_schema(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _create_v6_schema(connection: sqlite3.Connection) -> None:
+    for statement in SCHEMA_V6_STATEMENTS:
+        connection.execute(statement)
+
+
 def _execute_script_statements(
     connection: sqlite3.Connection,
     script: str,
@@ -1409,6 +1442,8 @@ def _validate_schema_objects(
         )
     if schema_version >= 5:
         _validate_schema_columns(connection, SCHEMA_V5_COLUMNS)
+    if schema_version >= 6:
+        _validate_schema_columns(connection, SCHEMA_V6_COLUMNS)
 
 
 def _validate_schema_columns(
@@ -1513,6 +1548,7 @@ def _initialize_journal_locked(
                     _create_v3_schema(connection)
                     _create_v4_schema(connection)
                     _create_v5_schema(connection)
+                    _create_v6_schema(connection)
                     metadata = {
                         "schema_version": str(SCHEMA_VERSION),
                         **_scope_metadata(scope),
@@ -1605,6 +1641,8 @@ def _initialize_journal_locked(
                             _create_v4_schema(connection)
                         if version < 5:
                             _create_v5_schema(connection)
+                        if version < 6:
+                            _create_v6_schema(connection)
                         connection.execute(
                             """
                             INSERT INTO schema_migrations(

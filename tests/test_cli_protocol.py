@@ -377,13 +377,20 @@ class CliProtocolTests(unittest.TestCase):
         released = self.ok("reader", "release", *self.scope)
         self.assertEqual(
             set(released),
-            {"claims_held", "reader", "replayed", "status", "v"},
+            {"claims_held", "reader", "released", "replayed", "status", "v"},
         )
+        self.assertEqual(released["status"], "released")
+        self.assertTrue(released["released"])
         self.assertFalse(released["replayed"])
         # Nothing of this session's is still claimed, so release is silent
         # on stderr; `self.ok` already asserted that.
         self.assertEqual(released["claims_held"], 0)
-        self.assertTrue(self.ok("reader", "release", *self.scope)["replayed"])
+        # Replaying the same release is still successful, and says which
+        # of the two successes it was: the declaration already stands.
+        replayed = self.ok("reader", "release", *self.scope)
+        self.assertEqual(replayed["status"], "already_released")
+        self.assertFalse(replayed["released"])
+        self.assertTrue(replayed["replayed"])
 
         reported = self.ok(
             "report", "--summary", "Protocol report",

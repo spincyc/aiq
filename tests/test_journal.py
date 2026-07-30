@@ -987,6 +987,7 @@ class JournalTest(unittest.TestCase):
                     # and therefore never counted as any session's own.
                     "holder_host": None,
                     "holder_sid": None,
+                    "holder_session": None,
                 },
             )
             self.assertEqual(

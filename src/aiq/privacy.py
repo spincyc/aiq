@@ -49,12 +49,13 @@ _EXPORT_RECORDS = (
 )
 # Stored columns that carry no semantic history and are therefore never
 # exported. `task_number` is allocator state. A claim's holder locator is
-# the host and POSIX session id of the process that took it: live
-# coordination state, excluded for the same reason the whole reader lease
-# is, so an export still names no host and no session id.
+# the host and POSIX session id of the process that took it, plus the
+# host-supplied identity of the session it belonged to: live coordination
+# state, excluded for the same reason the whole reader lease is, so an
+# export still names no host and no session id of either kind.
 _EXPORT_EXCLUDED_COLUMNS = {
     "task": ("task_number",),
-    "claim": ("holder_host", "holder_sid"),
+    "claim": ("holder_host", "holder_sid", "holder_session"),
 }
 _SCHEMA_V2_TABLE_NAMES = frozenset(
     {

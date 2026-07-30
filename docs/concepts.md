@@ -80,11 +80,14 @@ fence, and expiry, plus the session that took it.
 
 Owner and session are different questions. `owner` defaults to the OS user, so
 one person's concurrent terminals claim under the same owner; the recorded
-session — the claiming process's host and POSIX session id, exactly as a
-reader lease records its holder's — is what lets a session recognize its own
-claims among everyone's. Nothing in the CLI surfaces it directly; the one
-thing derived from it is the `claims.active_this_session` count that keeps a
-session from stopping on work only it can settle.
+session — the host-supplied identity of the session that claimed, plus the
+claiming process's host and POSIX session id, exactly as a reader lease
+records its holder's — is what lets a session recognize its own claims among
+everyone's. Nothing in the CLI surfaces it directly; the one thing derived
+from it is the `claims.active_this_session` count that keeps a session from
+stopping on work only it can settle. See
+[Session identity](configuration.md#session-identity) for where that identity
+comes from and why the POSIX half is not enough on its own.
 
 Transactional shortcuts (`enqueue`, `task done`) compose this pipeline
 inside one journal transaction: they record a message, claim it, and apply

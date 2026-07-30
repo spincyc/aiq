@@ -25,7 +25,7 @@ Both TOML files are optional, flat, and must declare `version = 1`.
 | `scope` | `auto`, `repo`, `user` | `auto` | yes | no |
 | `owner` | Nonempty local identity | OS user | yes | no |
 | `lease_seconds` | `1`–`86400` | `900` | yes | yes |
-| `reader` | Nonempty session identity | Host and session | yes | no |
+| `reader` | Nonempty session identity | The [session identity](#session-identity) | yes | no |
 | `reader_lease_seconds` | `60`–`86400` | `1800` | yes | yes |
 | `snapshot_keep` | `1`–`10000` | `5` | yes | no |
 | `output` | `human`, `json` | `human` | yes | no |
@@ -43,11 +43,10 @@ configurable scope.
 `owner` and `reader` are different identities on purpose. `owner` labels who
 holds a message or task claim and defaults to the OS user, so two concurrent
 sessions of one person share it. `reader` names the session allowed to drain
-the scope's queue, and its default — the host plus the POSIX session id — is
-inherited by every short-lived process of one terminal, including host hooks,
-while differing between terminals. Set `reader_lease_seconds` at or above
-`lease_seconds` so the reader role never expires before the items it holds.
-Exporting one shared `AIQ_READER` is the documented way to let several
+the scope's queue; its default is derived, and [Session
+identity](#session-identity) below says how. Set `reader_lease_seconds` at or
+above `lease_seconds` so the reader role never expires before the items it
+holds. Exporting one shared `AIQ_READER` is the documented way to let several
 cooperating workers drain a single journal on purpose.
 
 Example user configuration:
@@ -82,6 +81,52 @@ lease_seconds = 1200
 | `AIQ_DEV_REPORT_REPO` | `dev_report_repo` |
 
 Integer variables must contain unsigned decimal digits.
+
+`AIQ_SESSION_ID` is listed separately below: it names the session rather than
+setting a configuration key.
+
+## Session identity
+
+Several answers depend on AIQ recognizing that two commands, or a command and
+a host hook, belong to the same session: who may drain the queue, whose claims
+are outstanding, and whether a completion gate should stand down. AIQ decides
+that from the first of these it can find:
+
+| Precedence | Source | Notes |
+|---:|---|---|
+| 1 | `--reader`, `AIQ_READER`, or `reader` in a user config file | An explicit identity, used verbatim. It may deliberately name a group rather than a session |
+| 2 | `AIQ_SESSION_ID` | The generic override. Any host, wrapper, or launcher can export it without AIQ knowing which host it is |
+| 3 | The host's own variable — today `CLAUDE_CODE_SESSION_ID` | Claude Code exports it into every command it runs, and puts the same value in the `session_id` of that session's hook payloads |
+| 4 | The host name plus the POSIX session id | Last resort |
+
+The last resort is only a session identity where one POSIX session spans many
+commands. That is true of a terminal, where every command and every hook runs
+as a child of the one session, and false of a host that runs each command in a
+session of its own — which agent hosts commonly do, and Claude Code does. On
+such a host the process that took a lease or a claim has exited before
+anything else asks about it, so nothing later can recognize its own earlier
+work: `aiq reader release` matches no lease and reports `not_held`, the
+completion gate keeps blocking, and each command competes with the last for
+the reader role.
+
+**So on a host AIQ does not already know, export `AIQ_SESSION_ID`.** One value
+per session, stable for its whole life, distinct between concurrent sessions —
+a UUID the wrapper generates at startup is ideal. Nothing else needs
+configuring.
+
+A `Stop` hook is compared against the `session_id` in its own payload, which
+outranks anything in the hook process's environment except `AIQ_SESSION_ID`.
+That is what lets the gate and the commands of one session agree even though
+neither can see the other's environment.
+
+Changing a session's identity — starting to export `AIQ_SESSION_ID` where
+nothing was exported before, or moving between hosts — makes the leases and
+claims already recorded read as a stranger's. Nothing breaks and nothing is
+lost: a lease recorded that way is reclaimed by the next command once the
+POSIX session it named is gone, or when it expires; a claim recorded that way
+counts toward `claims.active` but not `claims.active_this_session`, so a
+completion gate still names it, and it clears when it expires or is settled.
+See [`contracts/cli-v1.md`](contracts/cli-v1.md).
 
 ## Scope
 

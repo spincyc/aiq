@@ -416,7 +416,10 @@ class DocumentationContractTests(unittest.TestCase):
             user_path=None,
             repo_path=None,
             default_owner="OS user",
-            default_reader="Host and session",
+            # The matrix cell links to the section that states the whole
+            # precedence, because the default is derived and no single
+            # phrase names it honestly.
+            default_reader="The [session identity](#session-identity)",
         ).to_dict()
         documented_defaults = {
             key: values["default"] for key, values in matrix.items()

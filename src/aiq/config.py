@@ -60,6 +60,32 @@ READER_LEASE_SECONDS_DEFAULT = 1800
 READER_LEASE_SECONDS_MINIMUM = 60
 READER_LEASE_SECONDS_MAXIMUM = 86400
 
+# The generic session-identity variable. Any host, wrapper, or launcher can
+# export it to say "every command I start belongs to this one logical
+# session", without AIQ having to know which host it is. It wins over a
+# host's own variable on purpose: it is the deliberate operator override,
+# the same tier as `--reader`.
+GENERIC_SESSION_ID_KEY = "AIQ_SESSION_ID"
+
+# Variables the known hosts export into the environment of the commands
+# they run. Consulted in order; the first non-empty one wins.
+#
+# `CLAUDE_CODE_SESSION_ID` is verified: Claude Code exports it into every
+# Bash tool invocation, and its value matches the `session_id` carried by
+# the same session's `UserPromptSubmit` and `Stop` hook payloads. That is
+# precisely the property the POSIX session id lacks on such a host, where
+# every tool invocation is its own POSIX session.
+#
+# Codex is deliberately absent: its hook payloads carry `session_id`, so
+# the completion gate is covered, but no Codex-exported session variable
+# could be verified, and guessing a name would silently mis-identify
+# sessions. Codex users export `AIQ_SESSION_ID` instead.
+HOST_SESSION_ID_KEYS = ("CLAUDE_CODE_SESSION_ID",)
+
+SESSION_ID_KEYS = (GENERIC_SESSION_ID_KEY, *HOST_SESSION_ID_KEYS)
+
+SESSION_ID_MAX_LENGTH = 200
+
 
 class ConfigError(ValueError):
     """Raised when AIQ configuration is invalid."""
@@ -355,9 +381,16 @@ def _default_owner() -> str:
 def _reader_locator() -> tuple[str, int] | None:
     """Return this process's host and POSIX session id, when derivable.
 
-    The pair locates the session that a derived reader identity names, so
-    a later holder-liveness probe can tell a crashed session from a live
-    one. Hosts without POSIX sessions report nothing rather than guess.
+    The pair locates the POSIX session a derived reader identity names,
+    so a later holder-liveness probe can tell a crashed session from a
+    live one. Hosts without POSIX sessions report nothing rather than
+    guess.
+
+    This is the *last resort* identity source, not the preferred one. It
+    is only a faithful session identity on a host where one POSIX session
+    spans many invocations -- a terminal. Where the host supplies its own
+    session identity, :func:`session_token` is preferred, because a POSIX
+    session id says nothing on a host that gives every command its own.
     """
 
     try:
@@ -366,18 +399,88 @@ def _reader_locator() -> tuple[str, int] | None:
         return None
 
 
-def _default_reader() -> str:
-    """Derive the default reader identity for this POSIX session.
+def _clean_session_token(raw: str) -> str | None:
+    """Reduce one supplied session identity to a storable token.
+
+    Whitespace and unprintable characters are dropped rather than
+    rejected: this value arrives from a host we do not control, and a
+    surprising byte in it must not make every AIQ command fail. What
+    survives is bounded and safe to store, log, and compare.
+    """
+
+    token = "".join(
+        character
+        for character in raw
+        if character.isprintable() and not character.isspace()
+    )
+    return token[:SESSION_ID_MAX_LENGTH] or None
+
+
+def session_token(
+    environ: Mapping[str, str] | None = None,
+    *,
+    supplied: str | None = None,
+) -> str | None:
+    """Return the host-supplied identity of this logical session, if any.
+
+    Precedence, highest first:
+
+    1. ``AIQ_SESSION_ID`` -- the generic override, so any host or wrapper
+       can supply identity without AIQ knowing which host it is.
+    2. ``supplied`` -- an identity the host handed us directly for this
+       call, such as the ``session_id`` field of a ``Stop`` hook payload.
+       It outranks the environment variables below because it is
+       authoritative for that invocation and is inherited by nothing.
+    3. The known hosts' own variables, in :data:`HOST_SESSION_ID_KEYS`
+       order.
+
+    ``None`` means no host supplied anything, and callers fall back to
+    the POSIX locator. A variable that is set but empty, or that reduces
+    to nothing once cleaned, counts as unset.
+    """
+
+    environment = os.environ if environ is None else environ
+    candidates = (
+        environment.get(GENERIC_SESSION_ID_KEY),
+        supplied,
+        *(environment.get(key) for key in HOST_SESSION_ID_KEYS),
+    )
+    for candidate in candidates:
+        if not candidate:
+            continue
+        token = _clean_session_token(candidate)
+        if token is not None:
+            return token
+    return None
+
+
+def _default_reader(
+    environ: Mapping[str, str] | None = None,
+    *,
+    session_id: str | None = None,
+) -> str:
+    """Derive the default reader identity for this logical session.
 
     Owner cannot serve as the reader identity: it defaults to the OS user
     and is therefore identical across one human's concurrent sessions,
     which is exactly the case single-reader enforcement must separate.
-    The POSIX session id is inherited by every short-lived process of one
-    session -- including host hooks, which run as children of it -- and
-    differs between two terminals, so it identifies a session stably
-    without a handshake.
+
+    The identity is the host-supplied session token when there is one,
+    because that is the only value known to survive a host that runs
+    every command in a POSIX session of its own -- and such hosts are the
+    common case for agent work. Only when no host supplies one does this
+    fall back to host plus POSIX session id, which is a faithful session
+    identity in a terminal, where one session spans every command and
+    every hook run as its child.
     """
 
+    token = session_token(environ, supplied=session_id)
+    if token is not None:
+        return _validate_string(
+            token,
+            key="reader",
+            maximum=SESSION_ID_MAX_LENGTH,
+        )
     locator = _reader_locator()
     if locator is None:
         candidate = f"pid-{os.getpid()}"
@@ -416,7 +519,9 @@ def resolve_config(
     )
     reader = _validate_value(
         "reader",
-        _default_reader() if default_reader is None else default_reader,
+        _default_reader(environment)
+        if default_reader is None
+        else default_reader,
     )
     values: dict[str, str | int | None] = {
         "scope": "auto",

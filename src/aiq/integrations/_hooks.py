@@ -1928,10 +1928,17 @@ def gate_stop_hook(
     purpose. Every other reading -- self-held, absent, expired, released
     by somebody else, or held by a session proved dead -- blocks exactly
     as before, because none of them names a live reader who will do the
-    work nor this session declining it. That bias is deliberate: agent
-    harnesses can give each shell invocation its own POSIX session, so
-    leases outlive their sessions routinely, and treating an abandoned
-    one as an active reader would silently retire the gate.
+    work nor this session declining it.
+
+    Both readings compare the payload's ``session_id`` -- the host's own
+    name for the session being gated -- against what the lease recorded,
+    in preference to anything this hook process could derive. That is
+    what makes them reachable at all on an agent host: such hosts give
+    each command its own POSIX session, so a lease outlives the session
+    that took it within seconds, and a locator made only of POSIX session
+    ids can neither recognize a session as itself nor tell two apart.
+    Where no host supplies an identity, the POSIX comparison still
+    applies and unprovable readings still block.
 
     The check is one read-only snapshot; a missing journal counts as
     nothing runnable and never creates storage. Errors raise; the
@@ -1982,6 +1989,16 @@ def gate_stop_hook(
         )
     if document.get("stop_hook_active"):
         return None
+    # The host's own name for the session being gated. This is the datum
+    # that makes the gate and the CLI able to agree at all: it is the same
+    # value the host exports to the commands that session runs, it arrives
+    # in the payload rather than through inheritance, and it therefore
+    # survives a host that gives every command a POSIX session of its own.
+    # A payload without it, or with a non-string, falls back to whatever
+    # this process can derive, which is the pre-existing behaviour.
+    payload_session_id = document.get("session_id")
+    if not isinstance(payload_session_id, str) or not payload_session_id:
+        payload_session_id = None
     cwd_value = document.get("cwd")
     if not isinstance(cwd_value, str) or not cwd_value:
         raise spec.error_class(
@@ -2000,15 +2017,30 @@ def gate_stop_hook(
         agent_root=agent_root,
         git_executable=resolved_git_executable,
     )
-    from aiq.config import resolve_config
+    from aiq.config import _default_reader, resolve_config
     from aiq.queue import read_status
 
     # Derive this session's reader identity exactly as the CLI does, so
     # the gate compares the same string the drain commands enforce on:
-    # configuration and AIQ_READER both apply, and the default is the
-    # POSIX session every process of one terminal inherits.
-    reader_id = resolve_config(cwd=cwd).reader
-    status = read_status(scope, reader_id=reader_id)
+    # configuration and AIQ_READER both apply. What differs is the
+    # *default*: the payload's session identity is preferred over
+    # anything this process could derive for itself, because a hook
+    # process inherits neither the agent shell's environment nor -- on a
+    # host that gives every command its own POSIX session -- anything
+    # else that would name the same session. `AIQ_SESSION_ID` still wins
+    # over it, being the deliberate operator override.
+    reader_id = resolve_config(
+        cwd=cwd,
+        default_reader=_default_reader(session_id=payload_session_id),
+    ).reader
+    # The same identity decides every "is this mine?" question the status
+    # answers, so the gate and the drain commands read one session the
+    # same way.
+    status = read_status(
+        scope,
+        reader_id=reader_id,
+        session_id=payload_session_id,
+    )
     ready_tasks = int(status["tasks"].get("ready", 0))
     active_claims = int(status["claims"].get("active", 0))
     # The subset of those claims this very session holds, proved by the
@@ -2046,23 +2078,21 @@ def gate_stop_hook(
     )
     # Runnable work belongs to whoever holds the reader role. Stand down
     # only for a holder *proved* to be a different session that is still
-    # alive: the lease is held, its holder recorded a locator naming this
-    # host, that session still exists, and it is not this process's own.
-    # Every other reading -- no lease, an expired one, one released by
-    # somebody else, one left behind by a dead session, one whose holder
-    # recorded no locator because the identity was configured explicitly
-    # -- means nothing proves another session is draining this queue, so
-    # this session is still accountable for the work and must block. The
-    # sole exception is this session's own release, handled just below.
-    # Proof, not absence
-    # of doubt, is the standard: a hook process does not inherit the
-    # agent shell's environment, so this gate can derive a different
-    # reader identity than the CLI that took the lease, and reading its
-    # own session's lease as a stranger's would silently retire the gate
-    # for exactly the session doing the work. A deliberate shared-reader
-    # fan-out therefore keeps blocking, which is the safe direction. A
-    # patched or older status shape without the datum reads falsy and
-    # therefore blocks too.
+    # alive: the lease is held and its recorded holder is demonstrably
+    # somebody else -- a different host-supplied session identity, or a
+    # POSIX session on this host that still exists and is not this
+    # caller's. Every other reading -- no lease, an expired one, one
+    # released by somebody else, one left behind by a dead session, one
+    # whose holder recorded no locator because the identity was
+    # configured explicitly -- means nothing proves another session is
+    # draining this queue, so this session is still accountable for the
+    # work and must block. The sole exception is this session's own
+    # release, handled just below. Proof, not absence of doubt, is the
+    # standard: reading this session's own lease as a stranger's would
+    # silently retire the gate for exactly the session doing the work. A
+    # deliberate shared-reader fan-out therefore keeps blocking, which is
+    # the safe direction. A patched or older status shape without the
+    # datum reads falsy and therefore blocks too.
     reader = status.get("reader")
     if not isinstance(reader, dict):
         reader = {}
@@ -2080,11 +2110,11 @@ def gate_stop_hook(
     # needs to finish without the gate reading its deliberate stop as an
     # abandonment. Honoring it needs the same proof as standing down for
     # a foreign reader, and for the same reason: only a release whose
-    # recorded holder locator names this host and this session is this
-    # session declaring anything. A release by anyone else, and a release
-    # under an explicitly configured identity that recorded no locator,
-    # keeps blocking. A patched or older status shape without the datum
-    # reads falsy and therefore blocks too.
+    # recorded holder locator names this very session is this session
+    # declaring anything. A release by anyone else, and a release under
+    # an explicitly configured identity that recorded no locator, keeps
+    # blocking. A patched or older status shape without the datum reads
+    # falsy and therefore blocks too.
     if reader.get("released_by_self"):
         # Releasing the role is a statement about dispatch, not about the
         # items already taken: it deliberately leaves every per-item claim
@@ -2096,12 +2126,12 @@ def gate_stop_hook(
         #
         # This branch is reachable only when the release above proved to
         # be this session's, which needs the recorded locator to match.
-        # Where it cannot -- a host giving each shell invocation its own
-        # POSIX session -- `released_by_self` is false and control never
-        # arrives here, so the gate blocks on the counts below. See the
-        # known limitation on `_count_active_claims_this_session`
-        # (TASK-61): this check is exactly as reliable as the stand-down
-        # it refines, and fails toward blocking.
+        # Where no locator can be compared -- no host-supplied identity
+        # on either side and no shared POSIX session -- `released_by_self`
+        # is false and control never arrives here, so the gate blocks on
+        # the counts below. The claim count read here is decided on the
+        # identical evidence, so this check is exactly as reliable as the
+        # stand-down it refines, never less, and fails toward blocking.
         if not own_claims:
             return (
                 False,

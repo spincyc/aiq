@@ -379,13 +379,18 @@ class MigrationFixtureTest(unittest.TestCase):
             # is the only thing that makes it a rollback target.
             self.assertEqual(backup_version, "4")
             self.assertEqual(backup_integrity, "ok")
-            self.assertNotIn("holder_host", backup_claim_columns)
-            self.assertNotIn("holder_sid", backup_claim_columns)
+            for added in ("holder_host", "holder_sid", "holder_session"):
+                self.assertNotIn(added, backup_claim_columns)
 
-            # The ALTER appends; it must not reorder or drop what v4 wrote.
+            # Each ALTER appends; none may reorder or drop what v4 wrote.
             self.assertEqual(
                 claim_columns,
-                [*backup_claim_columns, "holder_host", "holder_sid"],
+                [
+                    *backup_claim_columns,
+                    "holder_host",
+                    "holder_sid",
+                    "holder_session",
+                ],
             )
             self.assertEqual(
                 [claim["claim_id"] for claim in claims],

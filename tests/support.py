@@ -19,6 +19,7 @@ import sys
 import tempfile
 from typing import NamedTuple
 
+from aiq import config
 from aiq.cli import main as _cli_main
 from aiq.journal import initialize_journal, resolve_scope
 
@@ -43,21 +44,35 @@ atexit.register(_scratch_home.cleanup)
 os.environ["HOME"] = _scratch_home.name
 os.environ["XDG_CONFIG_HOME"] = str(Path(_scratch_home.name) / "config")
 
+# Every variable from which AIQ derives a session identity, dropped from
+# the test process itself. The suite frequently runs *inside* one of the
+# hosts that export these -- running it from an agent's own shell is the
+# normal way to run it -- and an inherited value would silently decide
+# what "this session" means for in-process fixtures, making results
+# depend on who launched the tests. Tests that want a session identity
+# set one explicitly.
+SESSION_IDENTITY_VARIABLES = frozenset(config.SESSION_ID_KEYS)
+for _variable in SESSION_IDENTITY_VARIABLES:
+    os.environ.pop(_variable, None)
+
 
 def scrubbed_environment(
     *,
     drop: frozenset[str] | set[str] = frozenset(),
     **overrides: str,
 ) -> dict[str, str]:
-    """Copy os.environ without host AIQ or Git state, then override.
+    """Copy os.environ without host AIQ, session, or Git state, then override.
 
-    Drops every AIQ_* and GIT_* variable plus the names in drop, applies
-    Git isolation, and finally applies overrides keyed by variable name.
+    Drops every AIQ_* and GIT_* variable, every variable AIQ derives a
+    session identity from, and the names in drop; applies Git isolation;
+    and finally applies overrides keyed by variable name.
     """
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("AIQ_", "GIT_")) and key not in drop
+        if not key.startswith(("AIQ_", "GIT_"))
+        and key not in SESSION_IDENTITY_VARIABLES
+        and key not in drop
     }
     environment.update(GIT_ISOLATION)
     environment.update(overrides)
@@ -281,14 +296,7 @@ def dequeue_from_a_separate_session(
     own session: the claim and the lease carry a locator that no later
     process on this machine can match.
     """
-    import aiq
-
-    environment = dict(os.environ if environment is None else environment)
-    package_root = str(Path(aiq.__file__).resolve().parents[1])
-    existing = environment.get("PYTHONPATH")
-    environment["PYTHONPATH"] = (
-        f"{package_root}{os.pathsep}{existing}" if existing else package_root
-    )
+    environment = _with_package_root(environment)
     process = subprocess.Popen(
         [
             sys.executable,
@@ -313,6 +321,64 @@ def dequeue_from_a_separate_session(
     # A `start_new_session` child is its own session leader, so its pid is
     # its session id; communicate() has already reaped it.
     return reader_id, process.pid, int(claimed)
+
+
+def _with_package_root(environment: dict[str, str] | None) -> dict[str, str]:
+    """Copy an environment with this checkout's package root importable."""
+    import aiq
+
+    resolved = dict(os.environ if environment is None else environment)
+    package_root = str(Path(aiq.__file__).resolve().parents[1])
+    existing = resolved.get("PYTHONPATH")
+    resolved["PYTHONPATH"] = (
+        f"{package_root}{os.pathsep}{existing}" if existing else package_root
+    )
+    return resolved
+
+
+class SeparateSessionResult(NamedTuple):
+    """One CLI run and the POSIX session it ran in, now ended."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+    session: int
+
+
+def run_cli_in_a_separate_session(
+    *arguments: str,
+    cwd: Path,
+    environment: dict[str, str] | None = None,
+    timeout: int = 60,
+) -> SeparateSessionResult:
+    """Run one aiq command as its own POSIX session leader, then reap it.
+
+    This is the only faithful way to test a host that gives every command
+    its own session -- Claude Code does -- because `subprocess.run` from a
+    test inherits the test process's session and so makes two steps look
+    like one session no matter what. Each call here is a genuinely
+    different session from the test's and from every other call's, and by
+    the time it returns that session is gone.
+
+    The returned `session` is the child's session id: a `start_new_session`
+    child is its own session leader, so its pid is its session id.
+    """
+    process = subprocess.Popen(
+        [sys.executable, "-m", "aiq", *arguments],
+        cwd=str(cwd),
+        env=_with_package_root(environment),
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout, stderr = process.communicate(timeout=timeout)
+    return SeparateSessionResult(
+        process.returncode,
+        stdout,
+        stderr,
+        process.pid,
+    )
 
 
 def hold_reader_lease_from_dead_session(
@@ -387,14 +453,7 @@ def reader_lease_held_by_live_session(
     own -- the only shape that proves foreignness. The session ends on
     exit, which leaves the lease abandoned rather than held.
     """
-    import aiq
-
-    environment = dict(os.environ if environment is None else environment)
-    package_root = str(Path(aiq.__file__).resolve().parents[1])
-    existing = environment.get("PYTHONPATH")
-    environment["PYTHONPATH"] = (
-        f"{package_root}{os.pathsep}{existing}" if existing else package_root
-    )
+    environment = _with_package_root(environment)
     process = subprocess.Popen(
         [
             sys.executable,

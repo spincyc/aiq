@@ -126,14 +126,16 @@ JSON `task_id` values are never prefixed.
 Fence counters, acquisition event sequences, the recorded holder locator, and
 microsecond storage values are internal and never appear in protocol v1.
 
-Every claim records which session took it — the claiming process's host and
-POSIX session id, stored exactly as the [reader lease](#reader-lease) records
-its holder's. `owner_id` cannot serve that purpose: it defaults to the OS user
-and is therefore identical across one person's concurrent sessions. The
-locator is never exported and never rendered; the one surface derived from it
-is `claims.active_this_session` in [Status](#status), which is what lets a
+Every claim records which session took it, stored exactly as the
+[reader lease](#reader-lease) records its holder's: the host-supplied identity
+of the session, when the host supplies one, plus the claiming process's host
+and POSIX session id. `owner_id` cannot serve that purpose: it defaults to the
+OS user and is therefore identical across one person's concurrent sessions.
+The locator is never exported and never rendered; the one surface derived from
+it is `claims.active_this_session` in [Status](#status), which is what lets a
 completion gate hold a session to its own claims and only its own. A claim
-written before schema 5 has no locator and counts as nobody's.
+written before schema 6 carries no session identity, and one written before
+schema 5 carries no locator at all and counts as nobody's.
 
 ### Reader lease
 
@@ -148,10 +150,15 @@ non-holder is that it is not the reader.
 
 The role is keyed on the `reader` identity, not `owner`: `owner` defaults to
 the OS user and so is shared by one person's concurrent sessions, while the
-default `reader` is the host plus the POSIX session id, which every process of
-one terminal inherits and two terminals never share. Export a single
-`AIQ_READER` to let cooperating workers drain one journal on purpose. See
-[`configuration.md`](../configuration.md).
+default `reader` names one session. That default is the host-supplied session
+identity when there is one — `AIQ_SESSION_ID`, or a host's own variable such
+as `CLAUDE_CODE_SESSION_ID` — and falls back to the host plus the POSIX
+session id otherwise. The fallback identifies a session only where one POSIX
+session spans many commands, which is true of a terminal and false of a host
+that runs each command in a session of its own; the host-supplied identity is
+what makes the role work on the latter. Export a single `AIQ_READER` to let
+cooperating workers drain one journal on purpose. See
+[`configuration.md`](../configuration.md) for the full precedence.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -176,6 +183,31 @@ The role may be taken over when no row exists, when it was released, when it
 has expired, or when its holder is provably dead. Takeover advances `epoch`
 and leaves every existing claim untouched. `status`, `list`, `queue peek`,
 `inbox list`, `claim list`, and the `task` read commands are never gated.
+
+"Provably dead" means the recorded POSIX session no longer exists. A holder
+that recorded a host-supplied session identity is never proved dead, because
+nothing can probe one: that identity names a session the *host* keeps, whose
+processes come and go by design. Such a lease is given up by release or by
+expiry, and until then a second session is refused with `reader_held` — which
+is the point. Under the POSIX-only locator the holder's command had usually
+exited within seconds, so any later command read a live session's lease as
+abandoned and took it.
+
+`reader release` never fails on state, and says which of three things it did:
+
+| `status` | Meaning |
+|---|---|
+| `released` | This call moved a lease held by the caller's `reader` identity to released. This, and only this, records the declaration a completion gate reads |
+| `already_released` | The recorded lease is the caller's and was already released; the earlier declaration still stands |
+| `not_held` | Nothing of the caller's was there to release — no lease, one recorded under a different `reader` identity, or the caller's own lease already lapsed. Nothing was recorded |
+
+`released` (boolean) is true only in the first case; `replayed` is its
+negation, for callers that only ask whether the call changed anything. All
+three exit 0, because release is a total, replayable declaration; `not_held`
+additionally prints one stderr line naming the identity that was tried, since
+an identity mismatch is the usual cause and a caller waiting for a recorded
+signal has to know none was written. Only another live holder is refused, with
+`reader_held` and exit 4.
 
 ### Task summary
 
@@ -237,7 +269,7 @@ The tables list fields in addition to top-level `v`.
 | `claim release --json` | `status: "released"`, `claim_id`, `resource_kind`, `resource_id`, `replayed` |
 | `reader status --json` | `reader` containing the [Reader lease](#reader-lease) object, `scope` |
 | `reader acquire --json` | `status: "acquired"`, `acquired`, `reader` |
-| `reader release --json` | `status: "released"`, `replayed`, `claims_held`, `reader` |
+| `reader release --json` | `status`: `"released"`, `"already_released"`, or `"not_held"`; `released`, `replayed`, `claims_held`, `reader` |
 | `status --json` | `messages`, `tasks`, `project`, `claims`, `reader`, `ready`, `blocked`, `scope` |
 | `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
@@ -525,35 +557,54 @@ against the caller's configured `reader` identity, so one status read answers
 both what work remains and whether this session may consume it. `reader.live`
 answers the one question a completion gate asks — is some *other* session
 provably still draining this queue? — and demands proof of all of it. It is
-true only when the lease is `held`, its holder recorded a locator (a lease
-carries the holder's host and POSIX session id only when the holder used a
-self-derived identity), that host is this one, that session still exists, and
-it is not this process's own session. It is false for every other reading:
-`absent`, `stale` (a matching host with a vanished session proves the holder
-dead, which reads as `stale` rather than `held`), `expired`, `released`, a
-holder that recorded no locator because its identity was configured
-explicitly, a holder on another host, and a holder occupying this very
-session. Unprovable foreignness therefore never stands a gate down.
+true only when the lease is `held` and its recorded holder is demonstrably
+somebody else. What counts as a demonstration depends on the evidence both
+sides carry, and the same rule decides every "is this mine?" answer below:
+
+- When the holder recorded a host-supplied session identity and the caller has
+  one too, those identities decide, and nothing else is consulted. Two
+  differing identities prove another session holds the role; its liveness is
+  proved by the lease itself, which only stays `held` while it is renewed, and
+  a working session renews it on every consume.
+- Otherwise the recorded host and POSIX session id decide: the host must be
+  this one, the session must still exist, and it must not be this process's
+  own.
+
+`reader.live` is false for every other reading: `absent`, `stale` (a matching
+host with a vanished POSIX session proves the holder dead, which reads as
+`stale` rather than `held`), `expired`, `released`, a holder that recorded no
+locator because its identity was configured explicitly, a holder on another
+host that cannot be probed, and a holder that is this very session.
+Unprovable foreignness therefore never stands a gate down.
+
 `reader.released_by_self` answers the complementary question — did *this*
-session give the role up on purpose? — under the same discipline. It is true
-only when the lease is `released` and its recorded holder locator names this
-host and this process's own POSIX session. A release by anyone else, and a
+session give the role up on purpose? — under the same discipline and the same
+comparison rule. It is true only when the lease is `released` and its recorded
+holder locator names this very session. A release by anyone else, and a
 release under an explicitly configured identity that recorded no locator, read
 false. The two fields are mutually exclusive: a lease cannot be both `held` and
 `released`.
 
+A caller that was *handed* its session identity rather than deriving one — a
+`Stop` hook, which receives `session_id` in its payload — is compared against
+that. It is authoritative for the session being gated and is inherited by
+nothing, so the gate and the commands that session runs agree on who they are
+even though neither can see the other's environment.
+
 `claims.active_this_session` answers the question `claims.active` cannot: of
 the live claims in this scope, which ones is *this* caller answerable for? It
-counts a claim only when the locator recorded on it names this host and this
-process's own POSIX session — the same proof `reader.released_by_self`
-demands, and no liveness probe is needed because the asking process is the
-proof. It is always less than or equal to `claims.active`; a concurrent
-session's claim is counted by `active` and not by `active_this_session`, even
-though both sessions claim under the same default `owner_id`.
+counts a claim only when the locator recorded on it names this very session,
+under exactly the comparison rule `reader.live` and
+`reader.released_by_self` use, and no liveness probe is needed because the
+asking process is the proof. It is always less than or equal to
+`claims.active`; a concurrent session's claim is counted by `active` and not
+by `active_this_session`, even though both sessions claim under the same
+default `owner_id`.
 
-Absent evidence resolves to "not mine". A claim carrying no locator — every
-claim written before schema 5, and any claim taken where no POSIX session can
-be derived — is counted by `active` alone. This deliberately inverts the
+Absent evidence resolves to "not mine". A claim carrying no locator this
+caller can compare — every claim written before schema 5, and any claim taken
+where no session identity of either kind can be derived — is counted by
+`active` alone. This deliberately inverts the
 completion gate's usual bias, because the question inverts with it: with no
 proof, "is another session covering for me?" must answer no, and so must "is
 this claim mine?". Counting an unattributable claim as this session's would
@@ -563,22 +614,19 @@ lease period of a pre-migration claim unenforced — still named by
 `claims.active` and by the gate's own line, and self-healing the moment that
 claim expires or is re-taken.
 
-**Known limitation.** A POSIX session identifies a session only on a host
-where one session spans many invocations. A host that gives every shell
-invocation its own session — some agent harnesses do — leaves the claiming
-process dead before anything later asks, so `claims.active_this_session` reads
-zero for claims that really do belong to the same logical session. The same
-limitation applies to `reader.released_by_self`, which reads the identical
-evidence, and to the default `reader` identity itself, which is derived from
-the same session id and is what `reader release` matches on: on such a host a
-later invocation releases nothing and the lease stays `held` or `stale`.
-The two therefore fail together and in the same direction — the release
-stand-down is unreachable, so the gate blocks on the plain counts and names
-the outstanding claim — which is why refining the stand-down with a
-per-session claim count can never widen the enforcement hole. Making session
-identity survive per-invocation shells requires re-grounding the `reader`
-identity, the lease locator, and this count together, and is not part of
-protocol v1 today.
+**Where a host supplies no session identity.** A POSIX session identifies a
+session only where one session spans many commands. On a host that runs each
+command in a session of its own, the claiming process is dead before anything
+later asks, and every one of these answers — `claims.active_this_session`,
+`reader.released_by_self`, `reader.live`, and the default `reader` identity
+that `reader release` matches on — reads as though the earlier command
+belonged to a stranger. Supplying a session identity is what fixes this, and
+on such a host it is not optional: export `AIQ_SESSION_ID`, or use a host AIQ
+already knows (see [`configuration.md`](../configuration.md)). Without one,
+these answers all fail together and in the same direction: the stand-downs are
+unreachable, so the gate blocks on the plain counts and names the outstanding
+work, and `reader release` reports `not_held` rather than claiming a success
+it did not record.
 Human-readable `ready` and `blocked` lines render the task reference
 as `[label: TASK-19]`; the `blocked by` causes stay bare IDs.
 

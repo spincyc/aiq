@@ -130,6 +130,7 @@ TASK-1	done	r2
 
 $ aiq reader release
 status	released
+released	True
 replayed	False
 claims_held	0
 ```
@@ -163,14 +164,16 @@ yours: aiq claim list --status active
 Only this session's own claims count. Another session working the same journal
 is never your session's problem to settle.
 
-> **Known limitation.** The release is recognized only when the agent's
-> commands and the host's `Stop` hook run in the same operating-system
-> session. Hosts that run each shell command in a session of its own —
-> Claude Code does — leave the release unrecognized: the command still
-> reports `released`, but the gate blocks anyway and the agent is handed the
-> remaining tasks. Until that is fixed, treat "just the one" as a request the
-> agent should honor rather than a limit the gate enforces, and expect one
-> block line before it stops.
+> **The release has to be recognizable as yours.** AIQ recognizes it by
+> session identity, and most hosts supply one: Claude Code exports
+> `CLAUDE_CODE_SESSION_ID` to every command and puts the same value in every
+> hook payload, so this works with nothing configured. On a host that supplies
+> nothing, AIQ falls back to the POSIX session — which identifies a session
+> only where one session spans many commands, and not on a host that runs each
+> command in a session of its own. Export `AIQ_SESSION_ID` there, once per
+> session; see [Session identity](configuration.md#session-identity). Without
+> it, `aiq reader release` reports `not_held` rather than a success, the gate
+> blocks, and the agent is handed the remaining tasks.
 
 ### 2. A fixed batch
 
@@ -192,6 +195,7 @@ TASK-2	done	r2
 
 $ aiq reader release
 status	released
+released	True
 replayed	False
 claims_held	0
 
