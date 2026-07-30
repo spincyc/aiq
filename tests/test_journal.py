@@ -644,6 +644,13 @@ class JournalTest(unittest.TestCase):
                     FROM schema_migrations
                     """
                 ).fetchone()
+                claims_index = migrated.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'index' AND name = 'claims_resource_lookup'
+                    """
+                ).fetchone()
             finally:
                 migrated.close()
 
@@ -651,7 +658,8 @@ class JournalTest(unittest.TestCase):
             self.assertEqual(check_result["schema_version"], SCHEMA_VERSION)
             self.assertEqual(content, "preserve exactly")
             self.assertEqual(event, "evt_existing")
-            self.assertEqual(migration[:2], (1, 2))
+            self.assertEqual(migration[:2], (1, SCHEMA_VERSION))
+            self.assertIsNotNone(claims_index)
             backup_path = scope.journal_path.parent / "backups" / migration[2]
             self.assertTrue(backup_path.exists())
             backup = sqlite3.connect(backup_path)
@@ -671,6 +679,116 @@ class JournalTest(unittest.TestCase):
             self.assertEqual(backup_version, "1")
             self.assertEqual(backup_content, "preserve exactly")
             self.assertEqual(list_inbox(scope)[0]["message_id"], "msg_existing")
+
+    def test_schema_v2_migrates_with_claims_index_and_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scope = self.agent_scope(root)
+            scope.journal_path.parent.mkdir(parents=True)
+            connection = sqlite3.connect(scope.journal_path)
+            try:
+                connection.executescript(SCHEMA_SQL)
+                journal_module._create_v2_schema(connection)
+                connection.executemany(
+                    """
+                    INSERT INTO journal_metadata(key, value)
+                    VALUES (?, ?)
+                    """,
+                    {
+                        "schema_version": "2",
+                        "scope_kind": scope.kind,
+                        "scope_root": str(scope.root),
+                        "scope_id": scope.scope_id,
+                    }.items(),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO schema_migrations(
+                      migration_id,
+                      from_version,
+                      to_version,
+                      migrated_at,
+                      backup_name
+                    ) VALUES (1, 0, 2, '2026-01-01T00:00:00+00:00', NULL)
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            scope.journal_path.chmod(0o600)
+
+            check_result = check_journal(scope)
+
+            migrated = sqlite3.connect(scope.journal_path)
+            try:
+                metadata = dict(
+                    migrated.execute("SELECT key, value FROM journal_metadata")
+                )
+                migrations = migrated.execute(
+                    """
+                    SELECT migration_id, from_version, to_version, backup_name
+                    FROM schema_migrations
+                    ORDER BY migration_id
+                    """
+                ).fetchall()
+                claims_index = migrated.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'index' AND name = 'claims_resource_lookup'
+                    """
+                ).fetchone()
+            finally:
+                migrated.close()
+
+            self.assertEqual(metadata["schema_version"], str(SCHEMA_VERSION))
+            self.assertEqual(check_result["schema_version"], SCHEMA_VERSION)
+            self.assertIsNotNone(claims_index)
+            self.assertEqual(len(migrations), 2)
+            self.assertEqual(migrations[0][:3], (1, 0, 2))
+            self.assertEqual(migrations[1][:3], (2, 2, SCHEMA_VERSION))
+            backup_path = (
+                scope.journal_path.parent / "backups" / migrations[1][3]
+            )
+            self.assertTrue(backup_path.exists())
+            backup = sqlite3.connect(backup_path)
+            try:
+                backup_version = backup.execute(
+                    """
+                    SELECT value
+                    FROM journal_metadata
+                    WHERE key = 'schema_version'
+                    """
+                ).fetchone()[0]
+                backup_index = backup.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'index' AND name = 'claims_resource_lookup'
+                    """
+                ).fetchone()
+            finally:
+                backup.close()
+            self.assertEqual(backup_version, "2")
+            self.assertIsNone(backup_index)
+
+    def test_fresh_journal_creates_claims_lookup_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scope = self.agent_scope(root)
+            initialize_journal(scope)
+            connection = sqlite3.connect(scope.journal_path)
+            try:
+                claims_index = connection.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'index' AND name = 'claims_resource_lookup'
+                    """
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertIsNotNone(claims_index)
 
     def test_concurrent_fresh_initialization_converges(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

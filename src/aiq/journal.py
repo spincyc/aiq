@@ -17,7 +17,7 @@ from typing import Any, Iterator
 import uuid
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SQLITE_MINIMUM_VERSION = (3, 37, 0)
 
 # Every event type that can record a message's lifecycle state. The latest
@@ -598,6 +598,16 @@ SCHEMA_V2_STATEMENTS = (
     """,
 )
 
+# Claim probes filter on resource_kind alone (expiry recovery) or on the
+# (resource_kind, resource_id) pair (status and lookup probes); without
+# this index every probe scans the claims table.
+SCHEMA_V3_STATEMENTS = (
+    """
+    CREATE INDEX claims_resource_lookup
+      ON claims(resource_kind, resource_id)
+    """,
+)
+
 APPEND_ONLY_V2_TABLES = (
     "schema_migrations",
     "task_numbers",
@@ -1014,6 +1024,11 @@ def _create_v2_schema(connection: sqlite3.Connection) -> None:
         )
 
 
+def _create_v3_schema(connection: sqlite3.Connection) -> None:
+    for statement in SCHEMA_V3_STATEMENTS:
+        connection.execute(statement)
+
+
 def _execute_script_statements(
     connection: sqlite3.Connection,
     script: str,
@@ -1077,13 +1092,15 @@ def _validate_schema_objects(
                 ("trigger", "claim_releases_validate_insert"),
             }
         )
+    if schema_version >= 3:
+        required.add(("index", "claims_resource_lookup"))
     actual = {
         (row[0], row[1])
         for row in connection.execute(
             """
             SELECT type, name
             FROM sqlite_master
-            WHERE type IN ('table', 'view', 'trigger')
+            WHERE type IN ('table', 'view', 'trigger', 'index')
             """
         )
     }
@@ -1158,6 +1175,7 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                 try:
                     _execute_script_statements(connection, SCHEMA_SQL)
                     _create_v2_schema(connection)
+                    _create_v3_schema(connection)
                     metadata = {
                         "schema_version": str(SCHEMA_VERSION),
                         **_scope_metadata(scope),
@@ -1219,20 +1237,23 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                     schema_version=version,
                 )
                 _enable_wal(connection)
-                if version == 1:
+                if version < SCHEMA_VERSION:
                     _begin_immediate(connection)
                     try:
                         current_version = _metadata(connection).get("schema_version")
-                        if current_version != "1":
+                        if current_version != str(version):
                             raise JournalError(
                                 "journal schema changed during migration"
                             )
                         backup_name = _migration_backup(
                             scope,
-                            from_version=1,
-                            to_version=2,
+                            from_version=version,
+                            to_version=SCHEMA_VERSION,
                         )
-                        _create_v2_schema(connection)
+                        if version < 2:
+                            _create_v2_schema(connection)
+                        if version < 3:
+                            _create_v3_schema(connection)
                         connection.execute(
                             """
                             INSERT INTO schema_migrations(
@@ -1241,16 +1262,19 @@ def _initialize_journal_locked(scope: JournalScope) -> Path:
                               to_version,
                               migrated_at,
                               backup_name
-                            ) VALUES (1, 1, 2, ?, ?)
+                            )
+                            SELECT COALESCE(MAX(migration_id), 0) + 1, ?, ?, ?, ?
+                            FROM schema_migrations
                             """,
-                            (_utc_now(), backup_name),
+                            (version, SCHEMA_VERSION, _utc_now(), backup_name),
                         )
                         cursor = connection.execute(
                             """
                             UPDATE journal_metadata
-                            SET value = '2'
-                            WHERE key = 'schema_version' AND value = '1'
-                            """
+                            SET value = ?
+                            WHERE key = 'schema_version' AND value = ?
+                            """,
+                            (str(SCHEMA_VERSION), str(version)),
                         )
                         if cursor.rowcount != 1:
                             raise JournalError(
