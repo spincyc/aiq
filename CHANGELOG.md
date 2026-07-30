@@ -28,6 +28,20 @@ effects documents, capability contracts, and integration manifests.
 
 ### Changed
 
+- Contract documentation now matches the shipped surface. `cli-v1.md` states
+  that both RFC 3339 UTC designators occur (`Z` from the internal clock,
+  `+00:00` from stored timestamps) and that consumers must parse RFC 3339
+  rather than match a suffix; documents the direct `ingest` inputs,
+  `inbox list`, `journal snapshot --keep`, `--no-repo-config`, and the
+  lifecycle-free `generic` adapter; tabulates every `--limit` bound, including
+  the queue's 1–64 against the 1–1000 of the reporting listings; adds
+  `project` to the `status --json` field list; and corrects `reconcile`
+  `problems` to the integer count it has always been. `versioning.md` now
+  states that a schema migration locks out every other installation sharing
+  the journal — hooks included, silently — and how to roll one back.
+  Capability descriptors gain the `--lease-seconds`, `ingest`, and config
+  override flags they omitted and spell `--state` as repeatable. Behavior,
+  JSON shapes, and capability versions are unchanged.
 - The packaged agent bootstrap (`AGENTS.md`) now covers the reader lease: one
   session consumes at a time, `reader_held` reports that another session holds
   the role, and `ingest` and `enqueue` stay open to every session.
@@ -151,9 +165,12 @@ Changed below.
   time-bounded lease semantics, and top-level `aiq list` showing tasks in
   task-number order with terminal states available through `--all` or
   `--state`.
-- `aiq ingest --if-new`: return the existing unapplied (`received` or
-  `needs_input`) message with a `deduped` flag when identical content is
-  already pending, instead of storing a duplicate.
+- `aiq ingest --if-new`: return the existing unapplied (`received`) message
+  with a `deduped` flag when identical content is already pending, instead of
+  storing a duplicate. As first written this bullet also claimed
+  `needs_input`; dedupe did match that state while the feature was in
+  development, but it was narrowed to `received` before release (see Changed
+  below), so `received` is what 0.2.0a1 shipped.
 - Capability descriptors `task.enqueue`, `task.done`, `task.overview`, and
   `queue.dequeue` for the new operations.
 

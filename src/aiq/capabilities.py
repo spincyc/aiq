@@ -64,13 +64,21 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     ),
     "config.check": _capability(
         "Validate effective configuration without opening a journal.",
-        "aiq config check [--json]",
+        (
+            "aiq config check [--owner OWNER] [--reader ID] "
+            "[--lease-seconds SECONDS] [--snapshot-keep COUNT] "
+            "[--no-repo-config] [--json]"
+        ),
         mutates=False,
         idempotency="read-only",
     ),
     "config.show": _capability(
         "Read effective configuration and optionally its source layers.",
-        "aiq config show [--sources] [--json]",
+        (
+            "aiq config show [--sources] [--owner OWNER] [--reader ID] "
+            "[--lease-seconds SECONDS] [--snapshot-keep COUNT] "
+            "[--no-repo-config] [--json]"
+        ),
         mutates=False,
         idempotency="read-only",
     ),
@@ -165,7 +173,10 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "whose disposition was misjudged. Requires the scope's reader "
         "lease, which a successful claim takes implicitly when it is "
         "free; another live reader is refused with reader_held.",
-        "aiq inbox claim [MESSAGE_ID] [--owner OWNER] [--json]",
+        (
+            "aiq inbox claim [MESSAGE_ID] [--owner OWNER] "
+            "[--lease-seconds N] [--json]"
+        ),
         mutates=True,
         idempotency="not retry-safe after a lost receipt",
         version=2,
@@ -297,7 +308,9 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         (
             "aiq ingest "
             "(--message TEXT|--stdin|--event-json FILE|-) "
-            "[--idempotency-key KEY] [--if-new] [--json]"
+            "[--source NAME] [--idempotency-key KEY] "
+            "[--session-id ID] [--turn-id ID] "
+            "[--if-new] [--quiet] [--json]"
         ),
         mutates=True,
         idempotency="safe retry when an idempotency key is supplied; "
@@ -354,7 +367,10 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "Lease the highest-priority eligible task; the ergonomic synonym "
         "of queue.next with identical time-bounded lease semantics, never "
         "removal, and the identical reader-lease requirement.",
-        "aiq dequeue [--owner OWNER] [--limit N] [--json]",
+        (
+            "aiq dequeue [--owner OWNER] [--lease-seconds N] "
+            "[--limit N] [--json]"
+        ),
         mutates=True,
         idempotency="not retry-safe after a lost receipt",
         version=2,
@@ -364,7 +380,10 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         "reader lease, which a successful lease takes implicitly when it "
         "is free; another live reader is refused with reader_held, even "
         "when the queue is empty.",
-        "aiq queue next [--owner OWNER] [--limit N] [--json]",
+        (
+            "aiq queue next [--owner OWNER] [--lease-seconds N] "
+            "[--limit N] [--json]"
+        ),
         mutates=True,
         idempotency="not retry-safe after a lost receipt",
         version=2,
@@ -414,14 +433,15 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
     ),
     "task.list": _capability(
         "List bounded compact current task state.",
-        "aiq task list [--state STATE] [--limit N] [--json]",
+        "aiq task list [--state STATE]... [--limit N] [--json]",
         mutates=False,
         idempotency="read-only",
     ),
     "task.overview": _capability(
         "List tasks in task-number order; terminal states are included "
-        "with --all or an explicit --state filter.",
-        "aiq list [--state STATE] [--all] [--limit N] [--json]",
+        "with --all or an explicit --state filter. --state accumulates "
+        "one state per occurrence and is mutually exclusive with --all.",
+        "aiq list [--state STATE]... [--all] [--limit N] [--json]",
         mutates=False,
         idempotency="read-only",
     ),

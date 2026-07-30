@@ -22,7 +22,11 @@ This document defines AIQ's first public machine-facing CLI protocol.
   meaning requires a new protocol version.
 - IDs are opaque strings except task IDs (`TASK-` plus a positive decimal) and
   effects-local aliases.
-- Timestamps are RFC 3339 UTC strings. Digests are lowercase SHA-256 hex.
+- Timestamps are RFC 3339 UTC strings with microsecond precision. Both legal
+  UTC designators ship in one response, so consumers must parse RFC 3339 and
+  must not match a literal suffix such as `/Z$/`. See
+  [UTC designators](#utc-designators).
+- Digests are lowercase SHA-256 hex.
 - Human-readable output is terminal-safe but is not versioned.
 - JSON `task_id` values are always bare. The journal's
   [project label](#project-label) is reported once as a top-level `project`
@@ -31,9 +35,12 @@ This document defines AIQ's first public machine-facing CLI protocol.
 - Successful `ingest --quiet` intentionally emits nothing, including in JSON
   output mode; failures remain visible.
 
-Scope-aware commands accept `--scope auto|repo|user` and `--cwd PATH`. The
-parser additionally exposes an `agent-root` scope choice; it is an internal,
-unstable hook and not part of this contract.
+Scope-aware commands accept `--scope auto|repo|user`, `--cwd PATH`,
+`--no-repo-config`, and `--json`. `--no-repo-config` skips the repository
+`.aiq.toml` layer, which is how an invalid or hostile cloned configuration is
+diagnosed; see [`configuration.md`](../configuration.md). The parser
+additionally exposes an `agent-root` scope choice and an `--agent-root PATH`
+option; both are internal, unstable hooks and not part of this contract.
 
 | Scope | Resolution |
 |---|---|
@@ -44,6 +51,27 @@ unstable hook and not part of this contract.
 `auto` fails closed when Git is unavailable or repository discovery otherwise
 fails. It never treats ownership, permission, execution, or malformed-output
 errors as proof that the directory is outside a repository.
+
+### UTC designators
+
+RFC 3339 admits two spellings of the UTC offset, and one AIQ response can
+carry both. Fields rendered from the journal's internal microsecond clock use
+`Z`; fields that pass a stored timestamp text through unchanged use `+00:00`.
+The two are the same instant, and every timestamp is UTC with microsecond
+precision either way.
+
+| Spelling | Fields |
+|---|---|
+| `Z` | `expires_at` (on [Claim](#claim), [Reader lease](#reader-lease), `task explain`, `claim list`), `acquired_at`, and `task history` `occurred_at` |
+| `+00:00` | `received_at` (on message summaries and the `inbox claim` message object) and `created_at` (on task detail and `status` `ready` entries) |
+
+That table is informative, not a promise. The contract pins the format as
+RFC 3339 UTC; it does not pin which designator a given field emits, so a
+consumer must parse RFC 3339 — every conformant parser accepts both — and
+must never test for a literal `Z`, a literal `+00:00`, or byte equality with
+a timestamp obtained elsewhere. Normalizing the two spellings onto one is
+therefore a compatible change that needs no new protocol version, and a
+consumer written against the rule rather than the table survives it.
 
 ## Shared objects
 
@@ -198,7 +226,7 @@ The tables list fields in addition to top-level `v`.
 | `reader status --json` | `reader` containing the [Reader lease](#reader-lease) object, `scope` |
 | `reader acquire --json` | `status: "acquired"`, `acquired`, `reader` |
 | `reader release --json` | `status: "released"`, `replayed`, `reader` |
-| `status --json` | `messages`, `tasks`, `claims`, `reader`, `ready`, `blocked`, `scope` |
+| `status --json` | `messages`, `tasks`, `project`, `claims`, `reader`, `ready`, `blocked`, `scope` |
 | `report --json` | `status: "reported"` or `status: "duplicate"`; both add `task_id`, `message_id`, `scope`; `detail_truncated` marks a truncated objective |
 | `capability list --json` | sorted `capabilities`, each with `id`, `version`, `purpose`, and `available` |
 | `capability show NAME --json` | capability `id`, `version`, purpose, command, and selected contract |
@@ -285,6 +313,25 @@ means no check reported `fail`; exit 1 means at least one did. Warnings and
 skips do not change the exit code. Failures that prevent producing the
 report itself use the standard error envelope and exit codes.
 
+## Snapshots
+
+A snapshot is a verified standalone SQLite copy of the journal, written with
+private permissions beside it:
+
+```text
+aiq journal snapshot [--keep N]
+```
+
+`--keep N` overrides the configured `snapshot_keep` for this call: after the
+new snapshot is written, only the `N` most recent snapshots are retained and
+the rest are deleted. `N` must be positive. It never removes messages, tasks,
+or history, and it never prunes the automatic pre-migration backups, which
+carry their own independent retention — see
+[`versioning.md`](versioning.md#journal-schema-and-shared-installations).
+Snapshot creation refuses an invalid journal and reports `status: "created"`,
+`snapshot_path`, `removed`, `retained`, and `scope`. See
+[`recovery.md`](../recovery.md).
+
 ## Export and destruction
 
 Export uses an explicit new output path:
@@ -312,7 +359,38 @@ unchanged inventory. It returns `deleted_files` and status `destroyed` or
 `already_absent`. External exports and integration state are outside its
 deletion boundary.
 
-## Generic event ingestion
+## Message ingestion
+
+`ingest` persists exactly one message. Its content comes from exactly one of
+three mutually exclusive, and required, inputs:
+
+```text
+aiq ingest (--message TEXT | --stdin | --event-json FILE|-)
+           [--source NAME] [--idempotency-key KEY]
+           [--session-id ID] [--turn-id ID]
+           [--if-new] [--quiet]
+```
+
+| Option | Contract |
+|---|---|
+| `--message TEXT` | Content is the argument text, taken verbatim |
+| `--stdin` | Content is standard input decoded as UTF-8; invalid UTF-8 is `state_conflict` |
+| `--event-json FILE\|-` | Content and provenance come from one canonical event object; see [Canonical event JSON](#canonical-event-json) |
+| `--source NAME` | Provenance label, default `user`, at most 64 UTF-8 bytes. Ignored with `--event-json`, which carries its own `source` |
+| `--idempotency-key KEY` | Retry identity, at most 512 UTF-8 bytes. Reuse with the identical message identity replays the original `message_id` with `created: false`; reuse with a different identity is `state_conflict` |
+| `--session-id ID`, `--turn-id ID` | Optional provenance, at most 256 UTF-8 bytes each. Supplying both and no `--idempotency-key` derives the retry identity from them |
+| `--if-new` | Content-hash dedupe against still-`received` messages; adds `deduped` to the result. See [Workflow shortcuts](#workflow-shortcuts) |
+| `--quiet` | Emit nothing on success, including in JSON mode; failures stay visible |
+
+The three input forms differ only in where content and provenance come from.
+Every form stores one message, resolves scope the same way, applies the same
+field limits — content at most 1 MiB of UTF-8 and nonempty — and returns the
+same `message_id`, `state`, `created`, and `scope` result. `ingest` is a write,
+not dispatch, so it never requires the [reader lease](#reader-lease). The field
+limits are normative in
+[`integrations/generic.md`](../integrations/generic.md).
+
+### Canonical event JSON
 
 Canonical provider-neutral input uses either exact form:
 
@@ -335,14 +413,39 @@ with `created: false`; changed content under the same identity is
 
 ## Introspection
 
-Task and claim introspection is read-only, deterministic, and bounded:
+Message, task, and claim introspection is read-only, deterministic, and
+bounded:
 
 ```text
+aiq inbox list [--include-content] [--limit N]
 aiq task explain TASK_ID
 aiq task history TASK_ID [--limit N]
 aiq claim list [--owner OWNER] [--resource message|task]
                [--status active|expired] [--limit N]
 ```
+
+`inbox list` returns at most `--limit` [message summaries](#message-summary),
+oldest current lifecycle event first, and takes no reader lease. Content is
+opt-in: without `--include-content` the `content` field is absent entirely, so
+a listing can be read without exposing message text. With it, `content` carries
+the exact stored bytes.
+
+### Bounded listings
+
+Every listing is bounded, and the bounds are not uniform: queue dispatch is
+deliberately far tighter than reporting, because a lease grants work rather
+than reading it. An out-of-range `--limit` is rejected with `invalid_argument`
+and exit 2; it is never silently clamped.
+
+| Command | Default | Accepted range |
+|---|---:|---|
+| `inbox list` | 20 | 1 or greater; no upper bound |
+| `task list` | 100 | 1 to 1000 |
+| `list` | 50 | 1 to 1000 |
+| `task history` | 50 | 1 to 1000 |
+| `claim list` | 100 | 1 to 1000 |
+| `queue peek` | 1 | 1 to 64 |
+| `queue next`, `dequeue` | 1 | 1 to 64 |
 
 `task explain` reads one consistent snapshot and returns `explain` with:
 
@@ -489,7 +592,7 @@ transaction.
 ```text
 aiq enqueue TITLE [--objective TEXT] [--priority N] [--requires TASK-ID ...]
 aiq dequeue [--owner OWNER] [--lease-seconds N] [--limit N]
-aiq list [--state STATE ...] [--all] [--limit N]
+aiq list [--state STATE]... [--all] [--limit N]
 aiq task done TASK_ID [TASK_ID ...] --summary TEXT [--owner OWNER]
 aiq ingest --if-new ...
 ```
@@ -510,8 +613,11 @@ invocation took the reader role.
 terminal states: the default shows `queued`, `ready`, `active`, and
 `blocked`; `--all` adds `done`, `canceled`, and `superseded`; `--state`
 selects states explicitly (`--state` and `--all` are mutually exclusive).
-Rows are ordered by task number ascending and bounded by `--limit`
-(default 50, between 1 and 1000).
+`--state` is accumulating and takes one state per occurrence, so several
+states are selected by repeating the option — `--state ready --state active`,
+not `--state ready active`. `task list` accepts `--state` the same way. Rows
+are ordered by task number ascending and bounded by `--limit` (default 50,
+between 1 and 1000).
 
 `task done` settles every named task in one transaction: it persists
 `--summary` as a message with source `cli`, claims it, and applies one
@@ -593,6 +699,17 @@ Without `--json`, `print agents` emits the packaged `AGENTS.md` bytes and
 JSON forms use the fields in the command-results table. `print` never
 requires a resolvable AIQ launcher; an explicit `--launcher` remains
 accepted.
+
+`integration list` enumerates four IDs, and they are not interchangeable.
+`claude`, `codex`, and `guidance` are managed adapters with the reversible
+`plan`, `install`, `check`, and `uninstall` lifecycle below. `generic` is
+listed as a peer because it is the fourth supported way to get events into a
+journal, but it is a calling convention rather than managed material: nothing
+is installed, so it has no lifecycle, no manifest, and no target, and naming
+it in any lifecycle or `print` command is rejected as an invalid choice.
+Integrating through it means calling
+[`ingest --event-json`](#canonical-event-json) yourself. `list` reports its
+`version` as the contract version of that event envelope.
 
 The supported managed lifecycle is explicitly user-scoped. `INTEGRATION` is
 `claude` or `codex`:
@@ -851,7 +968,7 @@ The top-level result contains:
 | `apply` | Whether the run was invoked with `--apply` |
 | `integrations` | The per-adapter entries described above |
 | `journal` | The journal inspection or check entry for the selected scope |
-| `problems` | Remaining findings; empty exactly when `status` is `ok` |
+| `problems` | Integer count of entries — integrations plus the journal — left in `blocked`, `drifted`, or `failed`. Zero exactly when `status` is `ok`; the findings themselves are the per-entry `status` and `reason` values, not a separate list |
 
 Per-entry `status` is `ok`, `skipped`, `repaired`, `drifted`, `blocked`, or
 `failed`. With `--apply`, reconciliation performs `install --repair` only
