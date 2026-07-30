@@ -88,6 +88,7 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
                 "git",
                 "scope",
                 "journal",
+                "capture",
                 "journal.deep",
                 "integration.claude",
                 "integration.codex",

@@ -22,6 +22,18 @@ EXPECTED_CHECKS = (
 )
 
 
+class DoctorCapabilityContractTests(unittest.TestCase):
+    def test_capability_descriptor_checks_match_doctor_order(self) -> None:
+        # The bootstrap names capability discovery as the authoritative
+        # surface, so the descriptor's checks list must track run_doctor.
+        from aiq.capabilities import CAPABILITIES
+
+        self.assertEqual(
+            tuple(CAPABILITIES["doctor"]["contract"]["checks"]),
+            EXPECTED_CHECKS,
+        )
+
+
 class DoctorCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
