@@ -24,12 +24,11 @@ SOURCE_VERSION_PATTERN = re.compile(
 # CHANGELOG.md structure problems that are known, already shipped, and owned
 # by a separate restructuring change.  They are reported on every run but do
 # not fail it.  An entry that no longer reproduces fails the run instead, so
-# this list cannot outlive the defect it documents.
-KNOWN_CHANGELOG_ISSUES = frozenset(
-    {
-        "[0.2.0a1]: duplicate heading: ### Fixed",
-    }
-)
+# this list cannot outlive the defect it documents.  It is empty: the one
+# entry it carried — the duplicate `### Fixed` heading in [0.2.0a1] — was
+# repaired by merging those blocks, and the mechanism is kept for the next
+# shipped structure defect that cannot be repaired in the same change.
+KNOWN_CHANGELOG_ISSUES: frozenset[str] = frozenset()
 
 
 def read_project_version() -> str:

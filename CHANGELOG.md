@@ -8,21 +8,230 @@ effects documents, capability contracts, and integration manifests.
 
 ## [Unreleased]
 
+### Breaking changes at a glance
+
+Twelve changes in this release can stop a working setup or a script that
+branches on AIQ's output. Each is detailed below; every error-code and
+exit-status movement is tabulated under **Exit-code and error-code
+migration**, and the storage step under **Upgrading a shared journal**.
+
+- **Error codes and exit statuses are reclassified across 106 raise sites.**
+  A failing `aiq journal check` is now uniformly exit 5; filesystem,
+  ownership, permission, and lock failures on journal state move to exit 6;
+  and effects-document contract violations move to exit 2. `state_conflict`
+  stops being the residue category it had become. Automation that branches on
+  `code` or on exit status must be updated.
+- **The substring classifier is deleted, not merely bypassed.** No rule
+  anywhere reads a diagnostic's wording, and an error that reaches the CLI
+  without a registered code now reports `internal_error` at exit 70 instead
+  of defaulting to `state_conflict` at exit 4.
+- **Three integration classifications are corrected, one of them across exit
+  categories.** `aiq integration install --launcher` with a control-character
+  path moves from `integration_drift` (exit 6) to `invalid_argument`
+  (exit 2); the other two change code only.
+- **`aiq inbox list --limit` is bounded at 1000**, matching the 1–1000 range
+  every other reporting listing already enforced. A larger value is rejected
+  with `invalid_argument` (exit 2) rather than clamped, so a caller passing
+  `--limit 100000` as a stand-in for "everything" starts failing and must
+  page instead. The default is unchanged at 20.
+- **`aiq reader release` requires proof of holding the lease.** A `reader_id`
+  is a public name, not a credential, so presenting one no longer ends a live
+  lease. A live lease this session cannot prove holding is refused with
+  `reader_held` at exit 4, and the new `aiq reader release --force` is the one
+  deliberate override.
+- **A released reader lease now ages out with the lease it was about.**
+  Expiry is tested before release, so a released row past its own
+  `expires_at` reads `expired` and stands no completion gate down. A year-old
+  declaration can no longer switch a gate off.
+- **`aiq reader release --json` now reports what it did.** `status` gained
+  `already_released`, `forced`, and `not_held` beside `released`, where the
+  command previously reported `released` even for a lease it never held, and
+  the response gained `released` and `declared` booleans beside `replayed`.
+  The envelope stays `v: 1`; see the enum ruling under Changed.
+- **The default session identity changed.** A session is identified by
+  `AIQ_SESSION_ID`, then by a hook payload's `session_id`, then by a host's
+  own variable such as `CLAUDE_CODE_SESSION_ID`, and only then by the
+  previous host-plus-POSIX-session derivation. On a host that now supplies an
+  identity, every lease and claim recorded under the old default reads as a
+  stranger's until it expires or is re-taken.
+- **The `Stop` completion gate's stand-down narrowed twice.** Standing down
+  now requires positive proof that a demonstrably different and still-live
+  session is draining the queue — `reader.live` on `status --json` reports
+  that same proof and is no longer true merely because a lease is held — and
+  a session that released the role still blocks while it holds active claims
+  of its own. A deliberate shared-`AIQ_READER` fan-out consequently keeps
+  blocking every participant instead of standing down for all of them.
+- **Journal storage moves from schema 4 to schema 6**, two steps in one
+  release, migrating on first open with an automatic pre-migration backup.
+  Every AIQ installation that reaches the journal — installed hooks included
+  — must be upgraded. See **Upgrading a shared journal** below.
+- **The `journal.init` capability descriptor is version 3** and no longer
+  advertises the internal `agent-root` scope choice, which
+  [`cli-v1.md`](docs/contracts/cli-v1.md) has always disowned as an unstable
+  hook outside the contract. An agent following the descriptor is no longer
+  told to invoke what the contract refuses to support.
+- **The `reader.release` capability descriptor is version 2**, correcting a
+  command line that omitted `--force`, a purpose that omitted both the proof
+  requirement and the completion signal the command records, and an
+  idempotency claim that an expired lease replays when it in fact reports
+  `not_held`.
+
+### Exit-code and error-code migration
+
+Every failure whose stable `code`, exit status, or both moved in this release
+is listed once below. The taxonomy versions with the distribution, not with
+the JSON envelope: the envelope stays `v: 1` and no capability `version`
+changes for a reclassification. See
+[Exit-code categories](docs/contracts/versioning.md#exit-code-categories).
+
+The shape of the correction is four rules, stated in full in
+[`errors.md`](docs/contracts/errors.md): a stored-data violation is
+`integrity_failed` at exit 5; a filesystem, ownership, permission, or lock
+precondition on journal state is `io_error` at exit 6; a failure that depends
+only on the submitted document is `invalid_document` at exit 2; and a
+malformed caller-supplied scalar is `invalid_argument` at exit 2.
+`state_conflict` at exit 4 is left to the state machine it names.
+
+| Operation | Failure | Was | Now |
+|---|---|---|---|
+| Any journal-opening command | Journal directory, file, backups directory, or lifecycle lock is absent, unopenable, not owned by this user, or not private | `state_conflict`, exit 4 | `io_error`, exit 6 |
+| `journal export OUTPUT` | The finished export cannot be published to its output path | `state_conflict`, exit 4 | `io_error`, exit 6 |
+| `journal check` | Any stored-journal or queue-audit invariant violation — content hashes, append-only event relationships, task identity and numbering, revisions, applications, claims | `state_conflict`, exit 4; and, for four findings, `invalid_argument` exit 2, `not_found` exit 3, or `claim_mismatch` exit 4 | `integrity_failed`, exit 5 |
+| `journal export OUTPUT` | Stored rows, table set, or schema version are corrupt | `state_conflict` exit 4, or `invalid_document` exit 2 | `integrity_failed`, exit 5 |
+| Any journal open | Stored scope metadata does not match the journal being opened | `state_conflict`, exit 4 | `integrity_failed`, exit 5 |
+| Any read path over stored tasks, claims, or events — `status`, `list`, `queue peek`, `task show`, `task history`, `task explain`, the `inbox` reads | A corrupt stored row, a missing referenced row, or a cycle among stored dependencies is found outside `journal check` | `state_conflict`, exit 4 | `integrity_failed`, exit 5 |
+| `inbox apply`, `enqueue`, `task done` | Effect has the wrong arity or JSON type, an unknown task state, a missing or forbidden metadata field, or a duplicate alias or effect target | `state_conflict`, exit 4 | `invalid_document`, exit 2 |
+| `inbox apply`, `enqueue`, `task done` | `document.expect` names a malformed task ID | `invalid_argument`, exit 2 | `invalid_document`, exit 2 |
+| Any ingest form | The request fails canonical event validation | `invalid_document` exit 2 or `state_conflict` exit 4, decided by how the event layer worded the diagnostic | `invalid_document`, exit 2 |
+| `inbox fail`, `inbox needs-input` | The disposition is not a recognized value | `state_conflict`, exit 4 | `invalid_argument`, exit 2 |
+| `inbox list` | `--limit` above 1000 | Accepted, exit 0 | `invalid_argument`, exit 2 |
+| Journal scope resolution | `--git-executable` is a relative path | `invalid_document`, exit 2 | `invalid_argument`, exit 2 |
+| Journal scope resolution | `--git-executable` contains control characters | `state_conflict`, exit 4 | `invalid_argument`, exit 2 |
+| Any scope resolution | `XDG_STATE_HOME` is a relative path | `state_conflict`, exit 4 | `unsupported_environment`, exit 6 |
+| `integration install` | Explicit `--launcher` path contains control characters | `integration_drift`, exit 6 | `invalid_argument`, exit 2 |
+| `integration install` | The resolved launcher is not an executable file | `integration_drift`, exit 6 | `unsupported_environment`, exit 6 |
+| `integration install`, `integration uninstall` | Stored manifest `git_executable` or `python_executable` is not an absolute, control-character-free path | `unsupported_environment`, exit 6 | `integration_drift`, exit 6 |
+| `reader release` | A live lease the caller can neither prove holding nor show to be abandoned | Release recorded, exit 0 | `reader_held`, exit 4 |
+| Any command | An error reaches the CLI carrying no registered code | `state_conflict`, exit 4, or whichever code a substring rule matched | `internal_error`, exit 70 |
+
+Nineteen movements, and the footnotes below name what deliberately did not
+move.
+
+1. `integration plan` and `integration check` are report-only and stay so.
+   All three integration conditions above — and an unavailable launcher,
+   Python runtime, or Git — leave them at exit 0 with
+   `{"action":"block","status":"unsafe",...}` and a `blocked_reason`, never
+   an error envelope.
+2. Every other integration raise site keeps the classification it already
+   produced. `code=` had been inert on the whole integration family, because
+   the classifier tested `HookIntegrationError` and `GuidanceIntegrationError`
+   — both `JournalError` subclasses — before it consulted `code`; the 101
+   sites that set no code now set one, each pinned to what the retired
+   wording rules produced for it.
+3. `invalid_config` and `integration_drift` were documented codes absent from
+   the exit table, so pinning one fell through to `internal_error`. Both are
+   now registered. No classification changed.
+4. `aiq reconcile` no longer decides `skipped` versus `failed` partly by
+   searching a diagnostic for `does not exist`, and `aiq report` no longer
+   recognizes its two recoverable conflicts (`state_conflict` and
+   `not_claimable`) by message substring. Each branch was already reachable
+   by code alone, so nothing observable changes.
+5. `aiq doctor` and `aiq reconcile --user` still exit 1 with no error
+   envelope when the report they write to standard output contains findings.
+6. Read-only empty results are still successes, and `reader_held` is still
+   returned to a non-reader whether or not work happens to be waiting.
+
+### Upgrading a shared journal
+
+**Journal storage moves from schema 4 to schema 6, in two steps taken in one
+release.** Schema 5 records the claiming session's locator on each claim;
+schema 6 adds the host-supplied session identity to that locator and to the
+reader lease. A journal at schema 4 crosses both on its first open by this
+version, which a frozen schema-4 fixture in the test suite exercises
+end-to-end. Migration is forward-only: once it has run, every AIQ older than
+schema 6 refuses that journal with `schema_incompatible` at exit 5.
+
+**What the operator will see.** Every journal-opening CLI command now
+announces the migration on stderr, after writing the pre-migration backup and
+before changing anything:
+
+```text
+aiq: migrating journal schema 4 -> 6 in place: ~/.local/state/aiq/journal.sqlite3 (scope user, selected by --scope auto fallback outside any repository); forward-only, so AIQ installations older than schema 6 can no longer open this journal; pre-migration backup: ~/.local/state/aiq/backups/pre-migration-v4-to-v6-20260730T101112123456Z-9f2c.sqlite3
+```
+
+One line, once, naming the journal, the hop, how the scope was chosen, and a
+backup that already exists by the time the line appears — so an unintended
+migration is recoverable from the line alone. A scope reached by fallback
+says so. The installed capture and completion-gate hooks deliberately stay
+silent and keep migrating without a line, holding their documented stdout
+silence and one-line stderr budgets.
+
+**What the new columns mean for rows written before the upgrade.** A claim
+written before schema 5 carries no locator and a lease or claim written
+before schema 6 carries no session identity, so both read as a stranger's:
+such a lease is reclaimed by expiry or takeover, and such a claim counts
+toward `claims.active` but not `claims.active_this_session`. Nothing is lost
+and nothing needs repairing — the gate still names the claim, and the
+condition clears the moment the row expires or is re-taken. Absent evidence
+always resolves to "not mine" and "not provably foreign", so a pre-migration
+row can never stand a completion gate down.
+
+**Everything that reaches one journal is a sharer, and each fails
+differently:**
+
+| Sharer | Effect while it is still on the old version |
+|---|---|
+| Another AIQ on the same machine (a second pipx or virtualenv install) | Every journal-opening command fails with exit 5 and the usual error envelope |
+| An installation reaching the same journal through a synced or shared home directory | The same, on that machine |
+| An installed `UserPromptSubmit` capture hook bound to the older installation | Capture exits 1 with one `AIQ prompt capture failed` stderr line and records nothing; prompts stop being journaled while the host prompt keeps working |
+| That installation's `Stop` completion gate | The gate fails open by design: it exits 0 with one `AIQ completion gate skipped` stderr line and stops enforcing completion. Whether a host displays stderr from an exit-0 hook is host-dependent |
+
+The last two are the dangerous ones, because neither stops the user.
+
+**Pre-flight, before the first open.** This is not hypothetical: during this
+batch's development a checkout newer than the installed AIQ ran with its
+working directory in a non-repository temporary directory, `auto` resolved to
+user scope, and the user's real journal migrated forward — locking out the
+installed CLI along with its capture hook and completion gate. Three steps,
+in order:
+
+1. **Ask which journal a command would use, before running one that opens
+   it:** `aiq journal path --json`. It resolves the path without opening it.
+2. **Remember that `auto` outside a repository silently means user scope.**
+   `auto` is the default, so a command run from a temporary directory, a
+   home-directory shell, or anywhere else outside the repository you had in
+   mind selects the *user* journal — the shared one every hook is bound to.
+   Name
+   the scope explicitly (`--scope repo` or `--scope user`) whenever the
+   working directory is not obviously inside the repository you intend.
+3. **Inventory every installation that reaches that journal, and upgrade them
+   together.** Use the table above as the checklist: every pipx or virtualenv
+   install, every machine reaching it through a synced home directory, and
+   the capture hook and completion gate bound to each. AIQ cannot see how
+   many installations share a journal, so it cannot warn you; the first open
+   by the new version is what commits the change for all of them.
+
+Afterwards, run `aiq reconcile --user --apply` to re-bind the AIQ-owned
+integration material and validate the migrated journal. If a migration was
+not the one you meant,
+[`recovery.md`](docs/recovery.md#an-unintended-migration) covers diagnosing
+it and rolling back from the backup the announcement named, and
+[`versioning.md`](docs/contracts/versioning.md#journal-schema-and-shared-installations)
+carries the version-to-schema table.
+
 ### Added
 
 - **An in-place journal schema migration now announces itself.** Every
   journal-opening CLI command writes one stderr line before changing
-  anything — `aiq: migrating journal schema 3 -> 6 in place: PATH (scope user,
-  selected by --scope auto fallback outside any repository); forward-only, so
-  AIQ installations older than schema 6 can no longer open this journal;
-  pre-migration backup: PATH` — naming the journal being changed, the schema
-  hop, and the backup, which already exists by the time the line appears. A
-  scope reached by fallback says so, so a journal the caller never chose is
-  visible at the moment it stops being recoverable for free. The installed
-  capture and completion-gate hooks keep migrating silently, holding their
-  documented stdout silence and exactly-one-line stderr budgets.
-  [`recovery.md`](docs/recovery.md#an-unintended-migration) documents
-  diagnosing and rolling back an unintended migration from its backup.
+  anything, naming the journal being changed, the schema hop, how the scope
+  was selected, and the pre-migration backup, which already exists by the
+  time the line appears. A scope reached by fallback says so, so a journal
+  the caller never chose is visible at the moment it stops being recoverable
+  for free. The installed capture and completion-gate hooks keep migrating
+  silently, holding their documented stdout silence and exactly-one-line
+  stderr budgets. See **Upgrading a shared journal** above, and
+  [`recovery.md`](docs/recovery.md#an-unintended-migration) for diagnosing
+  and rolling back an unintended migration from its backup.
 - [Using AIQ with an agent](docs/using-with-an-agent.md) documents the system
   for the person who never types an `aiq` command: the setup check, the
   phrases that file work versus run it, the three bounded run modes and their
@@ -38,35 +247,15 @@ effects documents, capability contracts, and integration manifests.
   carries the same datum as `reader.released_by_self`. A release by any other
   session, and a release under an explicitly configured identity that records
   no locator, keep blocking exactly as before.
-
-- **Releasing the reader role no longer stands the `Stop` gate down while the
-  session still holds claims of its own.** Release is a statement about
-  dispatch and deliberately leaves per-item claims in place, so a session that
-  dequeued a task, released the role, and stopped left that task claimed and
-  unworkable by anyone until its lease expired. Claims now record the session
-  that took them — the claiming process's host and POSIX session id, exactly as
-  reader leases already do, since `owner` defaults to the OS user and cannot
-  separate one person's concurrent sessions — and `status --json` reports the
-  new `claims.active_this_session` count beside the scope-wide
-  `claims.active`. A released session holding any of its own blocks with
-  `AIQ: this session released the reader role but still holds 1 active claim
-  of its own (…) — settle finished work: aiq task done TASK_ID --summary TEXT
-  — or hand it back: aiq claim release CLAIM_ID — list yours: aiq claim list
-  --status active`; releasing with nothing held stands the gate down exactly
-  as before. A concurrent session's claim never blocks this one, and a claim
-  written before schema 5 records no session and blocks nobody.
-  `aiq reader release` reports the same count as `claims_held` and warns on
-  stderr rather than refusing, so a mid-item handoff still works. Journal storage
-  moves to schema 5, migrating on first open with an automatic pre-migration
-  backup; every AIQ installation reaching a migrated journal must be upgraded.
-  The new count inherits the reader lease's known limitation: a session is
-  identified by its POSIX session id, so on a host that gives every shell
-  invocation its own session it reads zero. That is the same condition under
-  which `reader.released_by_self` is never true and `aiq reader release`
-  matches no lease, so the release stand-down is unreachable there and the
-  gate blocks on the plain counts — the refinement fails toward blocking and
-  cannot widen the hole. See the known limitation in
-  [`cli-v1.md`](docs/contracts/cli-v1.md#status).
+- `status --json` reports a new `claims.active_this_session` count beside the
+  scope-wide `claims.active`: of the live claims in this scope, the ones this
+  caller is answerable for. It is what lets a completion gate hold a session
+  to its own claims and only its own, and it is always less than or equal to
+  `claims.active`.
+- `aiq reader release --json` reports a new `declared` field — true only when
+  the release was proved by the holder locator, which is exactly when
+  `reader.released_by_self` becomes true. Read `declared`, not `released`, to
+  decide whether a bounded run recorded a stop signal.
 
 ### Changed
 
@@ -74,42 +263,19 @@ effects documents, capability contracts, and integration manifests.
   at its raise site deliberately preserved whatever the old substring matcher
   produced, including classifications that were accidents of wording. Those
   are now fixed, so scripts that branch on `code` or on the exit status of the
-  operations below must be updated. The substring matcher is gone: a code is
-  never inferred from a message, and an uncoded error reports `internal_error`
-  at exit 70 instead of defaulting to `state_conflict`.
-  - `journal check` now exits 5 with `integrity_failed` for every stored-data
-    violation it finds, instead of exiting 4 with `state_conflict` (or 2, or
-    3) for all but the SQLite integrity and foreign-key checks. A failing
-    `journal check` is now uniformly exit 5.
-  - Filesystem, ownership, permission, and lock failures on journal state now
-    exit 6 with `io_error` instead of exiting 4 with `state_conflict`. This
-    affects any command that opens the journal, its directory, or its
-    lifecycle lock, and the preconditions of `journal export` and
-    `journal destroy`. `io_error` was already a documented code; it is now
-    reachable from journal errors.
-  - Effects-document contract violations — wrong arity, wrong JSON type, an
-    unknown task state, a missing or forbidden metadata field, a duplicate
-    alias or a duplicate effect target — now exit 2 with `invalid_document`
-    instead of exiting 4 with `state_conflict`. `inbox apply`, `enqueue`, and
-    `task done` are affected. Genuine state-machine refusals — a terminal or
-    active task rejecting a mutation, an invalid transition, a self-dependency
-    or self-supersession, a dependency cycle, an already-applied message —
-    keep `state_conflict` at exit 4.
-  - `inbox fail` and `inbox needs-input` reject an unrecognized disposition
-    with `invalid_argument` at exit 2 instead of `state_conflict` at exit 4,
-    matching how they already rejected a malformed claim ID.
-  - A relative `XDG_STATE_HOME` now reports `unsupported_environment` at
-    exit 6 instead of `state_conflict` at exit 4.
-  - A relative `--git-executable`, or one containing control characters, now
-    reports `invalid_argument` at exit 2 for journal scope resolution, which
-    is what the integration commands already reported for the same input.
-  - `journal export` on a journal with corrupt rows, an unexpected table set,
-    or an unreadable schema version now exits 5 with `integrity_failed`
-    instead of exiting 4 or 2.
-  - An ingest request that fails canonical event validation now reports
-    `invalid_document` at exit 2 in every case. It previously reported
-    `invalid_document` or `state_conflict` depending on how the event layer
-    happened to word the diagnostic.
+  affected operations must be updated; every movement is tabulated under
+  **Exit-code and error-code migration** above. The substring matcher is gone:
+  a code is never inferred from a message, and an uncoded error reports
+  `internal_error` at exit 70 instead of defaulting to `state_conflict`. The
+  correction reaches 106 raise sites and covers `journal check`, which is now
+  uniformly exit 5 instead of mixing exits 2, 3, 4, and 5 by which invariant
+  broke; filesystem, ownership, permission, and lock failures on journal
+  state, which move from `state_conflict` to `io_error`; effects-document
+  contract violations, which move from `state_conflict` to `invalid_document`
+  while genuine state-machine refusals keep `state_conflict`; malformed
+  caller-supplied scalars, which move to `invalid_argument`; and ingest's
+  canonical-event validation, which now reports `invalid_document` in every
+  case instead of varying with the event layer's wording.
 - **Breaking: the last three integration classifications are corrected, one of
   them across exit categories.** These were pinned to whatever the substring
   matcher produced and recorded in [`errors.md`](docs/contracts/errors.md) as
@@ -128,6 +294,46 @@ effects documents, capability contracts, and integration manifests.
   was never consulted. Those last two stay at exit 6 and change only the code.
   `integration plan` and `integration check` remain report-only and still exit
   0 with a `blocked_reason` for all three conditions.
+- **Breaking: releasing the reader role no longer stands the `Stop` gate down
+  while the session still holds claims of its own.** Release is a statement
+  about dispatch and deliberately leaves per-item claims in place, so a session
+  that dequeued a task, released the role, and stopped left that task claimed
+  and unworkable by anyone until its lease expired. Claims now record the
+  session that took them, exactly as reader leases record their holder's, and
+  a released session holding any of its own blocks with
+  `AIQ: this session released the reader role but still holds 1 active claim
+  of its own (…) — settle finished work: aiq task done TASK_ID --summary TEXT
+  — or hand it back: aiq claim release CLAIM_ID — list yours: aiq claim list
+  --status active`; releasing with nothing held stands the gate down exactly
+  as before. A concurrent session's claim never blocks this one, and a claim
+  carrying no comparable locator blocks nobody — absent evidence resolves to
+  "not mine", which is the safe direction here because counting an
+  unattributable claim would block a session on state it can neither settle
+  nor release honestly. `aiq reader release` reports the same count as
+  `claims_held` and warns on stderr rather than refusing, so a mid-item
+  handoff still works. Journal storage moves to schema 5 for the new locator;
+  see **Upgrading a shared journal** above.
+- **Breaking: `aiq inbox list --limit` is now bounded at 1000**, matching the
+  1–1000 range every other reporting listing already enforced. It was the one
+  listing with no upper bound, so an unbounded page could materialize an entire
+  large journal in memory. A limit above 1000 is now rejected with
+  `invalid_argument` (exit 2) rather than clamped, so a caller passing a larger
+  value today — `--limit 100000` as a stand-in for "everything" — starts
+  failing and must page instead. The default is unchanged at 20.
+- **`reader release --json`'s `status` enum is extensible, and gaining values
+  is a compatible addition within protocol v1.** This release adds three
+  values to it, and the ruling is that the envelope stays `v: 1`: `v` versions
+  response *shapes* — which fields exist and what they mean — and the shape did
+  not change. [`versioning.md`](docs/contracts/versioning.md#alpha-policy)
+  already admits "a new enum value where the contract explicitly declares the
+  enum extensible" as a compatible addition, and the root cause was that no
+  enum had ever been so declared. [`cli-v1.md`](docs/contracts/cli-v1.md) now
+  declares this one extensible in both places a reader meets it — the general
+  rules and the `reader release` status table — so the next value added to it
+  is compatible by rule rather than by argument. Consumers were already
+  required not to treat an unknown enum value as an existing one; a consumer
+  that does must branch on `declared`, which is a boolean and answers the
+  question a bounded run actually has.
 - `versioning.md` now rules where the exit-code taxonomy is versioned, which it
   previously left contradictory: the taxonomy travels with the distribution,
   not with the JSON envelope, so a reclassification like the one above needs a
@@ -153,26 +359,26 @@ effects documents, capability contracts, and integration manifests.
   Capability descriptors gain the `--lease-seconds`, `ingest`, and config
   override flags they omitted and spell `--state` as repeatable. Behavior,
   JSON shapes, and capability versions are unchanged.
-- The `journal.init` capability descriptor no longer advertises the internal
-  `agent-root` scope choice, which `cli-v1.md` has always disowned as an
-  unstable hook outside the contract; its command now reads
-  `aiq journal init [--scope auto|repo|user] [--label TEXT] [--json]` and its
-  capability `version` is 3. Descriptors are what an agent is told to trust in
-  place of guessing commands, so advertising the choice taught agents to
-  invoke exactly what the contract refuses to support. The parser still
-  accepts `--scope agent-root` and `--agent-root PATH` for internal use.
+- The `journal.init` capability descriptor now names what the command is for.
+  Its command line was `aiq journal init [--json]`, omitting `--scope` and
+  `--label` entirely, so an agent asked to set AIQ up could not learn from the
+  descriptor that initializing a repository journal is the act that opts that
+  repository into hook capture; the purpose now says so and the command line
+  carries both options. **Breaking:** the descriptor also stopped advertising
+  the internal `agent-root` scope choice, which `cli-v1.md` has always
+  disowned as an unstable hook outside the contract, so the command reads
+  `aiq journal init [--scope auto|repo|user] [--label TEXT] [--json]`. The
+  capability `version` moved from 1 to 3 across the two corrections, one for
+  each change to the advertised contract. Descriptors are what an agent
+  is told to trust in place of guessing commands, so advertising the choice
+  taught agents to invoke exactly what the contract refuses to support. The
+  parser still accepts `--scope agent-root` and `--agent-root PATH` for
+  internal use.
 - The packaged agent bootstrap (`AGENTS.md`) now covers the reader lease: one
   session consumes at a time, `reader_held` reports that another session holds
   the role, and `ingest` and `enqueue` stay open to every session.
-- **Breaking:** `aiq inbox list --limit` is now bounded at 1000, matching the
-  1–1000 range every other reporting listing already enforced. It was the one
-  listing with no upper bound, so an unbounded page could materialize an entire
-  large journal in memory. A limit above 1000 is now rejected with
-  `invalid_argument` (exit 2) rather than clamped, so a caller passing a larger
-  value today — `--limit 100000` as a stand-in for "everything" — starts
-  failing and must page instead. The default is unchanged at 20.
-- Installation guidance now recommends a pinned release tag
-  (`@v0.2.0a1`) and labels `@main` the development channel, and the refresh
+- Installation guidance now recommends a pinned release tag and labels `@main`
+  the development channel, and the refresh
   instructions no longer suggest `pipx upgrade aiq-workqueue`, which
   re-resolves the ref already recorded for a Git install and therefore never
   moves a tag-pinned install to a new release; `pipx install --force` with the
@@ -192,77 +398,6 @@ effects documents, capability contracts, and integration manifests.
   repository.
 
 ### Fixed
-
-- **A configured `reader` no longer fails a bounded run silently.** A lease
-  taken under `--reader`, `AIQ_READER`, or `reader` in a configuration file
-  records no session locator by design, so `aiq reader release` succeeded
-  under such an identity while recording nothing the completion gate could
-  read: the command printed `released True` and the gate went on blocking,
-  with no way to tell that outcome from the one that works. `reader release`
-  now reports a new `declared` field — true only when the release was proved
-  by the holder locator, which is exactly when
-  `reader.released_by_self` becomes true — and prints one stderr line naming
-  the configured identity when a successful release recorded no completion
-  signal. [`configuration.md`](docs/configuration.md#reader-identity-and-session-identity)
-  now separates the reader identity from the session identity, which were
-  presented as one precedence list even though `AIQ_READER` feeds only the
-  first, and states that configuring `reader` gives up the per-session
-  answers — including the ability to end a bounded run on its own release.
-
-- **A caller with no session identity can no longer inherit a lease or a claim
-  recorded by a session that had one.** Where a lease or claim carried a
-  host-supplied session token and the caller had none, the comparison fell
-  back to the POSIX pair — but a recorded token means the holder belongs to a
-  host that keeps its own sessions, so the process behind the stored session
-  id has very likely exited, and the kernel reissues those numbers. A caller
-  that happened to land on a reissued id read a stranger's release as its own
-  (standing its gate down), read a dead holder as a live foreign session
-  (standing it down for nobody), counted a stranger's claim as its own, and
-  could release the stranger's live lease. Non-comparable evidence now answers
-  "not mine" and "not provably foreign" instead of falling through, matching
-  the rule the dead-holder probe already followed. The POSIX pair still
-  decides where no token was recorded, so terminals and pre-schema-6 rows are
-  unaffected.
-
-- The `reader.release` capability descriptor described the command as merely
-  giving up the role, at version 1, omitting both that it is the recorded
-  signal a bounded run stops on and the `--force` flag, and claiming an
-  expired lease replays when it in fact reports `not_held`. The descriptor is
-  corrected and is now version 2, so the workflow is discoverable through
-  `aiq capability show reader.release`.
-
-- An effects document with an invalid task ID in `document.expect` reported
-  `invalid_argument` rather than `invalid_document`, though the failure
-  depends only on the submitted document. Both exit 2, so no operator-visible
-  behavior changes. `aiq reconcile` also decided `skipped` versus `failed`
-  partly by searching the diagnostic for `does not exist`, which contradicted
-  the rule that no wording participates in classification; every raise site it
-  can reach already pins `not_found`, so the substring test is removed.
-
-- **Releasing the reader role now requires proof of holding it, and a release
-  ages out with the lease it was about.** A `reader_id` is public — `aiq
-  reader status` prints it and `--reader` accepts it — but release authorized
-  on a matching string, so anyone could run `aiq reader release --reader
-  THEIR_ID` against a live lease, and because release leaves the recorded
-  holder locator in place, the victim's `Stop` gate then read
-  `reader.released_by_self` true and stood down while it still held an active
-  claim and had released nothing. Release now demands the same locator proof
-  `reader.live` demands: a lease that recorded a holder locator may be
-  released only from the session that locator names, and a live lease the
-  caller cannot prove holding is refused with `reader_held` at exit 4. A lease
-  taken under an explicitly configured `--reader` or `AIQ_READER` records no
-  locator by design and is still released by presenting that identity, which
-  is shared authority over the role and, as before, records no declaration.
-  Separately, a released row never expired — `released` was tested before
-  expiry — so a year-old row still stood a gate down, and since POSIX session
-  ids restart low after a reboot an unrelated session could inherit a
-  stranger's "I am done"; expiry is now tested first, so a released lease
-  reads `expired` past its own `expires_at` and stands nothing down. The new
-  `aiq reader release --force` is the one deliberate override: it breaks a
-  live lease this session cannot prove holding — the only recourse for a lease
-  held by a host-identified session that is gone for good, which is never
-  proved dead — and it clears the holder locator so it hands no session a
-  declaration.
 
 - **A session is now identified by an identity that outlives its commands, so
   `aiq reader release` works on an agent host at all.** Session identity was
@@ -290,6 +425,94 @@ effects documents, capability contracts, and integration manifests.
   identity it tried when there was nothing to release. Export `AIQ_SESSION_ID`
   on any host that supplies no identity of its own; see
   [`docs/configuration.md`](docs/configuration.md#session-identity).
+- **A caller with no session identity can no longer inherit a lease or a claim
+  recorded by a session that had one.** Where a lease or claim carried a
+  host-supplied session token and the caller had none, the comparison fell
+  back to the POSIX pair — but a recorded token means the holder belongs to a
+  host that keeps its own sessions, so the process behind the stored session
+  id has very likely exited, and the kernel reissues those numbers. A caller
+  that happened to land on a reissued id read a stranger's release as its own
+  (standing its gate down), read a dead holder as a live foreign session
+  (standing it down for nobody), counted a stranger's claim as its own, and
+  could release the stranger's live lease. Non-comparable evidence now answers
+  "not mine" and "not provably foreign" instead of falling through, matching
+  the rule the dead-holder probe already followed. The POSIX pair still
+  decides where no token was recorded, so terminals and pre-schema-6 rows are
+  unaffected.
+- **A configured `reader` no longer fails a bounded run silently.** A lease
+  taken under `--reader`, `AIQ_READER`, or `reader` in a configuration file
+  records no session locator by design, so `aiq reader release` succeeded
+  under such an identity while recording nothing the completion gate could
+  read: the command printed `released True` and the gate went on blocking,
+  with no way to tell that outcome from the one that works. `reader release`
+  now reports a new `declared` field — true only when the release was proved
+  by the holder locator, which is exactly when
+  `reader.released_by_self` becomes true — and prints one stderr line naming
+  the configured identity when a successful release recorded no completion
+  signal. [`configuration.md`](docs/configuration.md#reader-identity-and-session-identity)
+  now separates the reader identity from the session identity, which were
+  presented as one precedence list even though `AIQ_READER` feeds only the
+  first, and states that configuring `reader` gives up the per-session
+  answers — including the ability to end a bounded run on its own release.
+- **Releasing the reader role now requires proof of holding it, and a release
+  ages out with the lease it was about.** A `reader_id` is public — `aiq
+  reader status` prints it and `--reader` accepts it — but release authorized
+  on a matching string, so anyone could run `aiq reader release --reader
+  THEIR_ID` against a live lease, and because release leaves the recorded
+  holder locator in place, the victim's `Stop` gate then read
+  `reader.released_by_self` true and stood down while it still held an active
+  claim and had released nothing. Release now demands the same locator proof
+  `reader.live` demands: a lease that recorded a holder locator may be
+  released only from the session that locator names, and a live lease the
+  caller cannot prove holding is refused with `reader_held` at exit 4. A lease
+  taken under an explicitly configured `--reader` or `AIQ_READER` records no
+  locator by design and is still released by presenting that identity, which
+  is shared authority over the role and, as before, records no declaration.
+  Separately, a released row never expired — `released` was tested before
+  expiry — so a year-old row still stood a gate down, and since POSIX session
+  ids restart low after a reboot an unrelated session could inherit a
+  stranger's "I am done"; expiry is now tested first, so a released lease
+  reads `expired` past its own `expires_at` and stands nothing down. The new
+  `aiq reader release --force` is the one deliberate override: it breaks a
+  live lease this session cannot prove holding — the only recourse for a lease
+  held by a host-identified session that is gone for good, which is never
+  proved dead — and it clears the holder locator so it hands no session a
+  declaration.
+- The `Stop` completion gate no longer stands down for the session that holds
+  the reader lease. A hook process does not inherit the environment of the
+  agent's shell, so a gate run could derive a different reader identity than
+  the CLI that took the lease and read that session's own lease as a live
+  foreign reader's — silently disabling completion enforcement for exactly the
+  session doing the work. Standing down now requires proof that somebody else
+  is draining the queue: the lease is held, its holder recorded a locator, and
+  that holder is demonstrably a different session that still exists.
+  `reader.live` on `status` reports that same proof and
+  is no longer true merely because a lease is held. One consequence is
+  deliberate and safe: a shared `AIQ_READER` fan-out records no holder
+  locator, so the gate now keeps blocking every participant instead of
+  standing down for all of them. Who may consume is unchanged — `reader_held`
+  refusal, takeover, and release semantics are untouched.
+- The `reader.release` capability descriptor described the command as merely
+  giving up the role, at version 1, omitting both that it is the recorded
+  signal a bounded run stops on and the `--force` flag, and claiming an
+  expired lease replays when it in fact reports `not_held`. The descriptor is
+  corrected and is now version 2, so the workflow is discoverable through
+  `aiq capability show reader.release`.
+- An effects document with an invalid task ID in `document.expect` reported
+  `invalid_argument` rather than `invalid_document`, though the failure
+  depends only on the submitted document. Both exit 2, so no operator-visible
+  behavior changes. `aiq reconcile` also decided `skipped` versus `failed`
+  partly by searching the diagnostic for `does not exist`, which contradicted
+  the rule that no wording participates in classification; every raise site it
+  can reach already pins `not_found`, so the substring test is removed.
+- `aiq report` recognized its two recoverable conflicts — an identical report
+  filed from another origin repository, and a concurrent instance that claimed
+  the message first — by matching a message substring as well as a code. Each
+  phrase is built at exactly one raise site and neither can arrive
+  interpolated from user content, so the wording arms were unreachable; while
+  unreachable, they meant a reworded unrelated diagnostic could have bought
+  the already-filed answer. Both branches now decide on `code` alone, as
+  everything else does, and the raise side of each is covered by a test.
 - **`code=` was inert on every integration error, so install, uninstall, and
   hook-capture failures were still classified by diagnostic wording.** `HookIntegrationError`
   and `GuidanceIntegrationError` are `JournalError` subclasses, but the
@@ -302,34 +525,20 @@ effects documents, capability contracts, and integration manifests.
   and `integration_drift`, both documented but absent from the exit table, are
   registered, so pinning them no longer falls through to `internal_error`. Every
   site was pinned to the code the previous classifier produced for it, so no
-  failure changes code or exit; three inherited misclassifications are preserved
-  deliberately and recorded in [CLI errors](docs/contracts/errors.md) as pending
-  correction. The AST guard that keeps raise sites pinned now derives the error
+  failure changed code or exit at that step; the three inherited
+  misclassifications preserved deliberately there are corrected under Changed
+  above. The AST guard that keeps raise sites pinned now derives the error
   classes from the tree instead of recognizing two names, covers the indirect
   `error_class` raise forms the shared integration engine uses, and keys its
   exemptions on repository-relative paths rather than bare filenames that two
   `journal.py` files shared.
-- The `Stop` completion gate no longer stands down for the session that holds
-  the reader lease. A hook process does not inherit the environment of the
-  agent's shell, so a gate run could derive a different reader identity than
-  the CLI that took the lease and read that session's own lease as a live
-  foreign reader's — silently disabling completion enforcement for exactly the
-  session doing the work. Standing down now requires proof that somebody else
-  is draining the queue: the lease is held, its holder recorded a locator, the
-  locator names this host, that session still exists, and it is not the gate
-  process's own session. `reader.live` on `status` reports that same proof and
-  is no longer true merely because a lease is held. One consequence is
-  deliberate and safe: a shared `AIQ_READER` fan-out records no holder
-  locator, so the gate now keeps blocking every participant instead of
-  standing down for all of them. Who may consume is unchanged — `reader_held`
-  refusal, takeover, and release semantics are untouched.
 - Stable error codes no longer depend on diagnostic wording. `claim_expired`,
   `claim_mismatch`, `revision_conflict`, `integrity_failed`,
   `schema_incompatible`, and `unsupported_environment` are now set at their
   raise sites instead of being recovered by matching substrings of the human
   message, so rewording a diagnostic cannot silently change a documented code
   and a message that merely contains a matched phrase is no longer
-  misclassified. Codes and exit codes are unchanged.
+  misclassified. Codes and exit codes are unchanged at that step.
 - The remaining stable codes are now set at their raise sites too. `not_found`,
   `invalid_argument`, `invalid_document`, `not_claimable`, and `state_conflict`
   were still recovered by matching the human message across two hundred raise
@@ -338,8 +547,7 @@ effects documents, capability contracts, and integration manifests.
   raise site now carries its code, each pinned to the classification callers
   already received, and a test fails on any new site that omits one. The single
   documented exception is ingest's canonical-event validation, whose diagnostic
-  is produced by another layer. Codes and exit codes are unchanged.
-
+  is produced by another layer. Codes and exit codes are unchanged at that step.
 ## [0.2.0a1] - 2026-07-30
 
 ### Breaking changes at a glance
@@ -435,18 +643,6 @@ Changed below.
 - Capability descriptors `task.enqueue`, `task.done`, `task.overview`, and
   `queue.dequeue` for the new operations.
 
-### Fixed
-
-- `aiq reader status` and the `reader` block of `aiq status` report an
-  unexpired lease whose holder is provably gone as `stale` rather than
-  `held`, so an abandoned lease no longer shows a free queue as owned.
-  Claim, release, and takeover already decided liveness for themselves
-  and are unchanged.
-- Hook capture no longer loses a message when the journal is busy: lock
-  acquisition on the capture path is bounded well below the host's hook
-  timeout and reports a retryable `contention` failure with one stderr
-  line, instead of blocking until the host kills the hook silently.
-
 ### Changed
 
 - The `Stop` completion gate now blocks the reader rather than every session.
@@ -539,6 +735,15 @@ Changed below.
 
 ### Fixed
 
+- `aiq reader status` and the `reader` block of `aiq status` report an
+  unexpired lease whose holder is provably gone as `stale` rather than
+  `held`, so an abandoned lease no longer shows a free queue as owned.
+  Claim, release, and takeover already decided liveness for themselves
+  and are unchanged.
+- Hook capture no longer loses a message when the journal is busy: lock
+  acquisition on the capture path is bounded well below the host's hook
+  timeout and reports a retryable `contention` failure with one stderr
+  line, instead of blocking until the host kills the hook silently.
 - Claude Code capture no longer ingests harness-injected prompts as user
   messages: a prompt that starts with `<task-notification` or is one whole
   `<system-reminder>` block (after stripping surrounding whitespace) is
