@@ -146,6 +146,15 @@ Without the release, the gate would have blocked and pushed the agent back to
 the two remaining tasks. That is the difference between "do one" and "do them
 all", and it is enforced, not merely requested.
 
+> **Known limitation.** The release is recognized only when the agent's
+> commands and the host's `Stop` hook run in the same operating-system
+> session. Hosts that run each shell command in a session of its own —
+> Claude Code does — leave the release unrecognized: the command still
+> reports `released`, but the gate blocks anyway and the agent is handed the
+> remaining tasks. Until that is fixed, treat "just the one" as a request the
+> agent should honor rather than a limit the gate enforces, and expect one
+> block line before it stops.
+
 ### 2. A fixed batch
 
 > Work through three AIQ tasks and then stop for review.
@@ -194,8 +203,17 @@ $ aiq dequeue --json
 {"items":[],"reader_acquired":false,"v":1}
 ```
 
-`items == []` is the stop condition. No release is needed: with nothing
-runnable, the gate exits 0 silently and the session ends on its own.
+`items == []` ends the loop, but it is not the whole stop condition. The gate
+counts unapplied messages and active claims as runnable work too, and every
+prompt you send is captured as a message — so a session that drained the queue
+without settling its inbox is still holding work:
+
+```text
+AIQ: runnable work remains: 1 unapplied message — run aiq status
+```
+
+The full condition is an empty `dequeue` *and* an empty inbox *and* no claims
+of its own left open. `aiq status` shows all three.
 
 But `items == []` is ambiguous on its own — it means "nothing was handed out",
 which covers both a finished queue and a queue where everything left is
@@ -233,9 +251,9 @@ blocked   [DEMO: TASK-2]	p0	Ship the integration	blocked by TASK-1
 
 | You want | Say | Stops on |
 |---|---|---|
-| A single unit of work, then review | "just the one" | the reader release |
-| A bounded batch | "three tasks, then stop" | the reader release |
-| Everything that can be done | "drain the queue" | `items == []` |
+| A single unit of work, then review | "just the one" | the reader release (see the limitation above) |
+| A bounded batch | "three tasks, then stop" | the reader release (see the limitation above) |
+| Everything that can be done | "drain the queue" | an empty `dequeue`, inbox, and claim set |
 
 Any mode you did not name is a guess. "Work on AIQ tasks" is the ambiguous
 phrasing; add the bound.
