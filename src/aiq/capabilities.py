@@ -269,10 +269,16 @@ _CAPABILITIES: dict[str, dict[str, Any]] = {
         idempotency="refuses to replace an existing output",
     ),
     "journal.init": _capability(
-        "Create or validate the selected local journal.",
-        "aiq journal init [--json]",
+        "Create or validate the selected local journal; initializing a "
+        "repository journal is the act that opts that repository into "
+        "hook capture.",
+        (
+            "aiq journal init [--scope auto|repo|user|agent-root] "
+            "[--label TEXT] [--json]"
+        ),
         mutates=True,
         idempotency="safe retry",
+        version=2,
     ),
     "journal.path": _capability(
         "Resolve the selected journal location without opening it.",
