@@ -3,7 +3,13 @@
 Status: alpha contract.
 
 AIQ separates human diagnostics from stable machine classification. Error
-messages may improve without changing the error code.
+messages may improve without changing the error code: a code is chosen at the
+raise site that detects the failure and travels with the error, so it is
+independent of the wording, punctuation, and interpolated values of the
+diagnostic. A residual substring fallback still classifies journal errors
+raised outside `aiq.journal` and `aiq.queue`, and those whose text is
+forwarded from another layer; it is transitional, and no consumer should
+infer a code from message wording.
 
 ## JSON form
 
@@ -92,21 +98,31 @@ a compatible AIQ version; they must never be silently retried as mutations.
 | `journal export OUTPUT` | Output path names no file, an invalid parent, or managed state | `invalid_argument` |
 | `journal export OUTPUT` | Output already exists | `state_conflict` |
 | `inbox claim`, `queue next`, `dequeue` | Another live session holds the reader lease, empty queue included | `reader_held` |
+| `reader acquire` | Another live session holds the reader lease | `reader_held` |
 | `task done` | A named task is merely `ready` and another live session holds the reader lease | `reader_held` |
 | `reader release` | Another live session holds the reader lease | `reader_held` |
 | `inbox apply` | Effects document references an unknown local alias | `invalid_document` |
 | `journal destroy --confirm` | Missing, wrong, or stale inventory token | `state_conflict` |
 | Integration install/uninstall | Owned configuration or manifest has drifted | `integration_drift` |
-| Integration lifecycle | Explicit `--launcher` is relative | `invalid_argument` |
-| Integration lifecycle | Explicit `--git-executable` is relative or contains control characters | `invalid_argument` |
-| Integration lifecycle | Required launcher or host facility is unavailable | `unsupported_environment` |
-| Integration lifecycle | Required Python runtime is unavailable or not executable | `unsupported_environment` |
-| Integration lifecycle | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
+| Integration install | Explicit `--launcher` is relative | `invalid_argument` |
+| Integration install | Explicit `--git-executable` is relative or contains control characters | `invalid_argument` |
+| Integration install | Required launcher or host facility is unavailable | `unsupported_environment` |
+| Integration install | Required Python runtime is unavailable or not executable | `unsupported_environment` |
+| Integration install | Git cannot be discovered, is unavailable, or is not executable | `unsupported_environment` |
 | Automatic or repo scope | Git is unavailable or repository discovery fails unexpectedly | `unsupported_environment` |
 | Configuration loading | Unknown, forbidden, malformed, or out-of-range setting | `invalid_config` |
 | `report` | No `--to` and no configured `dev_report_repo` | `invalid_config` |
 | `report` | Target directory or its initialized journal is absent | `not_found` |
 | `report` | Over-length `--summary` or `--detail`, or out-of-range `--priority` | `invalid_argument` |
+
+The integration rows above describe `install`, which is the verb that must
+resolve an executable before it writes. `plan` and `check` are report-only:
+the same conditions — a relative or control-character `--launcher` or
+`--git-executable`, and an unavailable launcher, Python runtime, or Git —
+leave them at exit 0 with `{"action":"block","status":"unsafe",...}` and a
+`blocked_reason`, never an error envelope. `uninstall` accepts neither
+option and resolves no executable, so it rejects them as
+`invalid_argument` from argument parsing alone.
 
 Read-only empty results are not failures. For the session holding the reader
 lease, `inbox claim` returns null claim and message fields, and queue

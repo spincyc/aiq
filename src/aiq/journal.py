@@ -834,12 +834,14 @@ def _git_path(
             status = executable.stat()
         except OSError as error:
             raise JournalError(
-                f"Git is unavailable: {raw_executable}"
+                f"Git is unavailable: {raw_executable}",
+                code="unsupported_environment",
             ) from error
         if not stat.S_ISREG(status.st_mode) or not os.access(executable, os.X_OK):
             raise JournalError(
                 f"Git is unavailable: not an executable regular file: "
-                f"{raw_executable}"
+                f"{raw_executable}",
+                code="unsupported_environment",
             )
         command = raw_executable
 
@@ -859,18 +861,26 @@ def _git_path(
         )
     except OSError as error:
         raise JournalError(
-            "Git is unavailable; repository scope cannot be resolved"
+            "Git is unavailable; repository scope cannot be resolved",
+            code="unsupported_environment",
         ) from error
     if result.returncode:
         if "not a git repository" in result.stderr.lower():
-            raise _NotGitRepository(f"{cwd} is not inside a Git repository")
+            raise _NotGitRepository(
+                f"{cwd} is not inside a Git repository",
+                code="unsupported_environment",
+            )
         raise JournalError(
             "Git could not resolve repository scope "
-            f"(exit status {result.returncode})"
+            f"(exit status {result.returncode})",
+            code="unsupported_environment",
         )
     raw_path = result.stdout.strip()
     if not raw_path:
-        raise JournalError("Git returned an empty repository path")
+        raise JournalError(
+            "Git returned an empty repository path",
+            code="unsupported_environment",
+        )
     path = Path(raw_path)
     if not path.is_absolute():
         path = cwd / path
@@ -900,7 +910,10 @@ def resolve_scope(
     ).resolve()
 
     if scope_kind not in {"auto", "repo", "user", "agent-root"}:
-        raise JournalError(f"unsupported journal scope: {scope_kind}")
+        raise JournalError(
+            f"unsupported journal scope: {scope_kind}",
+            code="unsupported_environment",
+        )
 
     if scope_kind in {"auto", "repo"}:
         try:
@@ -1071,7 +1084,8 @@ def _require_sqlite_runtime() -> None:
         found = ".".join(str(part) for part in sqlite3.sqlite_version_info)
         required = ".".join(str(part) for part in SQLITE_MINIMUM_VERSION)
         raise JournalError(
-            f"SQLite {required} or newer is required; found {found}"
+            f"SQLite {required} or newer is required; found {found}",
+            code="unsupported_environment",
         )
 
     connection: sqlite3.Connection | None = None
@@ -1087,13 +1101,17 @@ def _require_sqlite_runtime() -> None:
         ).fetchone()
     except sqlite3.Error as error:
         raise JournalError(
-            "SQLite JSON functions are required but unavailable"
+            "SQLite JSON functions are required but unavailable",
+            code="unsupported_environment",
         ) from error
     finally:
         if connection is not None:
             connection.close()
     if features != (1, "array", 1):
-        raise JournalError("SQLite JSON functions returned incompatible results")
+        raise JournalError(
+            "SQLite JSON functions returned incompatible results",
+            code="unsupported_environment",
+        )
 
 
 def _configure(connection: sqlite3.Connection) -> None:
@@ -1108,7 +1126,8 @@ def _enable_wal(connection: sqlite3.Connection) -> None:
     mode = str(row[0]).lower() if row else ""
     if mode != "wal":
         raise JournalError(
-            "SQLite WAL mode is unavailable; journals require a local filesystem"
+            "SQLite WAL mode is unavailable; journals require a local filesystem",
+            code="unsupported_environment",
         )
 
 
@@ -1333,7 +1352,8 @@ def _migration_backup(
         integrity = destination.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
             raise JournalError(
-                f"pre-migration snapshot integrity check failed: {integrity}"
+                f"pre-migration snapshot integrity check failed: {integrity}",
+                code="integrity_failed",
             )
         destination.close()
         source.close()
@@ -1430,11 +1450,13 @@ def _initialize_journal_locked(
                 if version > SCHEMA_VERSION:
                     raise JournalError(
                         f"journal schema {version} is newer than supported "
-                        f"schema {SCHEMA_VERSION}"
+                        f"schema {SCHEMA_VERSION}",
+                        code="schema_incompatible",
                     )
                 if version < 1:
                     raise JournalError(
-                        f"unsupported journal schema version: {version}"
+                        f"unsupported journal schema version: {version}",
+                        code="schema_incompatible",
                     )
                 _validate_metadata(
                     connection,
@@ -1502,7 +1524,8 @@ def _initialize_journal_locked(
                         ).fetchall()
                         if foreign_keys:
                             raise JournalError(
-                                "journal foreign-key check failed during migration"
+                                "journal foreign-key check failed during migration",
+                                code="integrity_failed",
                             )
                         connection.commit()
                     except Exception:
@@ -1933,7 +1956,10 @@ def ingest_message(
         return result
     except sqlite3.IntegrityError as error:
         connection.rollback()
-        raise JournalError(f"journal integrity violation: {error}") from error
+        raise JournalError(
+            f"journal integrity violation: {error}",
+            code="integrity_failed",
+        ) from error
     except sqlite3.OperationalError as error:
         connection.rollback()
         raise JournalError(
@@ -2155,10 +2181,16 @@ def _check_journal_locked(scope: JournalScope) -> dict[str, Any]:
         )
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
-            raise JournalError(f"SQLite integrity check failed: {integrity}")
+            raise JournalError(
+                f"SQLite integrity check failed: {integrity}",
+                code="integrity_failed",
+            )
         foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
         if foreign_keys:
-            raise JournalError("SQLite foreign-key check failed")
+            raise JournalError(
+                "SQLite foreign-key check failed",
+                code="integrity_failed",
+            )
         message_count = connection.execute(
             "SELECT COUNT(*) FROM messages"
         ).fetchone()[0]

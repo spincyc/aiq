@@ -1448,10 +1448,16 @@ def release_claim(
             (claim_id,),
         ).fetchone()
         if not claim:
-            raise JournalError(f"claim is not active: {claim_id}")
+            raise JournalError(
+                f"claim is not active: {claim_id}",
+                code="claim_mismatch",
+            )
         if claim["release_disposition"] is not None:
             if claim["release_disposition"] != "released":
-                raise JournalError(f"claim is not active: {claim_id}")
+                raise JournalError(
+                    f"claim is not active: {claim_id}",
+                    code="claim_mismatch",
+                )
             connection.commit()
             return {
                 "status": "released",
@@ -1468,7 +1474,10 @@ def release_claim(
                 now_us=effective_now,
             )
             connection.commit()
-            raise JournalError(f"claim has expired: {claim_id}")
+            raise JournalError(
+                f"claim has expired: {claim_id}",
+                code="claim_expired",
+            )
         sequence = _append_claim_release(
             connection,
             claim,
@@ -1542,10 +1551,16 @@ def dispose_message(
             (claim_id, message_id),
         ).fetchone()
         if claim is None:
-            raise JournalError(f"message claim does not match: {claim_id}")
+            raise JournalError(
+                f"message claim does not match: {claim_id}",
+                code="claim_mismatch",
+            )
         if claim["release_disposition"] is not None:
             if claim["release_disposition"] != disposition:
-                raise JournalError(f"message claim is not active: {claim_id}")
+                raise JournalError(
+                    f"message claim is not active: {claim_id}",
+                    code="claim_mismatch",
+                )
             event = connection.execute(
                 """
                 SELECT sequence, payload_json
@@ -1578,7 +1593,10 @@ def dispose_message(
                 now_us=effective_now,
             )
             connection.commit()
-            raise JournalError(f"message claim has expired: {claim_id}")
+            raise JournalError(
+                f"message claim has expired: {claim_id}",
+                code="claim_expired",
+            )
         _append_claim_release(
             connection,
             claim,
@@ -2313,7 +2331,8 @@ def _apply_effects_connected(
             )
         if existing["claim_id"] != claim_id:
             raise JournalError(
-                "application replay claim does not match the original claim"
+                "application replay claim does not match the original claim",
+                code="claim_mismatch",
             )
         result = json.loads(existing["result_json"])
         result["replayed"] = True
@@ -2352,10 +2371,16 @@ def _apply_effects_connected(
         (claim_id, message_id),
     ).fetchone()
     if not message_claim:
-        raise JournalError(f"message claim is not active: {claim_id}")
+        raise JournalError(
+            f"message claim is not active: {claim_id}",
+            code="claim_mismatch",
+        )
     effective_now = _now_us()
     if message_claim["expires_at_us"] <= effective_now:
-        raise JournalError(f"message claim has expired: {claim_id}")
+        raise JournalError(
+            f"message claim has expired: {claim_id}",
+            code="claim_expired",
+        )
     message_state = message["state_event_type"].removeprefix("message.")
     if message_state == "applied":
         raise JournalError(
@@ -2378,7 +2403,8 @@ def _apply_effects_connected(
         if actual != revision:
             raise JournalError(
                 f"task revision changed: {task_id}: "
-                f"expected {revision}, found {actual}"
+                f"expected {revision}, found {actual}",
+                code="revision_conflict",
             )
 
     aliases: dict[str, str] = {}
@@ -3425,7 +3451,8 @@ def audit_queue(connection: sqlite3.Connection) -> dict[str, int]:
         ).fetchone()
         if not applied_claim:
             raise JournalError(
-                f"application claim mismatch: {application['message_id']}"
+                f"application claim mismatch: {application['message_id']}",
+                code="claim_mismatch",
             )
 
     task_rows = connection.execute(

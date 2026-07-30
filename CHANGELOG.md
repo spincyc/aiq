@@ -30,6 +30,13 @@ effects documents, capability contracts, and integration manifests.
   locator, so the gate now keeps blocking every participant instead of
   standing down for all of them. Who may consume is unchanged — `reader_held`
   refusal, takeover, and release semantics are untouched.
+- Stable error codes no longer depend on diagnostic wording. `claim_expired`,
+  `claim_mismatch`, `revision_conflict`, `integrity_failed`,
+  `schema_incompatible`, and `unsupported_environment` are now set at their
+  raise sites instead of being recovered by matching substrings of the human
+  message, so rewording a diagnostic cannot silently change a documented code
+  and a message that merely contains a matched phrase is no longer
+  misclassified. Codes and exit codes are unchanged.
 
 ## [0.2.0a1] - 2026-07-30
 

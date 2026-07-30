@@ -2,19 +2,30 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import support
 from aiq.cli import (
     CONFIG_OUTPUT_COMMANDS,
     _classify_error,
+    _classify_journal_error,
     _versioned,
     build_parser,
 )
 from aiq.integrations.codex import CodexIntegrationError
+from aiq.journal import (
+    SCHEMA_VERSION,
+    JournalError,
+    check_journal,
+    ingest_message,
+    resolve_scope,
+)
+from aiq.queue import _now_us, apply_effects, claim_message, release_claim
 JSON_COMMAND_PATHS = {
     tuple(name.split("."))
     for name in """
@@ -678,6 +689,178 @@ class CliProtocolTests(unittest.TestCase):
         self.assertNotIn("\x1b", completed.stderr)
         self.assertNotIn("\r", completed.stderr)
         self.assertNotIn("\t", completed.stderr)
+
+
+class JournalErrorCodeIdentityTests(unittest.TestCase):
+    """Stable codes come from the raise site, not from message wording.
+
+    Each test provokes the real raise site and reads ``JournalError.code``
+    directly, so rewording a diagnostic cannot silently change the
+    documented code. Classification is asserted too, pinning the
+    code-to-exit mapping without going through the substring fallback.
+    """
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        self.environment = patch.dict(
+            os.environ,
+            {"XDG_STATE_HOME": str(self.root / "state")},
+        )
+        self.environment.start()
+        agent_root = self.root / "agent"
+        agent_root.mkdir()
+        self.scope = resolve_scope(
+            "agent-root",
+            cwd=self.root,
+            agent_root=agent_root,
+        )
+
+    def tearDown(self) -> None:
+        self.environment.stop()
+        self.temporary_directory.cleanup()
+
+    def assert_raise_site_code(
+        self,
+        error: JournalError,
+        code: str,
+        exit_code: int,
+    ) -> None:
+        self.assertEqual(error.code, code, str(error))
+        self.assertEqual(_classify_journal_error(error), (code, exit_code))
+
+    def claimed_message(self, content: str, **kwargs: object) -> tuple[str, str]:
+        message = ingest_message(self.scope, content, cwd=str(self.root))
+        claim = claim_message(
+            self.scope,
+            owner_id="code-identity-test",
+            message_id=message.message_id,
+            **kwargs,
+        )
+        self.assertIsNotNone(claim)
+        return message.message_id, claim["claim_id"]
+
+    def test_unsupported_environment_is_set_at_the_raise_site(self) -> None:
+        with self.assertRaises(JournalError) as raised:
+            resolve_scope("nowhere", cwd=self.root)
+        self.assert_raise_site_code(
+            raised.exception, "unsupported_environment", 6
+        )
+
+    def test_schema_incompatible_is_set_at_the_raise_site(self) -> None:
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        connection = sqlite3.connect(self.scope.journal_path)
+        try:
+            connection.execute(
+                "UPDATE journal_metadata SET value = ? "
+                "WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION + 1),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(JournalError) as raised:
+            check_journal(self.scope)
+        self.assert_raise_site_code(
+            raised.exception, "schema_incompatible", 5
+        )
+
+    def test_integrity_failed_is_set_at_the_raise_site(self) -> None:
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        connection = sqlite3.connect(self.scope.journal_path)
+        try:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute(
+                """
+                INSERT INTO events(
+                  event_id,
+                  occurred_at,
+                  event_type,
+                  message_id,
+                  payload_json
+                )
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt_dangling",
+                    "2026-01-01T00:00:00Z",
+                    "message.ingested",
+                    "msg_missing",
+                    "{}",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(JournalError) as raised:
+            check_journal(self.scope)
+        self.assert_raise_site_code(raised.exception, "integrity_failed", 5)
+
+    def test_claim_mismatch_is_set_at_the_raise_site(self) -> None:
+        ingest_message(self.scope, "create the journal", cwd=str(self.root))
+        with self.assertRaises(JournalError) as raised:
+            release_claim(self.scope, "clm_" + "0" * 32)
+        self.assert_raise_site_code(raised.exception, "claim_mismatch", 4)
+
+    def test_claim_expired_is_set_at_the_raise_site(self) -> None:
+        _, claim_id = self.claimed_message("expire this claim", lease_seconds=1)
+        with self.assertRaises(JournalError) as raised:
+            release_claim(
+                self.scope,
+                claim_id,
+                now_us=_now_us() + 60 * 1_000_000,
+            )
+        self.assert_raise_site_code(raised.exception, "claim_expired", 4)
+
+    def test_revision_conflict_is_set_at_the_raise_site(self) -> None:
+        message_id, claim_id = self.claimed_message("create a task")
+        created = apply_effects(
+            self.scope,
+            message_id,
+            {
+                "v": 1,
+                "expect": {},
+                "effects": [["create", "$task", {"title": "Pin the code"}]],
+            },
+            claim_id=claim_id,
+        )
+        task_id = created["aliases"]["$task"]
+
+        stale_id, stale_claim = self.claimed_message("use a stale revision")
+        with self.assertRaises(JournalError) as raised:
+            apply_effects(
+                self.scope,
+                stale_id,
+                {
+                    "v": 1,
+                    "expect": {task_id: 99},
+                    "effects": [["update", task_id, {"priority": 1}]],
+                },
+                claim_id=stale_claim,
+            )
+        self.assert_raise_site_code(raised.exception, "revision_conflict", 4)
+
+    def test_explicit_code_outranks_a_matching_message_substring(self) -> None:
+        message = "task revision changed: TASK-1: expected 1, found 2"
+        self.assertEqual(
+            _classify_journal_error(JournalError(message)),
+            ("revision_conflict", 4),
+        )
+        self.assertEqual(
+            _classify_journal_error(JournalError(message, code="not_found")),
+            ("not_found", 3),
+        )
+        self.assertEqual(
+            _classify_journal_error(
+                JournalError(
+                    "the reader lease is held; ingest stays open",
+                    code="reader_held",
+                )
+            ),
+            ("reader_held", 4),
+        )
 
 
 if __name__ == "__main__":

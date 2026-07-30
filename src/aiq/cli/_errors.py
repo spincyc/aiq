@@ -12,15 +12,22 @@ from aiq.journal import JournalError
 
 # Stable machine-readable codes set at JournalError raise sites, mapped to
 # their (code, exit) classification. Codes take precedence over the substring
-# fallback rules below.
+# fallback rules below, so a diagnostic can be reworded without changing the
+# documented code.
 _JOURNAL_ERROR_CODE_EXITS: dict[str, tuple[str, int]] = {
+    "claim_expired": ("claim_expired", 4),
+    "claim_mismatch": ("claim_mismatch", 4),
     "contention": ("contention", 4),
+    "integrity_failed": ("integrity_failed", 5),
     "invalid_argument": ("invalid_argument", 2),
     "invalid_document": ("invalid_document", 2),
     "not_claimable": ("not_claimable", 4),
     "not_found": ("not_found", 3),
     "reader_held": ("reader_held", 4),
+    "revision_conflict": ("revision_conflict", 4),
+    "schema_incompatible": ("schema_incompatible", 5),
     "state_conflict": ("state_conflict", 4),
+    "unsupported_environment": ("unsupported_environment", 6),
 }
 
 
@@ -28,6 +35,18 @@ def _classify_journal_error(error: JournalError) -> tuple[str, int]:
     explicit = _JOURNAL_ERROR_CODE_EXITS.get(getattr(error, "code", None))
     if explicit is not None:
         return explicit
+    # TRANSITIONAL FALLBACK. Every raise site that produces `claim_expired`,
+    # `claim_mismatch`, `revision_conflict`, `integrity_failed`,
+    # `schema_incompatible`, or `unsupported_environment` in `aiq.journal`
+    # and `aiq.queue` now sets `code=` explicitly, so for those the rules
+    # below are belt-and-braces. They remain load-bearing for raise sites
+    # this pass could not reach: JournalErrors raised outside those two
+    # modules (`aiq.privacy` still raises `integrity_failed` and
+    # `schema_incompatible` by message), errors whose message is forwarded
+    # verbatim from another layer (`JournalError(str(error))` wrapping an
+    # `EventError`), and the remaining codes, which are only partly pinned
+    # at their raise sites. Prefer `code=` at any new raise site; these
+    # rules match the human diagnostic and must not be relied upon.
     message = str(error).lower()
     if "not found" in message or "does not exist" in message:
         return "not_found", 3
